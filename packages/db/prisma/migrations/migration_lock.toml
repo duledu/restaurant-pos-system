@@ -1,0 +1,4 @@
+# Ovaj fajl se ne sme ručno menjati.
+# Trebalo bi da bude commitovan u kontrolu verzija.
+
+provider = "postgresql"

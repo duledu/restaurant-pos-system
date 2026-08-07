@@ -1,0 +1,10 @@
+{
+  "name": "@rcs/auth",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "dependencies": {
+    "@rcs/db": "*",
+    "jose": "^5.9.0"
+  }
+}

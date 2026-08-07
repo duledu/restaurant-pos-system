@@ -1,0 +1,565 @@
+// Restaurant Control System — Prisma Schema
+// FAZA 1: Project foundation — Tenant, Restaurant, Location, User/Employee,
+// RBAC, Device, AuditLog.
+//
+// NAMERNO OGRANIČENO NA FAZU 1: Menu/Table/Order/Inventory/... modeli se
+// dodaju u narednim fazama (vidi docs/01-RCS-Plan-v2-MVP.md, tačka 9 —
+// aditivne migracije, bez menjanja ovde definisanih tabela).
+//
+// Odluke donete pri pregledu skice iz plana (tačka 6 zahteva):
+// - Referential actions: FK ka Restaurant/Tenant/Location su RESTRICT
+//   (podrazumevano) — brisanje restorana/lokacije sa postojećim zaposlenima
+//   ili uređajima mora biti eksplicitna, svesna operacija, ne kaskadno
+//   brisanje poslovne istorije. Join tabele (EmployeeLocation, RolePermission,
+//   EmployeeRole) koriste CASCADE jer je njihov jedini smisao veza — brisanje
+//   Employee-a ili Role-a treba da povuče i te veze.
+// - Employee.userId je nullable + onDelete: SetNull: zaposleni (npr. konobar
+//   sa samo PIN pristupom) ne mora imati User (email/lozinka) nalog, i
+//   brisanje login naloga ne sme obrisati istoriju zaposlenog.
+// - UserRole iz skice preimenovan u EmployeeRole: veza je zapravo
+//   Employee<->Role, ne User<->Role (User je samo login identitet); tačan
+//   naziv sprečava buduću zabunu.
+// - Nema soft-delete (deletedAt) na ovim entitetima — koriste se eksplicitni
+//   status enumi (RestaurantStatus, EmployeeStatus...), u skladu sa pravilom
+//   "soft delete samo gde je prikladno" iz v1 plana.
+// - Email se čuva već normalizovan (lowercase) na aplikativnom sloju —
+//   Postgres @unique je case-sensitive; ne uvodimo citext ekstenziju za MVP.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TENANT / RESTAURANT / LOCATION
+// ─────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String       @id @default(uuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  restaurants Restaurant[]
+
+  @@index([status])
+  @@map("tenants")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+model Restaurant {
+  id        String           @id @default(uuid())
+  tenantId  String
+  name      String
+  legalName String?
+  timezone  String           @default("Europe/Belgrade")
+  currency  String           @default("RSD")
+  status    RestaurantStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  createdBy String?
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  locations Location[]
+  employees Employee[]
+  roles     Role[]
+  devices   Device[]
+  menuCategories MenuCategory[]
+  menuItems      MenuItem[]
+  floors    Floor[]
+  shifts    Shift[]
+  orders    Order[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("restaurants")
+}
+
+enum RestaurantStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+model Location {
+  id           String   @id @default(uuid())
+  restaurantId String
+  name         String
+  address      String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant        Restaurant         @relation(fields: [restaurantId], references: [id])
+  devices           Device[]
+  employeeLocations EmployeeLocation[]
+  floors            Floor[]
+  shifts            Shift[]
+  orders            Order[]
+
+  @@index([restaurantId])
+  @@map("locations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// USERS / EMPLOYEES / RBAC
+// ─────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  employee Employee?
+
+  @@map("users")
+}
+
+model Employee {
+  id                String         @id @default(uuid())
+  restaurantId      String
+  userId            String?        @unique
+  firstName         String
+  lastName          String
+  pinHash           String?
+  failedPinAttempts Int            @default(0)
+  pinLockedUntil    DateTime?
+  status            EmployeeStatus @default(ACTIVE)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  createdBy         String?
+
+  restaurant Restaurant         @relation(fields: [restaurantId], references: [id])
+  user       User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  roles      EmployeeRole[]
+  locations  EmployeeLocation[]
+
+  @@index([restaurantId])
+  @@index([status])
+  @@map("employees")
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+// M:N Employee <-> Location (na kojim lokacijama zaposleni sme da radi).
+model EmployeeLocation {
+  employeeId String
+  locationId String
+  assignedAt DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([employeeId, locationId])
+  @@index([locationId])
+  @@map("employee_locations")
+}
+
+model Role {
+  id           String   @id @default(uuid())
+  restaurantId String
+  name         String // OWNER, ADMIN, MANAGER, WAITER, KITCHEN, BAR, INVENTORY_MANAGER, ili custom
+  isSystem     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant  Restaurant       @relation(fields: [restaurantId], references: [id])
+  permissions RolePermission[]
+  employees   EmployeeRole[]
+
+  @@unique([restaurantId, name])
+  @@index([restaurantId])
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid())
+  code        String  @unique // npr. "order.void", "inventory.adjust", "price.edit"
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// Employee <-> Role (u skici je bila nazvana "UserRole" — ispravljeno,
+// vidi napomenu na vrhu fajla).
+model EmployeeRole {
+  employeeId String
+  roleId     String
+  assignedAt DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  role     Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([employeeId, roleId])
+  @@index([roleId])
+  @@map("employee_roles")
+}
+
+model Device {
+  id           String     @id @default(uuid())
+  restaurantId String
+  locationId   String?
+  name         String
+  deviceType   DeviceType @default(POS)
+  registeredAt DateTime   @default(now())
+  isActive     Boolean    @default(true)
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+  location   Location?  @relation(fields: [locationId], references: [id])
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@map("devices")
+}
+
+enum DeviceType {
+  POS
+  KDS
+  BAR_DISPLAY
+  ADMIN
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AUDIT LOG (append-only — bez update/delete kroz aplikativni sloj;
+// u produkciji se dodatno sprovodi REVOKE UPDATE/DELETE na DB nivou za
+// aplikativnog korisnika, van obima Prisma šeme)
+// ─────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  restaurantId  String
+  userId        String?
+  role          String?
+  entityType    String
+  entityId      String
+  action        String
+  previousValue Json?
+  newValue      Json?
+  reason        String?
+  ipAddress     String?
+  deviceId      String?
+  createdAt     DateTime @default(now())
+
+  @@index([restaurantId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 2 — MENU (kategorije + artikli)
+//
+// Menu model NAMERNO sadrži više polja nego što MVP UI izlaže (SKU, barcode,
+// purchasePrice, image, trackStock, minimumStock) — ovo su "future-ready"
+// kolone dogovorene u planu (docs/01-RCS-Plan-v2-MVP.md, tačka 9): ne
+// implementiramo Inventory/Recipe/Supplier module sada, ali ne želimo da
+// njihovo kasnije dodavanje zahteva migraciju postojećih MenuItem redova.
+// Sve future-ready kolone su nullable/imaju bezopasan default — MVP admin
+// UI ih ili ne prikazuje, ili ih prikazuje kao opciona polja bez posledice
+// ako ostanu prazna.
+// ─────────────────────────────────────────────────────────────────────────
+
+model MenuCategory {
+  id           String       @id @default(uuid())
+  restaurantId String
+  name         String
+  slug         String
+  type         CategoryType
+  sortOrder    Int          @default(0)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+  items      MenuItem[]
+
+  // Slug je stabilan identifikator za UPSERT u seed skripti — jedinstven
+  // po restoranu, ne globalno (isti "grill" slug može postojati u dva
+  // različita restorana kada MVP preraste u pravi multi-tenant UI).
+  @@unique([restaurantId, slug])
+  @@index([restaurantId])
+  @@index([restaurantId, isActive])
+  @@map("menu_categories")
+}
+
+enum CategoryType {
+  FOOD
+  DRINK
+}
+
+model MenuItem {
+  id           String   @id @default(uuid())
+  restaurantId String
+  categoryId   String?
+  // Nullable namerno: needsReview stavke (vidi ispod) mogu biti kreirane
+  // pre nego što je kategorija/cena potvrđena — FK je i dalje čvrsta veza
+  // (ON DELETE SET NULL, ne ostavlja "sirotu" referencu ka obrisanoj
+  // kategoriji), samo dozvoljava privremeno "nekategorisano" stanje.
+
+  name        String
+  slug        String
+  description String?
+
+  price    Decimal @db.Decimal(12, 2)
+  taxRate  Decimal @db.Decimal(5, 2) @default(20)
+
+  quantity Decimal? @db.Decimal(12, 3) // težina/zapremina broj (npr. 250)
+  unit     String? // "g", "ml", "kom", "l" — slobodan tekst u MVP-u
+
+  sku     String?
+  barcode String?
+
+  purchasePrice Decimal? @db.Decimal(12, 2) // future-ready: nabavna cena za maržu (nije MVP izveštaj)
+  imageUrl      String?
+
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true) // vidljivo u adminu / meniju uopšte
+  isAvailable Boolean @default(true) // privremeno nema na stanju (Temporary Out Of Stock)
+
+  trackStock  Boolean  @default(false) // future-ready: uključuje se kad Inventory modul (Faza 7) proradi
+  minimumStock Decimal? @db.Decimal(12, 3)
+
+  preparationStation PreparationStation @default(NONE)
+
+  needsReview Boolean @default(false) // cena/podaci čekaju potvrdu vlasnika/menadžera — vidi MenuItemReviewNote
+  reviewNote  String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft-delete: meni artikli se arhiviraju/brišu često, istorijske porudžbine već čuvaju snapshot naziva/cene pa fizičko brisanje ovde ne ugrožava izveštaje
+
+  restaurant Restaurant    @relation(fields: [restaurantId], references: [id])
+  category   MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  orderItems OrderItem[]
+
+  @@unique([restaurantId, slug])
+  @@index([restaurantId])
+  @@index([restaurantId, isActive])
+  @@index([categoryId])
+  @@index([preparationStation])
+  @@map("menu_items")
+}
+
+enum PreparationStation {
+  KITCHEN
+  BAR
+  KITCHEN_AND_BAR
+  NONE
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 3 — STOLOVI, SMENE, PORUDŽBINE
+// ─────────────────────────────────────────────────────────────────────────
+
+model Floor {
+  id           String   @id @default(uuid())
+  restaurantId String
+  locationId   String
+  name         String
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant        @relation(fields: [restaurantId], references: [id])
+  location   Location          @relation(fields: [locationId], references: [id])
+  tables     RestaurantTable[]
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@map("floors")
+}
+
+model RestaurantTable {
+  id        String      @id @default(uuid())
+  floorId   String
+  label     String
+  capacity  Int         @default(2)
+  status    TableStatus @default(FREE)
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  floor  Floor   @relation(fields: [floorId], references: [id])
+  orders Order[]
+
+  @@index([floorId])
+  @@index([status])
+  @@map("restaurant_tables")
+}
+
+enum TableStatus {
+  FREE
+  OCCUPIED
+  AWAITING_BILL
+  NEEDS_CLEANING
+}
+
+// ── SMENE ───────────────────────────────────────────────────────────────
+
+model Shift {
+  id           String      @id @default(uuid())
+  restaurantId String
+  locationId   String
+  openedBy     String // employeeId
+  openedAt     DateTime    @default(now())
+  openingCash  Decimal     @db.Decimal(12, 2) @default(0)
+  status       ShiftStatus @default(OPEN)
+  closedBy     String?
+  closedAt     DateTime?
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+  location   Location   @relation(fields: [locationId], references: [id])
+  orders     Order[]
+
+  // Samo jedna otvorena smena po lokaciji u datom trenutku — sprečava da
+  // dva konobara slučajno otvore paralelne smene na istoj kasi. Delimični
+  // unique indeks (WHERE status = 'OPEN') se dodaje u DDL-u ispod jer
+  // Prisma ne podržava partial unique index nativno u schema sintaksi za
+  // sve provajdere podjednako pouzdano — primenjeno ručno, vidi napomenu.
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([status])
+  @@map("shifts")
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+// ── PORUDŽBINE ──────────────────────────────────────────────────────────
+
+model Order {
+  id             String      @id @default(uuid())
+  restaurantId   String
+  locationId     String
+  tableId        String
+  shiftId        String
+  openedBy       String // employeeId (konobar)
+  guestCount     Int?
+  status         OrderStatus @default(DRAFT)
+  idempotencyKey String? // postavlja se TEK pri submitOrder — sprečava dupli submit istog draft-a
+  submittedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  restaurant Restaurant  @relation(fields: [restaurantId], references: [id])
+  location   Location    @relation(fields: [locationId], references: [id])
+  table      RestaurantTable @relation(fields: [tableId], references: [id])
+  shift      Shift       @relation(fields: [shiftId], references: [id])
+  items      OrderItem[]
+  events     OrderEvent[]
+
+  // Idempotency key je jedinstven PO RESTORANU kad je postavljen — dupli
+  // submit sa istim ključem (npr. duplo-kliknuto dugme, retry mreže) pada
+  // na unique constraint umesto da kreira drugu porudžbinu.
+  @@unique([restaurantId, idempotencyKey])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([tableId])
+  @@index([shiftId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+enum OrderStatus {
+  DRAFT
+  SUBMITTED
+  ACCEPTED
+  PREPARING
+  READY
+  SERVED
+  COMPLETED
+  CANCELLED
+}
+
+model OrderItem {
+  id        String          @id @default(uuid())
+  orderId   String
+  // menuItemId NIJE obavezan FK-referenca za prikaz — snapshot polja ispod
+  // (name/price/taxRate) su izvor istine za ovu porudžbinu zauvek, čak i
+  // ako se MenuItem kasnije izmeni ili obriše. menuItemId se čuva SAMO kao
+  // slaba referenca za izveštaje ("koliko puta je artikal X prodat"), zato
+  // je onDelete: SetNull — brisanje MenuItem-a ne sme oboriti OrderItem.
+  menuItemId String?
+
+  name               String // snapshot naziva u trenutku slanja
+  price              Decimal @db.Decimal(12, 2) // snapshot cene
+  taxRate            Decimal @db.Decimal(5, 2) // snapshot poreske stope
+  quantity           Int     @default(1)
+  note               String? // jedna slobodna napomena po stavci (MVP)
+  preparationStation PreparationStation @default(NONE) // snapshot stanice u trenutku slanja
+
+  status    OrderItemStatus @default(DRAFT)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  order    Order     @relation(fields: [orderId], references: [id])
+  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@index([status])
+  @@index([preparationStation])
+  @@map("order_items")
+}
+
+enum OrderItemStatus {
+  DRAFT
+  SUBMITTED
+  ACCEPTED
+  PREPARING
+  READY
+  SERVED
+  CANCELLED
+}
+
+// Append-only log svake promene porudžbine — konobar ne menja poslatu
+// stavku direktno (vidi pravilo iz v1 plana), svaka izmena je nov event.
+model OrderEvent {
+  id        String   @id @default(uuid())
+  orderId   String
+  type      String // "item_added", "submitted", "item_cancel_requested", ...
+  payload   Json?
+  createdBy String // employeeId
+  createdAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([createdAt])
+  @@map("order_events")
+}

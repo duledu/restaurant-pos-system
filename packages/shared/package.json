@@ -1,0 +1,9 @@
+{
+  "name": "@rcs/shared",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "dependencies": {
+    "zod": "^3.23.0"
+  }
+}

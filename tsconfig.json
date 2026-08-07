@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@rcs/db": ["packages/db/index.ts"],
+      "@rcs/auth": ["packages/auth/index.ts"],
+      "@rcs/domain": ["packages/domain/index.ts"],
+      "@rcs/domain/*": ["packages/domain/*"],
+      "@rcs/shared": ["packages/shared/index.ts"]
+    }
+  },
+  "include": ["apps/web/**/*.ts", "apps/web/**/*.tsx", "packages/**/*.ts"],
+  "exclude": ["node_modules", "**/node_modules"]
+}
