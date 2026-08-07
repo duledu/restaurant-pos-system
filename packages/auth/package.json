@@ -2,6 +2,7 @@
   "name": "@rcs/auth",
   "version": "0.1.0",
   "private": true,
+  "type": "commonjs",
   "main": "index.ts",
   "dependencies": {
     "@rcs/db": "*",

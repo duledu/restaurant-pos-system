@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { resolveRedirectPath, ADMIN_ROLES, WAITER_ROLES, KITCHEN_ROLES, BAR_ROLES } from "@rcs/shared";
 
 describe("resolveRedirectPath", () => {
-  it("OWNER ide na /admin", () => {
-    expect(resolveRedirectPath(["OWNER"])).toBe("/admin");
+  it("OWNER ide na /menu", () => {
+    expect(resolveRedirectPath(["OWNER"])).toBe("/menu");
   });
   it("KITCHEN ide na /kitchen", () => {
     expect(resolveRedirectPath(["KITCHEN"])).toBe("/kitchen");
@@ -17,8 +17,8 @@ describe("resolveRedirectPath", () => {
   it("korisnik bez ijedne poznate role ide na /login", () => {
     expect(resolveRedirectPath([])).toBe("/login");
   });
-  it("OWNER+WAITER (teorijski) prioritizuje /admin", () => {
-    expect(resolveRedirectPath(["WAITER", "OWNER"])).toBe("/admin");
+  it("OWNER+WAITER (teorijski) prioritizuje /menu", () => {
+    expect(resolveRedirectPath(["WAITER", "OWNER"])).toBe("/menu");
   });
 });
 

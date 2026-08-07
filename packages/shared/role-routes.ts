@@ -5,12 +5,12 @@
  */
 
 const REDIRECT_PRIORITY: { roles: string[]; path: string }[] = [
-  { roles: ["OWNER", "ADMIN"], path: "/admin" },
-  { roles: ["MANAGER"], path: "/admin" },
+  { roles: ["OWNER", "ADMIN"], path: "/menu" },
+  { roles: ["MANAGER"], path: "/menu" },
   { roles: ["KITCHEN"], path: "/kitchen" },
   { roles: ["BAR"], path: "/bar" },
   { roles: ["WAITER"], path: "/waiter" },
-  { roles: ["INVENTORY_MANAGER"], path: "/admin" },
+  { roles: ["INVENTORY_MANAGER"], path: "/menu" },
 ];
 
 export function resolveRedirectPath(roles: string[]): string {

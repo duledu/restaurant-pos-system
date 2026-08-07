@@ -29,6 +29,9 @@ coverage/
 # Vercel
 .vercel
 
+# Lokalna embedded Postgres baza (scripts/dev-local.mjs, scripts/db-local.mjs)
+.local-postgres-data/
+
 # Editor
 .vscode/
 .idea/

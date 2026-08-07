@@ -2,13 +2,14 @@
   "name": "@rcs/db",
   "version": "0.1.0",
   "private": true,
+  "type": "commonjs",
   "main": "index.ts",
   "scripts": {
     "generate": "prisma generate",
     "migrate": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
-    "seed": "ts-node prisma/seed.ts",
-    "seed:menu": "ts-node prisma/seed-menu.ts",
+    "seed": "tsx prisma/seed.ts",
+    "seed:menu": "tsx prisma/seed-menu.ts",
     "studio": "prisma studio"
   },
   "dependencies": {
@@ -16,7 +17,7 @@
   },
   "devDependencies": {
     "prisma": "^5.18.0",
-    "ts-node": "^10.9.2",
+    "tsx": "^4.23.10",
     "typescript": "^5.5.0"
   }
 }

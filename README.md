@@ -85,7 +85,7 @@ docs/                    arhitektonski planovi po fazama
 
 - Node.js ≥ 20
 - npm ≥ 10 (workspaces)
-- Docker + Docker Compose (za lokalni Postgres) **ili** pristup cloud Postgres bazi (Neon/Supabase)
+- Docker + Docker Compose (za lokalni Postgres) **ili** pristup cloud Postgres bazi (Neon/Supabase) **ili** ništa od navedenog — vidi "Lokalni razvoj bez Dockera" ispod.
 
 ## Local Installation
 
@@ -95,6 +95,54 @@ cd restaurant-control-system
 cp .env.example .env
 npm install
 ```
+
+## Lokalni razvoj bez Dockera (jedna komanda, čista mašina)
+
+Ako nemaš Docker (ili ne želiš da diraš postojeću sistemsku Postgres
+instalaciju), `npm run dev:local` pokreće KOMPLETNO samodovoljno okruženje —
+bez Docker-a, bez sistemskog Postgres servisa, bez potrebe za `.env` fajlom:
+
+```bash
+git clone <YOUR_GITHUB_REPOSITORY_URL>
+cd restaurant-control-system
+npm install
+npm run dev:local
+```
+
+Ova jedna komanda (`scripts/dev-local.mjs`):
+
+1. Preuzima i pokreće pravi Postgres 16 binarni fajl (`embedded-postgres`
+   paket) u `.local-postgres-data/` na portu **55432** — potpuno odvojeno od
+   bilo koje sistemske Postgres instalacije na 5432, ne dira je i ne
+   zahteva njenu lozinku.
+2. Pri prvom pokretanju inicijalizuje klaster i kreira bazu `rcs_dev`.
+3. Primenjuje Prisma migracije (`prisma migrate deploy`).
+4. Seed-uje dev naloge (samo ako još ne postoje — bezbedno za ponovno
+   pokretanje).
+5. Pokreće Next.js dev server sa `DATABASE_URL` ubrizganim direktno u
+   proces (nema potrebe da praviš `.env`).
+
+Ctrl+C u tom terminalu gasi i Next.js i embedded Postgres. Podaci ostaju u
+`.local-postgres-data/` (gitignored) između pokretanja — samo prvi put se
+inicijalizuju i seed-uju.
+
+Ako želiš samo bazu (npr. za pokretanje `tests/integration/*` protiv
+realnog Postgres-a) bez Next.js dev servera:
+
+```bash
+npm run db:local
+```
+
+Dev nalozi za prijavu (kreirani seed-om, vidi `packages/db/prisma/seed.ts`):
+
+| Email | Lozinka | Rola | Prijava vodi na |
+|---|---|---|---|
+| owner@dev.local | DevOwner123! | OWNER | /menu |
+| admin@dev.local | DevAdmin123! | ADMIN | /menu |
+| manager@dev.local | DevManager123! | MANAGER | /menu |
+| konobar1@dev.local | DevWaiter123! | WAITER | /waiter |
+| kuhinja@dev.local | DevKitchen123! | KITCHEN | /kitchen |
+| sank@dev.local | DevBar123! | BAR | /bar |
 
 ## Environment Variables
 
