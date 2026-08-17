@@ -7,5 +7,6 @@ export * as orders from "./orders/order-service";
 export * as voids from "./orders/void-service";
 export * as billing from "./billing/billing-service";
 export * as production from "./production/production-service";
+export * as reporting from "./reporting/reporting-service";
 export * from "./realtime/publisher";
 export { ssePublisher, subscribe } from "./realtime/sse-publisher";

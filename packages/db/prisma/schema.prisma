@@ -275,6 +275,13 @@ enum DeviceType {
 model AuditLog {
   id            String   @id @default(uuid())
   restaurantId  String
+  // ── FAZA 5: nedostajalo od Faze 1 — bez ovoga Activity Log ne može da se
+  // filtrira po lokaciji, što znači da bi menadžer sa pristupom SAMO jednoj
+  // lokaciji video audit istoriju SVIH lokacija restorana (curenje preko
+  // granice ovlašćenja). Nullable jer neke radnje (npr. auth.login pre nego
+  // što se zna lokacija uređaja) nemaju prirodan locationId — takvi redovi
+  // se jednostavno ne prikazuju kad je filter na konkretnu lokaciju.
+  locationId    String?
   userId        String?
   role          String?
   entityType    String
@@ -302,6 +309,7 @@ model AuditLog {
   @@index([createdAt])
   @@index([restaurantId, isSuspicious])
   @@index([restaurantId, category])
+  @@index([restaurantId, locationId])
   @@map("audit_logs")
 }
 

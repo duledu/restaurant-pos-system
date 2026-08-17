@@ -21,9 +21,6 @@ export default async function AdminLayout({ children }: { children: React.ReactN
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto py-4">
-          <p className="mb-1 px-4 text-[10px] font-semibold uppercase tracking-widest text-white/40">
-            Upravljanje
-          </p>
           <AdminNav />
         </nav>
 

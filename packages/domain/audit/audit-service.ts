@@ -16,6 +16,11 @@ export interface AuditEntryInput {
   newValue?: unknown;
   reason?: string;
   ipAddress?: string;
+  // Faza 5: opciono — pozivaoci koji imaju poznat locationId u trenutku
+  // radnje (skoro svi poslovni događaji) treba da ga prosleđuju, inače
+  // Activity Log (Faza 5) ne može da filtrira taj red po lokaciji. Vidi
+  // napomenu na AuditLog.locationId u schema.prisma.
+  locationId?: string;
   // ── Faza 4: laka, deterministička klasifikacija — vidi napomenu na
   // AuditLog u schema.prisma. Sve opciono; pozivi bez ovih polja (Faza 1-3)
   // ostaju validni, samo dobijaju podrazumevanu ozbiljnost INFO.
@@ -32,6 +37,7 @@ export async function recordAuditEntry(
   await db.auditLog.create({
     data: {
       restaurantId: ctx.restaurantId,
+      locationId: entry.locationId,
       userId: ctx.userId,
       role: ctx.roles[0],
       entityType: entry.entityType,
@@ -47,6 +53,44 @@ export async function recordAuditEntry(
       isSuspicious: entry.isSuspicious ?? false,
     },
   });
+}
+
+export interface EmployeeDisplayInfo {
+  id: string;
+  name: string;
+  role: string;
+}
+
+/**
+ * Razrešava spisak kandidat-ID-jeva u ime/ulogu zaposlenog — SVAKI kandidat
+ * se proverava i kao Employee.id i kao Employee.userId u JEDNOM upitu.
+ *
+ * Zašto oba: AuditLog.userId čuva `ctx.userId`, a `ctx.userId` je za
+ * PIN-only osoblje (konobar/kuhinja/šank bez email naloga) POSTAVLJEN NA
+ * `employee.id` (vidi pin-login/route.ts: `userId: employee.userId ?? employee.id`).
+ * Upit koji traži SAMO `Employee.userId = candidateId` tiho ne pronalazi
+ * takve zaposlene (Employee.userId im je null) — otkriveno pri Fazi 5 audit
+ * pregledu, ispravljeno ovde umesto ponavljanja istog bug-a na svakom mestu
+ * koje treba da prikaže ime iz AuditLog.userId.
+ */
+export async function resolveEmployeeDisplayNames(
+  restaurantId: string,
+  candidateIds: (string | null | undefined)[]
+): Promise<Map<string, EmployeeDisplayInfo>> {
+  const uniqueIds = Array.from(new Set(candidateIds.filter((id): id is string => Boolean(id))));
+  const map = new Map<string, EmployeeDisplayInfo>();
+  if (uniqueIds.length === 0) return map;
+
+  const employees = await prisma.employee.findMany({
+    where: { restaurantId, OR: [{ id: { in: uniqueIds } }, { userId: { in: uniqueIds } }] },
+    include: { roles: { include: { role: true } } },
+  });
+  for (const emp of employees) {
+    const info: EmployeeDisplayInfo = { id: emp.id, name: `${emp.firstName} ${emp.lastName}`, role: emp.roles[0]?.role.name ?? "?" };
+    map.set(emp.id, info);
+    if (emp.userId) map.set(emp.userId, info);
+  }
+  return map;
 }
 
 const AUDIT_VIEW = "audit.view";
@@ -93,7 +137,14 @@ export async function getSuspiciousActivity(
   filters: { locationId: string; since?: Date }
 ): Promise<SuspiciousSignal[]> {
   requirePermission(ctx, AUDIT_VIEW);
-  requireLocationAccess(ctx, filters.locationId);
+  let locationIds: string[];
+  if (filters.locationId === "ALL") {
+    locationIds = ctx.locationIds;
+  } else {
+    requireLocationAccess(ctx, filters.locationId);
+    locationIds = [filters.locationId];
+  }
+  if (locationIds.length === 0) throw new Error("Nalog nema dodeljenu nijednu lokaciju");
 
   const since = filters.since ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const signals: SuspiciousSignal[] = [];
@@ -101,7 +152,7 @@ export async function getSuspiciousActivity(
   const [voidsByEmployee, highValueVoids, reasonGroups, discrepancyShifts, rejectedAttempts] = await Promise.all([
     prisma.orderItemVoid.groupBy({
       by: ["voidedBy"],
-      where: { restaurantId: ctx.restaurantId, locationId: filters.locationId, voidedAt: { gte: since } },
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: { gte: since } },
       _count: { _all: true },
       _sum: { voidedValue: true },
       _max: { voidedAt: true },
@@ -109,7 +160,7 @@ export async function getSuspiciousActivity(
     prisma.orderItemVoid.findMany({
       where: {
         restaurantId: ctx.restaurantId,
-        locationId: filters.locationId,
+        locationId: { in: locationIds },
         voidedAt: { gte: since },
         voidedValue: { gte: HIGH_VALUE_VOID_RSD },
       },
@@ -117,14 +168,14 @@ export async function getSuspiciousActivity(
     }),
     prisma.orderItemVoid.groupBy({
       by: ["voidedBy", "reasonCode"],
-      where: { restaurantId: ctx.restaurantId, locationId: filters.locationId, voidedAt: { gte: since } },
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: { gte: since } },
       _count: { _all: true },
       _max: { voidedAt: true },
     }),
     prisma.shift.findMany({
       where: {
         restaurantId: ctx.restaurantId,
-        locationId: filters.locationId,
+        locationId: { in: locationIds },
         status: "CLOSED",
         closedAt: { gte: since },
         cashDifference: { lt: -CASH_DISCREPANCY_WARNING_RSD },
@@ -135,6 +186,10 @@ export async function getSuspiciousActivity(
       by: ["userId"],
       where: {
         restaurantId: ctx.restaurantId,
+        // Stariji redovi (upisani pre Faze 5) nemaju locationId — namerno
+        // ih NE isključujemo ovde bezuslovno (izgubili bismo istoriju),
+        // ali kad je filter na KONKRETNU lokaciju, moraju se poklapati.
+        ...(filters.locationId === "ALL" ? {} : { locationId: { in: locationIds } }),
         category: "UNAUTHORIZED_ATTEMPT",
         createdAt: { gte: since },
       },
@@ -149,12 +204,9 @@ export async function getSuspiciousActivity(
   discrepancyShifts.forEach((s) => employeeIds.add(s.closedBy ?? s.openedBy));
   rejectedAttempts.forEach((a) => a.userId && employeeIds.add(a.userId));
 
-  const employees = await prisma.employee.findMany({
-    where: { id: { in: Array.from(employeeIds) }, restaurantId: ctx.restaurantId },
-    select: { id: true, firstName: true, lastName: true },
-  });
-  const nameById = new Map(employees.map((e) => [e.id, `${e.firstName} ${e.lastName}`]));
-  const nameFor = (id: string) => nameById.get(id) ?? "?";
+  // AuditLog.userId je posebna priča — vidi resolveEmployeeDisplayNames.
+  const nameById = await resolveEmployeeDisplayNames(ctx.restaurantId, Array.from(employeeIds));
+  const nameFor = (id: string) => nameById.get(id)?.name ?? "?";
 
   for (const group of voidsByEmployee) {
     const count = group._count._all;
@@ -216,12 +268,12 @@ export async function getSuspiciousActivity(
   for (const group of rejectedAttempts) {
     const count = group._count._all;
     if (group.userId && count >= UNAUTHORIZED_ATTEMPT_THRESHOLD) {
-      const employee = await prisma.employee.findFirst({ where: { userId: group.userId, restaurantId: ctx.restaurantId }, select: { id: true, firstName: true, lastName: true } });
+      const employee = nameById.get(group.userId);
       signals.push({
         category: "UNAUTHORIZED_ATTEMPTS",
         severity: count >= UNAUTHORIZED_ATTEMPT_THRESHOLD * 2 ? "HIGH" : "WARNING",
         employeeId: employee?.id ?? group.userId,
-        employeeName: employee ? `${employee.firstName} ${employee.lastName}` : "?",
+        employeeName: employee?.name ?? "?",
         description: `${count} odbijenih pokušaja neovlašćene operacije u posmatranom periodu`,
         occurredAt: group._max.createdAt ?? since,
         count,

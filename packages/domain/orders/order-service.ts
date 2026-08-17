@@ -74,6 +74,7 @@ async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
       entityId: orderId,
       action: "order_item.mutation_attempt_rejected",
       newValue: { orderStatus: order.status },
+      locationId: order.locationId,
       category: "UNAUTHORIZED_ATTEMPT",
       severity: "WARNING",
       isSuspicious: true,
@@ -257,6 +258,7 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       entityId: orderId,
       action: "order.submitted",
       newValue: { itemCount: items.length },
+      locationId: order.locationId,
     }, tx);
 
     return updatedOrder;

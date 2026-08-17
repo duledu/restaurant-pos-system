@@ -44,6 +44,7 @@ export async function openShift(ctx: AuthContext, input: OpenShiftInput) {
     entityId: shift.id,
     action: "shift.opened",
     newValue: { locationId: input.locationId, openingCash: input.openingCash },
+    locationId: input.locationId,
   });
 
   return shift;
@@ -166,6 +167,7 @@ export async function closeShift(ctx: AuthContext, shiftId: string, input: Close
           totalRevenue: totalRevenue.toString(),
           orderCount,
         },
+        locationId: shift.locationId,
       },
       tx
     );

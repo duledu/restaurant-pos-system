@@ -185,6 +185,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
         entityId: orderId,
         action: "payment.completed",
         newValue: { method: input.method, amount: total.toString(), receiptId: receipt.id },
+        locationId: order.locationId,
       },
       tx
     );
