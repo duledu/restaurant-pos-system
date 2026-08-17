@@ -5,7 +5,10 @@ interface LogoProps {
   className?: string;
 }
 
-const SIZE_MAP = {
+// Eksportovano da AppLogo (branding/AppLogo.tsx) može da poravna dimenzije
+// isečenog PNG mark-a sa ovim vrednostima kad rekonstruiše "full" lockup na
+// tamnoj pozadini (vidi napomenu u AppLogo.tsx).
+export const SIZE_MAP = {
   sm: { mark: 24, text: 14, sub: 8 },
   md: { mark: 32, text: 18, sub: 10 },
   lg: {

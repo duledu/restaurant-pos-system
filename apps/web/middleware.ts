@@ -45,7 +45,10 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Poklapa sve rute OSIM Next.js internih asset-a (_next/static, _next/image)
-  // i favicon.ico — sve ostalo (stranice i /api/**) prolazi kroz gornju proveru.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Poklapa sve rute OSIM Next.js internih asset-a (_next/static, _next/image),
+  // favicon.ico i public/branding/** (TableCore PROIZVOD branding — logo mora
+  // biti vidljiv i NEautentifikovanom korisniku, npr. na /login ekranu; ovo
+  // nema veze sa restoranskim/poslovnim podacima pa ne otvara ništa osetljivo).
+  // Sve ostalo (stranice i /api/**) i dalje prolazi kroz gornju proveru.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|branding/).*)"],
 };
