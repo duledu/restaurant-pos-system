@@ -10,6 +10,7 @@ import { Skeleton } from "../../../components/ui/Skeleton";
 import { KpiCard } from "../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../components/admin/ReportFilters";
 import { SEVERITY_BADGE_TONE, SEVERITY_LABEL, signalCategoryLabel, type Severity } from "../../../components/admin/severity";
+import { ROLE_LABEL } from "../../../components/admin/role-labels";
 
 interface SalesSummary {
   currency: string;
@@ -46,16 +47,6 @@ async function apiFetch(url: string) {
   if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
   return body;
 }
-
-const ROLE_LABEL: Record<string, string> = {
-  OWNER: "Vlasnik",
-  ADMIN: "Administrator",
-  MANAGER: "Menadžer",
-  WAITER: "Konobar",
-  KITCHEN: "Kuhinja",
-  BAR: "Šank",
-  INVENTORY_MANAGER: "Magacin",
-};
 
 export function DashboardClient() {
   const [filters, setFilters] = useState<ReportFilterState>({ locationId: "ALL", preset: "today" });

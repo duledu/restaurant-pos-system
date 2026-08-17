@@ -497,6 +497,11 @@ const ACTION_LABELS: Record<string, string> = {
   "menu_item.created": "Artikal menija kreiran",
   "menu_item.updated": "Artikal menija izmenjen",
   "menu_item.price_changed": "Cena artikla izmenjena",
+  "employee.created": "Zaposleni kreiran",
+  "employee.updated": "Podaci zaposlenog izmenjeni",
+  "employee.pin_reset": "PIN zaposlenog resetovan",
+  "employee.deactivated": "Zaposleni deaktiviran",
+  "employee.reactivated": "Zaposleni reaktiviran",
 };
 
 function humanizeAction(action: string): string {
