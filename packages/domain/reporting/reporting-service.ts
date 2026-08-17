@@ -502,6 +502,8 @@ const ACTION_LABELS: Record<string, string> = {
   "employee.pin_reset": "PIN zaposlenog resetovan",
   "employee.deactivated": "Zaposleni deaktiviran",
   "employee.reactivated": "Zaposleni reaktiviran",
+  "auth.terminal_locked": "Terminal zaključan (Quick Lock)",
+  "device.registered": "Uređaj registrovan za PIN prijavu",
 };
 
 function humanizeAction(action: string): string {

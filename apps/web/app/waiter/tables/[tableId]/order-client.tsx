@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../components/ui/LogoutButton";
+import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
 import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, type VoidReasonCode } from "@rcs/shared";
 
 interface Category {
@@ -342,7 +343,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
             ← Stolovi
           </button>
           <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
-          <LogoutButton />
+          <div className="flex items-center gap-1">
+            <QuickLockButton />
+            <LogoutButton />
+          </div>
         </div>
 
         <div className="mb-3 rounded-md bg-success-soft px-3 py-2 text-center text-sm font-medium text-success animate-fade-in">
@@ -407,7 +411,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
         </button>
         <div className="flex items-center justify-between gap-3">
           <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
-          <LogoutButton />
+          <div className="flex items-center gap-1">
+            <QuickLockButton />
+            <LogoutButton />
+          </div>
         </div>
       </div>
 

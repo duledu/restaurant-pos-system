@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
+import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 
 interface OpenOrderRef {
@@ -125,7 +126,10 @@ export function ShiftClient() {
         <div className="w-full max-w-sm">
           <div className="mb-4 flex items-center justify-between">
             <h1 className="text-lg font-semibold text-ink">Smena zatvorena</h1>
-            <LogoutButton />
+            <div className="flex items-center gap-1">
+              <QuickLockButton />
+              <LogoutButton />
+            </div>
           </div>
           <div className="rounded-md border border-line bg-white p-4 shadow-sm">
             <div className="mb-3 rounded-md bg-success-soft px-3 py-2 text-center text-sm font-medium text-success">
@@ -167,7 +171,10 @@ export function ShiftClient() {
           ← Stolovi
         </button>
         <h1 className="text-lg font-semibold text-ink">Zatvaranje smene</h1>
-        <LogoutButton />
+        <div className="flex items-center gap-1">
+          <QuickLockButton />
+          <LogoutButton />
+        </div>
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}

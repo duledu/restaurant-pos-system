@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
+import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 
 interface Table {
@@ -45,6 +46,7 @@ async function apiFetch(url: string, options?: RequestInit) {
 export function PosClient() {
   const router = useRouter();
   const [locationId, setLocationId] = useState<string | null>(null);
+  const [employeeName, setEmployeeName] = useState<string | null>(null);
   const [floors, setFloors] = useState<FloorWithTables[]>([]);
   const [shift, setShift] = useState<Shift | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,6 +62,7 @@ export function PosClient() {
       const loc = me.locationIds[0];
       if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
       setLocationId(loc);
+      setEmployeeName(me.firstName ? `${me.firstName} ${me.lastName ?? ""}`.trim() : null);
 
       const [shiftRes, tablesRes] = await Promise.all([
         apiFetch(`/api/pos/shift?locationId=${loc}`),
@@ -106,7 +109,10 @@ export function PosClient() {
   if (!shift) {
     return (
       <div className="relative flex min-h-screen flex-col items-center justify-center gap-4 p-6">
-        <div className="absolute right-3 top-3"><LogoutButton /></div>
+        <div className="absolute right-3 top-3 flex items-center gap-1">
+          <QuickLockButton />
+          <LogoutButton />
+        </div>
         <AppLogo variant="full" size="md" />
         <h1 className="text-xl font-semibold text-ink">Nema aktivne smene</h1>
         <p className="text-center text-sm text-ink/70">Unesi početno stanje kase da otvoriš smenu i počneš rad.</p>
@@ -133,7 +139,10 @@ export function PosClient() {
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <AppLogo variant="mark" size="sm" />
-          <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
+          <div>
+            <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
+            {employeeName && <p className="text-xs text-inkSoft">Radiš kao: {employeeName}</p>}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -142,6 +151,7 @@ export function PosClient() {
           >
             Smena aktivna — zatvori
           </button>
+          <QuickLockButton />
           <LogoutButton />
         </div>
       </div>

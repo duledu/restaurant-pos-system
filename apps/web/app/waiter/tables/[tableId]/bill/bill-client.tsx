@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../../components/ui/LogoutButton";
+import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
 
 interface BillItem {
   id: string;
@@ -125,7 +126,10 @@ export function BillClient({ tableId }: { tableId: string }) {
         <div className="w-full max-w-sm">
           <div className="mb-4 flex items-center justify-between">
             <h1 className="text-lg font-semibold text-ink">Račun #{receipt.sequenceNumber}</h1>
-            <LogoutButton />
+            <div className="flex items-center gap-1">
+              <QuickLockButton />
+              <LogoutButton />
+            </div>
           </div>
 
           <div className="rounded-md border border-line bg-white p-4 shadow-sm">
@@ -186,7 +190,10 @@ export function BillClient({ tableId }: { tableId: string }) {
           ← Porudžbina
         </button>
         <h1 className="text-lg font-semibold text-ink">{bill.order.table.label} — Račun</h1>
-        <LogoutButton />
+        <div className="flex items-center gap-1">
+          <QuickLockButton />
+          <LogoutButton />
+        </div>
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}

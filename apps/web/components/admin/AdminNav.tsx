@@ -34,6 +34,7 @@ const VoidIcon = () => icon("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 9l6 6 M15 
 const UsersIcon = () => icon("M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75");
 const StaffIcon = () => icon("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M19 8v6 M22 11h-6");
 const ActivityIcon = () => icon("M22 12h-4l-3 9L9 3l-3 9H2");
+const DeviceIcon = () => icon("M5 2h14a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z M12 18h.01");
 
 const NAV_SECTIONS: NavSection[] = [
   {
@@ -55,7 +56,10 @@ const NAV_SECTIONS: NavSection[] = [
   },
   {
     title: "Kontrola",
-    items: [{ href: "/activity", label: "Evidencija aktivnosti", icon: <ActivityIcon /> }],
+    items: [
+      { href: "/activity", label: "Evidencija aktivnosti", icon: <ActivityIcon /> },
+      { href: "/device-setup", label: "Uređaji", icon: <DeviceIcon /> },
+    ],
   },
 ];
 

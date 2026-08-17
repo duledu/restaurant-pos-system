@@ -7,13 +7,25 @@ export const loginSchema = z.object({
 export type LoginInput = z.infer<typeof loginSchema>;
 
 export const pinLoginSchema = z.object({
-  employeeId: z.string().uuid(),
+  // Opciono — kada UI zna tačnog zaposlenog unapred (npr. postojeći
+  // testovi/integracije). Touch PIN tastatura (Deljeni POS/Lični uređaj)
+  // NIKAD ne šalje employeeId — namerno, da izbegne listu zaposlenih pre
+  // PIN-a (nema "employee enumeration"). Kada nije poslat, employee se
+  // pronalazi proverom PIN-a naspram svih aktivnih zaposlenih uređaja (vidi
+  // pin-login/route.ts) — bezbedno jer je PIN jedinstven po restoranu
+  // (Staff Management, packages/domain/employees/employee-service.ts).
+  employeeId: z.string().uuid().optional(),
   pin: z
     .string()
     .regex(/^\d{4,6}$/, "PIN mora imati 4-6 cifara"),
   deviceId: z.string().uuid(),
 });
 export type PinLoginInput = z.infer<typeof pinLoginSchema>;
+
+export const registerDeviceSchema = z.object({
+  locationId: z.string().uuid(),
+});
+export type RegisterDeviceInput = z.infer<typeof registerDeviceSchema>;
 
 export const createEmployeeSchema = z.object({
   firstName: z.string().trim().min(1).max(100),

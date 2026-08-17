@@ -41,6 +41,7 @@ const PERMISSIONS = [
   { code: "production.view", description: "Pregled tiketa kuhinje/šanka" },
   { code: "production.manage", description: "Promena statusa stavki na kuhinji/šanku" },
   { code: "audit.view", description: "Pregled audit evidencije i sumnjive aktivnosti (Faza 4/5)" },
+  { code: "devices.manage", description: "Registracija POS/KDS uređaja i podešavanje Deljenog POS režima" },
 ] as const;
 
 // Ko dobija koju permisiju — MVP je namerno grub (role → skup permisija),
@@ -48,9 +49,9 @@ const PERMISSIONS = [
 // Ključno pravilo iz specifikacije: WAITER/KITCHEN/BAR NIKAD ne dobijaju
 // menu.manage niti employees.manage.
 const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> = {
-  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view"],
-  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view"],
-  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view"],
+  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
+  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
+  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
   WAITER: ["menu.view", "shifts.manage"],
   KITCHEN: ["menu.view", "production.view", "production.manage"],
   BAR: ["menu.view", "production.view", "production.manage"],
@@ -164,6 +165,7 @@ async function main() {
     firstName: "Menadžer",
     lastName: "Dev",
     role: "MANAGER",
+    pin: "5001",
   });
 
   for (let i = 1; i <= 3; i++) {

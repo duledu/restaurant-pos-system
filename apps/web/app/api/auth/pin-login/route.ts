@@ -7,8 +7,9 @@ import {
   sessionCookieOptions,
   type AuthContext,
 } from "@rcs/auth";
-import { pinLoginSchema } from "@rcs/shared";
+import { pinLoginSchema, resolveRedirectPath } from "@rcs/shared";
 import { audit } from "@rcs/domain";
+import { clearLoginThrottle, getActiveLoginThrottle, recordFailedLogin } from "../../../../lib/login-throttle";
 
 const GENERIC_ERROR = "Neispravan PIN";
 
@@ -23,6 +24,18 @@ interface LockedPinEmployee {
   employeeStatus: string;
   restaurantStatus: string;
   tenantStatus: string;
+}
+
+function deviceThrottleKey(deviceId: string): string {
+  return `pin-device:${deviceId}`;
+}
+
+async function resolveRedirectFor(employeeId: string): Promise<string> {
+  const roles = await prisma.employeeRole.findMany({
+    where: { employeeId },
+    include: { role: true },
+  });
+  return resolveRedirectPath(roles.map((r) => r.role.name));
 }
 
 export async function POST(request: Request) {
@@ -45,48 +58,120 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Uređaj nije registrovan" }, { status: 403 });
     }
 
-    const attempt = await prisma.$transaction(async (tx) => {
-      // Row lock serializes attempts for this employee across all app/serverless
-      // instances, so concurrent failures cannot overwrite one another.
-      const rows = await tx.$queryRaw<LockedPinEmployee[]>`
-        SELECT e."id", e."userId", e."restaurantId", e."pinHash",
-               e."failedPinAttempts", e."pinLockedUntil",
-               u."isActive" AS "userIsActive",
-               e."status"::text AS "employeeStatus",
-               r."status"::text AS "restaurantStatus",
-               t."status"::text AS "tenantStatus"
-        FROM "employees" e
-        JOIN "restaurants" r ON r."id" = e."restaurantId"
-        JOIN "tenants" t ON t."id" = r."tenantId"
-        LEFT JOIN "users" u ON u."id" = e."userId"
-        WHERE e."id" = ${employeeId}
-        FOR UPDATE OF e
-      `;
-      const employee = rows[0];
-      if (!employee || !employee.pinHash || employee.restaurantId !== device.restaurantId) return null;
+    let employee: LockedPinEmployee | undefined;
+    let evaluation: ReturnType<typeof evaluatePinAttempt> | undefined;
 
-      const now = new Date();
-      const isLocked = Boolean(employee.pinLockedUntil && employee.pinLockedUntil > now);
-      const isCorrect = isLocked ? false : await verifyPin(pin, employee.pinHash);
-      const evaluation = evaluatePinAttempt({
-        isCorrect,
-        currentFailedAttempts: employee.failedPinAttempts,
-        lockedUntil: employee.pinLockedUntil,
-        now,
+    if (employeeId) {
+      // Poznat employeeId (npr. postojeća integracija) — identičan tok kao
+      // pre uvođenja Deljenog POS-a, samo taj jedan red se zaključava.
+      const attempt = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<LockedPinEmployee[]>`
+          SELECT e."id", e."userId", e."restaurantId", e."pinHash",
+                 e."failedPinAttempts", e."pinLockedUntil",
+                 u."isActive" AS "userIsActive",
+                 e."status"::text AS "employeeStatus",
+                 r."status"::text AS "restaurantStatus",
+                 t."status"::text AS "tenantStatus"
+          FROM "employees" e
+          JOIN "restaurants" r ON r."id" = e."restaurantId"
+          JOIN "tenants" t ON t."id" = r."tenantId"
+          LEFT JOIN "users" u ON u."id" = e."userId"
+          WHERE e."id" = ${employeeId}
+          FOR UPDATE OF e
+        `;
+        const row = rows[0];
+        if (!row || !row.pinHash || row.restaurantId !== device.restaurantId) return null;
+
+        const now = new Date();
+        const isLocked = Boolean(row.pinLockedUntil && row.pinLockedUntil > now);
+        const isCorrect = isLocked ? false : await verifyPin(pin, row.pinHash);
+        const result = evaluatePinAttempt({
+          isCorrect,
+          currentFailedAttempts: row.failedPinAttempts,
+          lockedUntil: row.pinLockedUntil,
+          now,
+        });
+
+        await tx.employee.update({
+          where: { id: row.id },
+          data: { failedPinAttempts: result.newFailedAttempts, pinLockedUntil: result.newLockedUntil },
+        });
+        return { row, result };
       });
 
-      await tx.employee.update({
-        where: { id: employee.id },
-        data: {
-          failedPinAttempts: evaluation.newFailedAttempts,
-          pinLockedUntil: evaluation.newLockedUntil,
-        },
-      });
-      return { employee, evaluation };
-    });
+      if (!attempt) return NextResponse.json({ error: GENERIC_ERROR }, { status: 401 });
+      employee = attempt.row;
+      evaluation = attempt.result;
+    } else {
+      // Nema employeeId — dodirni PIN taster (Deljeni POS/Lični uređaj) ga
+      // NIKAD ne šalje, da izbegne listu zaposlenih pre PIN-a. Zaposleni se
+      // pronalazi proverom PIN-a naspram svih aktivnih zaposlenih ovog
+      // restorana — bezbedno jer je PIN jedinstven po restoranu (Staff
+      // Management). Kada nema poklapanja, ne možemo znati koji je nalog
+      // "meta" pokušaja pa se ne uvećava nijedan employee.failedPinAttempts
+      // — umesto toga se uvećava throttle NA NIVOU UREĐAJA (ista tabela/
+      // logika kao email login, packages/db LoginThrottle) da spreči
+      // neograničeno probanje PIN-ova protiv deljenog terminala.
+      const throttleKey = deviceThrottleKey(deviceId);
+      const lockedUntil = await getActiveLoginThrottle(throttleKey);
+      if (lockedUntil) {
+        const retryAfter = Math.max(1, Math.ceil((lockedUntil.getTime() - Date.now()) / 1000));
+        return NextResponse.json(
+          { error: "Previše neuspešnih pokušaja sa ovog uređaja. Pokušaj ponovo kasnije." },
+          { status: 429, headers: { "Retry-After": String(retryAfter) } }
+        );
+      }
 
-    if (!attempt) return NextResponse.json({ error: GENERIC_ERROR }, { status: 401 });
-    const { employee, evaluation } = attempt;
+      const attempt = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<LockedPinEmployee[]>`
+          SELECT e."id", e."userId", e."restaurantId", e."pinHash",
+                 e."failedPinAttempts", e."pinLockedUntil",
+                 u."isActive" AS "userIsActive",
+                 e."status"::text AS "employeeStatus",
+                 r."status"::text AS "restaurantStatus",
+                 t."status"::text AS "tenantStatus"
+          FROM "employees" e
+          JOIN "restaurants" r ON r."id" = e."restaurantId"
+          JOIN "tenants" t ON t."id" = r."tenantId"
+          LEFT JOIN "users" u ON u."id" = e."userId"
+          WHERE e."restaurantId" = ${device.restaurantId}
+            AND e."status" = 'ACTIVE'
+            AND e."pinHash" IS NOT NULL
+          FOR UPDATE OF e
+        `;
+
+        const now = new Date();
+        const candidates = await Promise.all(
+          rows.map(async (row) => {
+            const isLocked = Boolean(row.pinLockedUntil && row.pinLockedUntil > now);
+            const isCorrect = isLocked ? false : await verifyPin(pin, row.pinHash as string);
+            return { row, isCorrect };
+          })
+        );
+        const matched = candidates.find((c) => c.isCorrect);
+        if (!matched) return null;
+
+        const result = evaluatePinAttempt({
+          isCorrect: true,
+          currentFailedAttempts: matched.row.failedPinAttempts,
+          lockedUntil: matched.row.pinLockedUntil,
+          now,
+        });
+        await tx.employee.update({
+          where: { id: matched.row.id },
+          data: { failedPinAttempts: result.newFailedAttempts, pinLockedUntil: result.newLockedUntil },
+        });
+        return { row: matched.row, result };
+      });
+
+      if (!attempt) {
+        await recordFailedLogin(throttleKey);
+        return NextResponse.json({ error: GENERIC_ERROR }, { status: 401 });
+      }
+      await clearLoginThrottle(throttleKey);
+      employee = attempt.row;
+      evaluation = attempt.result;
+    }
 
     if (evaluation.locked) {
       return NextResponse.json(
@@ -132,9 +217,12 @@ export async function POST(request: Request) {
       entityType: "Employee",
       entityId: employee.id,
       action: "auth.pin_login",
+      locationId: device.locationId ?? undefined,
     });
 
-    const response = NextResponse.json({ ok: true });
+    const redirectTo = await resolveRedirectFor(employee.id);
+
+    const response = NextResponse.json({ ok: true, redirectTo });
     response.cookies.set(sessionCookieOptions.name, token, sessionCookieOptions);
     return response;
   } catch (error) {

@@ -4,6 +4,7 @@ import { ADMIN_ROLES } from "@rcs/shared";
 import { AppLogo, APP_NAME } from "../../components/branding/AppLogo";
 import { AdminNav } from "../../components/admin/AdminNav";
 import { LogoutButton } from "../../components/ui/LogoutButton";
+import { QuickLockButton } from "../../components/ui/QuickLockButton";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   await requireRouteAccess(ADMIN_ROLES);
@@ -28,7 +29,10 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <div className="shrink-0 border-t border-graphite-700 px-4 py-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-[10px] text-cream-300/30 tracking-wide">{APP_NAME} · v0.1</p>
-            <LogoutButton theme="dark" />
+            <div className="flex items-center gap-1">
+              <QuickLockButton theme="dark" />
+              <LogoutButton theme="dark" />
+            </div>
           </div>
         </div>
       </aside>
