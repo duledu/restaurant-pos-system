@@ -454,9 +454,23 @@ model Shift {
   closedBy     String?
   closedAt     DateTime?
 
+  // ── FAZA 3: zatvaranje/rekonsilijacija — popunjava se ISKLJUČIVO u
+  // closeShift transakciji, NIKAD posle (nema update endpoint-a). Ovo je
+  // zamrznut snapshot u trenutku zatvaranja, ne uživo računata vrednost —
+  // kasnija izmena povezanih Payment/Order redova (kojih posle zatvaranja
+  // i ne sme biti, vidi closeShift) ne sme promeniti istorijski broj koji
+  // je konobar/menadžer video i potvrdio pri zatvaranju.
+  countedCash    Decimal? @db.Decimal(12, 2) // fizički prebrojana gotovina
+  expectedCash   Decimal? @db.Decimal(12, 2) // openingCash + gotovinske uplate
+  cashDifference Decimal? @db.Decimal(12, 2) // countedCash - expectedCash; NIKAD tiho "ispravljeno"
+  cardTotal      Decimal? @db.Decimal(12, 2)
+  totalRevenue   Decimal? @db.Decimal(12, 2) // cashTotal + cardTotal
+  orderCount     Int? // broj naplaćenih porudžbina u smeni
+
   restaurant Restaurant @relation(fields: [restaurantId], references: [id])
   location   Location   @relation(fields: [locationId], references: [id])
   orders     Order[]
+  payments   Payment[]
 
   // Samo jedna otvorena smena po lokaciji u datom trenutku — sprečava da
   // dva konobara slučajno otvore paralelne smene na istoj kasi. Delimični
@@ -647,6 +661,7 @@ model Payment {
   completedAt    DateTime      @default(now())
 
   order   Order    @relation(fields: [orderId], references: [id])
+  shift   Shift    @relation(fields: [shiftId], references: [id])
   receipt Receipt?
 
   @@index([restaurantId])

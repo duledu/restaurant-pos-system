@@ -6,6 +6,11 @@ export const openShiftSchema = z.object({
 });
 export type OpenShiftInput = z.infer<typeof openShiftSchema>;
 
+export const closeShiftSchema = z.object({
+  countedCash: z.number().nonnegative(),
+});
+export type CloseShiftInput = z.infer<typeof closeShiftSchema>;
+
 export const openOrderSchema = z.object({
   tableId: z.string().uuid(),
   guestCount: z.number().int().positive().max(50).optional(),

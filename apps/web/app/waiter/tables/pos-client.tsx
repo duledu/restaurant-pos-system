@@ -136,7 +136,12 @@ export function PosClient() {
           <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
         </div>
         <div className="flex items-center gap-2">
-          <span className="rounded-full bg-gold-soft px-3 py-1 text-xs font-medium text-gold-dark">Smena aktivna</span>
+          <button
+            onClick={() => router.push("/waiter/shift")}
+            className="rounded-full bg-gold-soft px-3 py-1 text-xs font-medium text-gold-dark transition-colors hover:bg-gold/30"
+          >
+            Smena aktivna — zatvori
+          </button>
           <LogoutButton />
         </div>
       </div>
