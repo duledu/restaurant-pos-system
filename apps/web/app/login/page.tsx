@@ -6,22 +6,31 @@ import { Button } from "../../components/ui/Button";
 import { AppLogo } from "../../components/branding/AppLogo";
 import { PinPad } from "../../components/auth/PinPad";
 import { getDeviceId } from "../../lib/shared-pos";
+import { ROLE_LABEL } from "../../components/admin/role-labels";
 
-type Mode = "pin" | "password";
+type Mode = "staff" | "admin";
+
+interface StaffEntry {
+  id: string;
+  name: string;
+  role: string | null;
+}
 
 export default function LoginPage() {
   const [deviceId, setDeviceId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>("password");
+  const [mode, setMode] = useState<Mode>("admin");
 
   useEffect(() => {
     // Ovaj browser ima registrovan uređaj (packages/domain/devices,
-    // /device-setup) — podrazumevani ekran je PIN tastatura, brže za
-    // svakodnevni rad na deljenom/ličnom uređaju. Bez toga ostaje email
-    // forma (identično ponašanje kao pre ove faze — nema regresije za
-    // uređaje koji nikad nisu registrovani).
+    // /device-setup) — podrazumevani ekran je Zaposleni + PIN, brže za
+    // svakodnevni rad na deljenom/ličnom uređaju (i povratna tačka posle
+    // Quick Lock-a, vidi QuickLockButton). Bez registrovanog uređaja ostaje
+    // email forma — nema drugog načina da se pre PIN-a bezbedno zna kom
+    // restoranu/lokaciji uređaj pripada (vidi napomenu u
+    // devices/device-service.ts listStaffForDevice).
     const id = getDeviceId();
     setDeviceId(id);
-    if (id) setMode("pin");
+    if (id) setMode("staff");
   }, []);
 
   return (
@@ -41,26 +50,22 @@ export default function LoginPage() {
               Restaurant Control System
             </p>
           </div>
-          <p className="w-full text-center text-sm leading-5 text-cream-300/70">
-            {mode === "pin" ? "Unesite PIN" : "Prijava za osoblje restorana"}
-          </p>
+          <p className="w-full text-center text-sm leading-5 text-cream-300/70">Prijava za osoblje restorana</p>
         </header>
 
-        {mode === "pin" && deviceId ? (
-          <PinLoginForm deviceId={deviceId} />
-        ) : (
-          <PasswordLoginForm />
-        )}
+        {mode === "staff" && deviceId ? <StaffLoginForm deviceId={deviceId} /> : <PasswordLoginForm />}
 
         <div className="mt-5 text-center">
-          {deviceId && (
+          {deviceId ? (
             <button
               type="button"
-              onClick={() => setMode((m) => (m === "pin" ? "password" : "pin"))}
+              onClick={() => setMode((m) => (m === "staff" ? "admin" : "staff"))}
               className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
             >
-              {mode === "pin" ? "Prijava sa email/lozinkom" : "Prijava sa PIN kodom"}
+              {mode === "staff" ? "Administratorska prijava" : "← Prijava za osoblje"}
             </button>
+          ) : (
+            <p className="text-xs text-cream-300/40">Ovaj uređaj još nije podešen za PIN prijavu.</p>
           )}
         </div>
       </div>
@@ -68,24 +73,52 @@ export default function LoginPage() {
   );
 }
 
-function PinLoginForm({ deviceId }: { deviceId: string }) {
+function StaffLoginForm({ deviceId }: { deviceId: string }) {
   const router = useRouter();
+  const [staff, setStaff] = useState<StaffEntry[] | null>(null);
+  const [staffError, setStaffError] = useState<string | null>(null);
+  const [employeeId, setEmployeeId] = useState("");
   const [pin, setPin] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/auth/staff-directory?deviceId=${encodeURIComponent(deviceId)}`)
+      .then(async (res) => {
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? "Greška pri učitavanju osoblja");
+        return body.staff as StaffEntry[];
+      })
+      .then((list) => {
+        if (cancelled) return;
+        setStaff(list);
+        if (list.length > 0) setEmployeeId(list[0].id);
+      })
+      .catch((e) => !cancelled && setStaffError(e instanceof Error ? e.message : "Greška"));
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId]);
+
+  const selected = staff?.find((s) => s.id === employeeId) ?? null;
+
   async function submit() {
-    if (loading) return;
+    if (loading || !employeeId) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch("/api/auth/pin-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, deviceId }),
+        body: JSON.stringify({ employeeId, pin, deviceId }),
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? "Prijava nije uspela");
+      if (!res.ok) {
+        if (res.status === 401) throw new Error("PIN nije ispravan. Pokušajte ponovo.");
+        if (res.status === 423 || res.status === 429) throw new Error("Previše neuspešnih pokušaja. Pokušajte ponovo kasnije.");
+        throw new Error(body.error ?? "Prijava nije uspela");
+      }
       router.push(body.redirectTo ?? "/login");
       router.refresh();
     } catch (err) {
@@ -96,14 +129,45 @@ function PinLoginForm({ deviceId }: { deviceId: string }) {
     }
   }
 
+  if (staffError) {
+    return <div className="rounded-sm bg-danger-soft px-3 py-2 text-center text-sm text-danger">{staffError}</div>;
+  }
+
   return (
     <div className="flex flex-col items-center">
+      <div className="mb-5 w-full rounded-lg bg-white p-4 shadow-elevated">
+        <label htmlFor="employee" className="mb-1.5 block text-sm font-medium text-inkSoft">
+          Zaposleni
+        </label>
+        <select
+          id="employee"
+          className="h-14 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
+          value={employeeId}
+          disabled={!staff || staff.length === 0}
+          onChange={(e) => {
+            setEmployeeId(e.target.value);
+            setPin("");
+            setError(null);
+          }}
+        >
+          {!staff && <option>Učitavanje…</option>}
+          {staff?.length === 0 && <option>Nema dostupnog osoblja</option>}
+          {staff?.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        {selected?.role && <p className="mt-1.5 text-sm text-inkSoft">{ROLE_LABEL[selected.role] ?? selected.role}</p>}
+      </div>
+
       {error && (
         <div className="mb-4 w-full rounded-sm bg-danger-soft px-3 py-2 text-center text-sm text-danger animate-fade-in">
           {error}
         </div>
       )}
-      <PinPad value={pin} onChange={setPin} onSubmit={submit} disabled={loading} />
+
+      <PinPad value={pin} onChange={setPin} onSubmit={submit} disabled={loading || !employeeId} />
     </div>
   );
 }

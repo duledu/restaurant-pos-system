@@ -43,11 +43,13 @@ const config: Config = {
         "fade-in": { from: { opacity: "0" }, to: { opacity: "1" } },
         "slide-up": { from: { opacity: "0", transform: "translateY(8px)" }, to: { opacity: "1", transform: "translateY(0)" } },
         "pulse-soft": { "0%,100%": { opacity: "1" }, "50%": { opacity: "0.55" } },
+        "dot-pop": { "0%": { transform: "scale(1.45)" }, "100%": { transform: "scale(1)" } },
       },
       animation: {
         "fade-in": "fade-in 150ms ease-out",
         "slide-up": "slide-up 180ms ease-out",
         "pulse-soft": "pulse-soft 1.8s ease-in-out infinite",
+        "dot-pop": "dot-pop 180ms ease-out",
       },
     },
   },

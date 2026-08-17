@@ -60,3 +60,57 @@ export async function registerDevice(ctx: AuthContext, input: RegisterDeviceInpu
 
   return device;
 }
+
+export interface StaffDirectoryEntry {
+  id: string;
+  name: string;
+  role: string | null;
+}
+
+/**
+ * Lista zaposlenih za "Zaposleni" selektor na /login — namerno JEDINA
+ * funkcija u ovom modulu koja NE prima AuthContext: poziva se PRE
+ * autentifikacije (nema sesije), sa istog ekrana koji potom šalje PIN. Zato
+ * NIJE globalni direktorijum zaposlenih — opseg se izvodi isključivo iz
+ * `deviceId`, koji sme da postoji u browseru samo ako je uređaj već
+ * registrovan kroz autentifikovan /device-setup tok (registerDevice iznad).
+ * Isti princip kao anonimni PIN login (pin-login/route.ts): deviceId je
+ * jedina poverljiva granica pre PIN-a, restaurantId/locationId se NIKAD ne
+ * uzimaju direktno od klijenta.
+ *
+ * Vraća SAMO ono što je potrebno za prikaz izbora (ime, rola) — bez email-a,
+ * pinHash-a, failedPinAttempts, pinLockedUntil, userId-a ili druge interne
+ * evidencije. Vraća samo AKTIVNE zaposlene koji uopšte imaju PIN (isti
+ * uslov koji anonimni PIN login već primenjuje) — OWNER/ADMIN po pravilu
+ * nemaju PIN pa se prirodno ne pojavljuju ovde, bez potrebe za posebnom
+ * listom dozvoljenih rola koja bi mogla da se raziđe od Staff Management-a.
+ *
+ * Vraća `null` ako uređaj nije registrovan/aktivan — poziva se pre PIN-a pa
+ * ruta ovo mapira na 403, isto kao pin-login.
+ */
+export async function listStaffForDevice(deviceId: string): Promise<StaffDirectoryEntry[] | null> {
+  const device = await prisma.device.findUnique({ where: { id: deviceId } });
+  if (!device || !device.isActive) return null;
+
+  const employees = await prisma.employee.findMany({
+    where: {
+      restaurantId: device.restaurantId,
+      status: "ACTIVE",
+      pinHash: { not: null },
+      ...(device.locationId ? { locations: { some: { locationId: device.locationId } } } : {}),
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      roles: { select: { role: { select: { name: true } } } },
+    },
+    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+  });
+
+  return employees.map((e) => ({
+    id: e.id,
+    name: `${e.firstName} ${e.lastName}`.trim(),
+    role: e.roles[0]?.role.name ?? null,
+  }));
+}
