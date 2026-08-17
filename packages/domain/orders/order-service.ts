@@ -63,7 +63,23 @@ async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
   // NIJE dovoljan (zaposleni sa pristupom Lokaciji A ne sme dotaći
   // porudžbinu Lokacije B u istom restoranu).
   requireLocationAccess(ctx, order.locationId);
-  if (order.status !== "DRAFT") throw new Error("Porudžbina više nije u nacrtu — ne može se menjati ovim putem");
+  if (order.status !== "DRAFT") {
+    // Poslata porudžbina se NIKAD ne menja ovim putem (add/update/remove) —
+    // to je bez izuzetka putanja za controlled void (voidOrderItem, Faza 4).
+    // Zabeleži pokušaj kao evidenciju (specifikacija #11) — bez obzira da li
+    // je posledica zastarelog UI-ja na klijentu ili stvarnog pokušaja
+    // zaobilaženja void toka, obrazac ponavljanja postaje vidljiv u Fazi 5.
+    await recordAuditEntry(ctx, {
+      entityType: "Order",
+      entityId: orderId,
+      action: "order_item.mutation_attempt_rejected",
+      newValue: { orderStatus: order.status },
+      category: "UNAUTHORIZED_ATTEMPT",
+      severity: "WARNING",
+      isSuspicious: true,
+    });
+    throw new Error("Porudžbina više nije u nacrtu — ne može se menjati ovim putem");
+  }
   requireDraftOwnership(ctx, order.openedBy);
   return order;
 }

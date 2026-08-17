@@ -19,3 +19,17 @@ export function requireDraftOwnership(
   if (isOrderManager(ctx) || openedBy === ctx.employeeId) return;
   throw new ForbiddenError("Ovu porudžbinu je otvorio drugi konobar");
 }
+
+/**
+ * Poništavanje/redukcija VEĆ POSLATE stavke (Faza 4) je namerno ograničeno
+ * na menadžment (OWNER/ADMIN/MANAGER) — za razliku od DRAFT izmena koje
+ * konobar radi slobodno. Ovo je najosetljivija tačka za zloupotrebu
+ * (konobar bi mogao da "poništi" prodatu stavku i zadrži gotovinu), pa
+ * cilj "otežati zloupotrebu zaposlenih" preteže nad brzinom — konobar
+ * traži menadžera da izvrši/odobri poništavanje, ista praksa kao u većini
+ * pravih restoranskih POS sistema.
+ */
+export function requireVoidAuthority(ctx: Pick<AuthContext, "roles">): void {
+  if (isOrderManager(ctx)) return;
+  throw new ForbiddenError("Samo menadžer ili vlasnik može poništiti poslatu stavku");
+}

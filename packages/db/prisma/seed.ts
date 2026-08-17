@@ -40,6 +40,7 @@ const PERMISSIONS = [
   { code: "shifts.manage", description: "Otvaranje i zatvaranje smene" },
   { code: "production.view", description: "Pregled tiketa kuhinje/šanka" },
   { code: "production.manage", description: "Promena statusa stavki na kuhinji/šanku" },
+  { code: "audit.view", description: "Pregled audit evidencije i sumnjive aktivnosti (Faza 4/5)" },
 ] as const;
 
 // Ko dobija koju permisiju — MVP je namerno grub (role → skup permisija),
@@ -47,9 +48,9 @@ const PERMISSIONS = [
 // Ključno pravilo iz specifikacije: WAITER/KITCHEN/BAR NIKAD ne dobijaju
 // menu.manage niti employees.manage.
 const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> = {
-  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage"],
-  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage"],
-  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage"],
+  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view"],
+  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view"],
+  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view"],
   WAITER: ["menu.view", "shifts.manage"],
   KITCHEN: ["menu.view", "production.view", "production.manage"],
   BAR: ["menu.view", "production.view", "production.manage"],

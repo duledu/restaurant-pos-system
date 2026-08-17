@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VOID_REASON_CODES } from "./void-reasons";
 
 export const openShiftSchema = z.object({
   locationId: z.string().uuid(),
@@ -46,3 +47,14 @@ export const completePaymentSchema = z.object({
   tenderedAmount: z.number().nonnegative().optional(),
 });
 export type CompletePaymentInput = z.infer<typeof completePaymentSchema>;
+
+export const voidOrderItemSchema = z.object({
+  quantity: z.number().int().min(1),
+  reasonCode: z.enum(VOID_REASON_CODES),
+  // Namerno samo oblik ovde (obavezno, razumna dužina) — STVARNA provera
+  // smislenosti (isMeaningfulVoidExplanation) radi se u void-service.ts, ne
+  // ovde, isto kao što billing-service (ne zod) proverava iznos gotovine —
+  // domenska pravila žive u servisu, zod samo u obliku ulaza.
+  explanation: z.string().trim().min(1, "Obrazloženje je obavezno").max(500),
+});
+export type VoidOrderItemInput = z.infer<typeof voidOrderItemSchema>;
