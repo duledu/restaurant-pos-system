@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { LogoutButton } from "../../../../components/ui/LogoutButton";
 
 interface Category {
   id: string;
@@ -193,7 +194,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
             ← Stolovi
           </button>
           <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
-          <span className="w-16" />
+          <LogoutButton />
         </div>
 
         <div className="mb-3 rounded-md bg-success-soft px-3 py-2 text-center text-sm font-medium text-success animate-fade-in">
@@ -239,7 +240,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
         <button onClick={() => router.push("/waiter/tables")} className="text-sm font-medium text-gold-dark">
           ← Stolovi
         </button>
-        <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
+          <LogoutButton />
+        </div>
       </div>
 
       {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}

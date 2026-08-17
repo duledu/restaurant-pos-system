@@ -32,6 +32,32 @@ export class ForbiddenError extends Error {
   }
 }
 
+export interface ActiveSessionEntities {
+  employeeStatus: string;
+  userIsActive: boolean | null;
+  allowMissingUser?: boolean;
+  restaurantStatus: string;
+  tenantStatus: string;
+}
+
+export function assertActiveSessionEntities(entities: ActiveSessionEntities): void {
+  if (entities.employeeStatus !== "ACTIVE") {
+    throw new UnauthorizedError("Nalog zaposlenog nije aktivan");
+  }
+  if (entities.userIsActive === false) {
+    throw new UnauthorizedError("Korisnički nalog nije aktivan");
+  }
+  if (entities.userIsActive === null && !entities.allowMissingUser) {
+    throw new UnauthorizedError("Korisnički nalog više ne postoji");
+  }
+  if (entities.restaurantStatus !== "ACTIVE") {
+    throw new UnauthorizedError("Restoran nije aktivan");
+  }
+  if (entities.tenantStatus !== "ACTIVE") {
+    throw new UnauthorizedError("Tenant nije aktivan");
+  }
+}
+
 /**
  * Učitava i validira sesiju iz cookie-ja, zatim učitava SVEŽE role/permission
  * i dozvoljene lokacije iz baze (nikad iz JWT payload-a — vidi napomenu u
@@ -59,6 +85,13 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
   const employee = await prisma.employee.findUnique({
     where: { id: session.employeeId },
     include: {
+      user: { select: { isActive: true } },
+      restaurant: {
+        select: {
+          status: true,
+          tenant: { select: { status: true } },
+        },
+      },
       locations: { select: { locationId: true } },
       roles: {
         include: {
@@ -70,9 +103,17 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
     },
   });
 
-  if (!employee || employee.status !== "ACTIVE" || employee.restaurantId !== session.restaurantId) {
+  if (!employee || employee.restaurantId !== session.restaurantId) {
     throw new UnauthorizedError("Nalog zaposlenog nije aktivan ili ne odgovara sesiji");
   }
+
+  assertActiveSessionEntities({
+    employeeStatus: employee.status,
+    userIsActive: employee.user?.isActive ?? null,
+    allowMissingUser: Boolean(session.deviceId),
+    restaurantStatus: employee.restaurant.status,
+    tenantStatus: employee.restaurant.tenant.status,
+  });
 
   const roles = employee.roles.map((er) => er.role.name);
   const permissions = new Set<string>();

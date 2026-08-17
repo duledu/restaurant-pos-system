@@ -1,6 +1,7 @@
 import { prisma, type OrderItemStatus } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { ssePublisher } from "../realtime/sse-publisher";
+import { aggregateStationStatus } from "./station-state";
 
 const PRODUCTION_VIEW = "production.view";
 const PRODUCTION_MANAGE = "production.manage";
@@ -40,12 +41,13 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
       ...scopeToRestaurant(ctx),
       locationId,
       status: { in: ["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"] },
-      items: { some: { preparationStation: station, status: { in: ACTIVE_ITEM_STATUSES } } },
+      items: { some: { stationStates: { some: { station, status: { in: ACTIVE_ITEM_STATUSES } } } } },
     },
     include: {
       table: { select: { label: true } },
       items: {
-        where: { preparationStation: station },
+        where: { stationStates: { some: { station, status: { in: ACTIVE_ITEM_STATUSES } } } },
+        include: { stationStates: { where: { station }, select: { status: true } } },
         orderBy: { createdAt: "asc" },
       },
     },
@@ -66,7 +68,10 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
     tableLabel: o.table.label,
     waiterName: nameById.get(o.openedBy) ?? "?",
     submittedAt: o.submittedAt,
-    items: o.items,
+    items: o.items.map(({ stationStates, ...item }) => ({
+      ...item,
+      status: stationStates[0].status,
+    })),
   }));
 }
 
@@ -77,31 +82,62 @@ const NEXT_STATUS: Record<string, string> = {
   READY: "SERVED",
 };
 
-export async function advanceItemStatus(ctx: AuthContext, orderId: string, itemId: string, station: Station) {
+export async function advanceItemStatus(
+  ctx: AuthContext,
+  orderId: string,
+  itemId: string,
+  station: Station,
+  expectedStatus: OrderItemStatus
+) {
   requirePermission(ctx, PRODUCTION_MANAGE);
   assertStationAccess(ctx, station);
 
   const item = await prisma.orderItem.findFirst({
-    where: { id: itemId, orderId, preparationStation: station, order: scopeToRestaurant(ctx) },
-    include: { order: true },
+    where: {
+      id: itemId,
+      orderId,
+      stationStates: { some: { station } },
+      order: scopeToRestaurant(ctx),
+    },
+    include: { order: true, stationStates: true },
   });
   if (!item) throw new Error("Stavka nije pronađena za ovu stanicu");
   // restaurantId scoping (gore) nije dovoljan u restoranu sa više lokacija —
   // zaposleni na Lokaciji A ne sme pomerati stavke porudžbina Lokacije B.
   requireLocationAccess(ctx, item.order.locationId);
 
-  const nextStatus = NEXT_STATUS[item.status];
-  if (!nextStatus) throw new Error(`Stavka u statusu ${item.status} se ne može dalje pomeriti`);
+  const stationState = item.stationStates.find((state) => state.station === station);
+  if (!stationState) throw new Error("Stavka nije pronađena za ovu stanicu");
+  if (stationState.status !== expectedStatus) {
+    throw new Error("Status stavke je već promenjen — osveži prikaz");
+  }
+  const nextStatus = NEXT_STATUS[expectedStatus];
+  if (!nextStatus) throw new Error(`Stavka u statusu ${expectedStatus} se ne može dalje pomeriti`);
 
-  const updated = await prisma.orderItem.update({ where: { id: itemId }, data: { status: nextStatus as never } });
-
-  await prisma.orderEvent.create({
-    data: {
-      orderId,
-      type: "order_item.status_changed",
-      createdBy: ctx.employeeId,
-      payload: { itemId, from: item.status, to: nextStatus, station },
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const advanced = await tx.orderItemStation.updateMany({
+      where: { orderItemId: itemId, station, status: expectedStatus },
+      data: { status: nextStatus as OrderItemStatus },
+    });
+    if (advanced.count !== 1) throw new Error("Status stavke je već promenjen — osveži prikaz");
+    const state = await tx.orderItemStation.findUniqueOrThrow({
+      where: { orderItemId_station: { orderItemId: itemId, station } },
+    });
+    const states = await tx.orderItemStation.findMany({
+      where: { orderItemId: itemId },
+      select: { status: true },
+    });
+    const aggregateStatus = aggregateStationStatus(states.map((entry) => entry.status));
+    await tx.orderItem.update({ where: { id: itemId }, data: { status: aggregateStatus } });
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        type: "order_item.status_changed",
+        createdBy: ctx.employeeId,
+        payload: { itemId, from: expectedStatus, to: nextStatus, station, aggregateStatus },
+      },
+    });
+    return state;
   });
 
   await ssePublisher.publish({

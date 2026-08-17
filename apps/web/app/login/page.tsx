@@ -35,58 +35,70 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-graphite px-4">
-      <div className="w-full max-w-sm animate-slide-up">
+    <main className="flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-graphite px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(2rem,10dvh,5rem)] sm:px-6">
+      <div className="w-full max-w-sm animate-slide-up self-start">
         {/* Logo */}
-        <div className="mb-8 flex flex-col items-center gap-3">
-          <TableCoreLogo theme="dark" size="lg" variant="full" className="justify-center" />
-          <p className="text-sm text-cream-300/60">Prijava za osoblje restorana</p>
-        </div>
+        <header className="mb-[clamp(1.25rem,4dvh,1.75rem)] flex w-full flex-col items-center gap-2.5 text-center">
+          <TableCoreLogo theme="dark" size="lg" variant="full" className="mx-auto justify-center" />
+          <p className="w-full text-center text-sm leading-5 text-cream-300/70">Prijava za osoblje restorana</p>
+        </header>
 
-        <form onSubmit={submit} className="rounded-lg bg-white p-6 shadow-elevated">
+        <form onSubmit={submit} className="rounded-lg bg-white p-5 shadow-elevated sm:p-6">
           {error && (
             <div className="mb-4 rounded-sm bg-danger-soft px-3 py-2 text-sm text-danger animate-fade-in">
               {error}
             </div>
           )}
 
-          <label className="mb-1 block text-xs font-medium text-inkSoft">Email</label>
-          <input
-            type="email"
-            autoComplete="username"
-            required
-            className="mb-4 w-full rounded-sm border border-line px-3 py-2.5 text-sm focus:border-gold focus:outline-none"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-
-          <label className="mb-1 block text-xs font-medium text-inkSoft">Lozinka</label>
-          <div className="relative mb-6">
+          <div className="mb-4">
+            <label htmlFor="email" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+              Email
+            </label>
             <input
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
+              id="email"
+              type="email"
+              autoComplete="username"
               required
-              className="w-full rounded-sm border border-line px-3 py-2.5 pr-16 text-sm focus:border-gold focus:outline-none"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              className="h-11 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
             />
-            <button
-              type="button"
-              onClick={() => setShowPassword((v) => !v)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-medium text-inkSoft hover:text-ink"
-            >
-              {showPassword ? "Sakrij" : "Prikaži"}
-            </button>
           </div>
 
-          <Button type="submit" variant="primary" size="lg" loading={loading} className="w-full">
+          <div className="mb-5">
+            <label htmlFor="password" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+              Lozinka
+            </label>
+            <div className="relative">
+              <input
+                id="password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                required
+                className="h-11 w-full rounded-md border border-line px-3 pr-20 text-base text-ink focus:border-gold focus:outline-none"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-controls="password"
+                aria-pressed={showPassword}
+                className="absolute inset-y-0 right-0 flex min-h-11 items-center rounded-r-md px-3 text-sm font-medium text-inkSoft transition-colors hover:text-ink"
+              >
+                {showPassword ? "Sakrij" : "Prikaži"}
+              </button>
+            </div>
+          </div>
+
+          <Button type="submit" variant="primary" size="lg" loading={loading} className="h-12 w-full py-0">
             {loading ? "Prijavljivanje…" : "Prijavi se"}
           </Button>
         </form>
 
         {process.env.NODE_ENV === "development" && <DevTestAccounts />}
       </div>
-    </div>
+    </main>
   );
 }
 

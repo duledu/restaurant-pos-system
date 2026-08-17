@@ -3,6 +3,7 @@ import { requireRouteAccess } from "../../lib/route-guard";
 import { ADMIN_ROLES } from "@rcs/shared";
 import { TableCoreLogo } from "../../components/ui/TableCoreLogo";
 import { AdminNav } from "../../components/admin/AdminNav";
+import { LogoutButton } from "../../components/ui/LogoutButton";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   await requireRouteAccess(ADMIN_ROLES);
@@ -28,7 +29,10 @@ export default async function AdminLayout({ children }: { children: React.ReactN
 
         {/* Footer */}
         <div className="shrink-0 border-t border-graphite-700 px-4 py-3">
-          <p className="text-[10px] text-cream-300/30 tracking-wide">TableCore · v0.1</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[10px] text-cream-300/30 tracking-wide">TableCore · v0.1</p>
+            <LogoutButton theme="dark" />
+          </div>
         </div>
       </aside>
 

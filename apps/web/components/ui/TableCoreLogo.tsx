@@ -8,18 +8,22 @@ interface LogoProps {
 const SIZE_MAP = {
   sm: { mark: 24, text: 14, sub: 8 },
   md: { mark: 32, text: 18, sub: 10 },
-  lg: { mark: 44, text: 24, sub: 12 },
+  lg: {
+    mark: "clamp(3.25rem, 15vw, 3.75rem)",
+    text: "clamp(1.5rem, 7vw, 1.75rem)",
+    sub: "clamp(0.5625rem, 2.65vw, 0.625rem)",
+  },
   xl: { mark: 64, text: 32, sub: 14 },
 };
 
-function TcMark({ size, theme }: { size: number; theme: "dark" | "light" }) {
+function TcMark({ size, theme }: { size: number | string; theme: "dark" | "light" }) {
   const tableColor = theme === "dark" ? "#FFFFFF" : "#0A1931";
   const cColor = theme === "dark" ? "#B3CFE5" : "#4A7FA7";
 
   return (
     <svg
-      width={size}
-      height={size}
+      className="block max-w-full shrink-0"
+      style={{ width: size, height: "auto", aspectRatio: "1 / 1" }}
       viewBox="0 0 44 44"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
@@ -67,16 +71,17 @@ export function TableCoreLogo({ variant = "full", theme = "light", size = "md", 
   }
 
   return (
-    <div className={`flex items-center gap-2.5 ${className}`} aria-label="TableCore Restaurant Control System">
+    <div className={`inline-flex max-w-full items-center gap-2 ${className}`} aria-label="TableCore Restaurant Control System">
       <TcMark size={mark} theme={theme} />
-      <div className="flex flex-col leading-none">
-        <span style={{ fontSize: text, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.1 }}>
+      <div className="flex min-w-0 flex-col justify-center leading-none">
+        <span className="whitespace-nowrap" style={{ fontSize: text, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.1 }}>
           <span style={{ color: tableText }}>Table</span>
           <span style={{ color: coreText }}>Core</span>
         </span>
         {size !== "sm" && (
           <span
-            style={{ fontSize: sub, color: subText, letterSpacing: "0.12em", textTransform: "uppercase", marginTop: 3, fontWeight: 500 }}
+            className="whitespace-nowrap"
+            style={{ fontSize: sub, color: subText, letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 3, fontWeight: 500 }}
           >
             Restaurant Control System
           </span>

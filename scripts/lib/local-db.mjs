@@ -77,7 +77,12 @@ function runInPackagesDb(npmScript, extraEnv) {
     cwd: path.join(ROOT, "packages", "db"),
     stdio: "inherit",
     shell: true,
-    env: { ...process.env, DATABASE_URL: localDatabaseUrl(), ...extraEnv },
+    env: {
+      ...process.env,
+      DATABASE_URL: localDatabaseUrl(),
+      DIRECT_URL: localDatabaseUrl(),
+      ...extraEnv,
+    },
   });
   if (result.status !== 0) {
     throw new Error(`"npm run ${npmScript}" (packages/db) nije uspeo (exit ${result.status})`);

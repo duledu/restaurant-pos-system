@@ -130,6 +130,20 @@ model User {
   @@map("users")
 }
 
+// Persistent email-login throttle state. The key is a SHA-256 digest of the
+// normalized email, so this table does not become another store of account
+// identifiers. Database persistence makes throttling consistent across
+// serverless instances.
+model LoginThrottle {
+  key            String   @id
+  failedAttempts Int      @default(0)
+  lockedUntil    DateTime?
+  updatedAt      DateTime @updatedAt
+
+  @@index([lockedUntil])
+  @@map("login_throttles")
+}
+
 model Employee {
   id                String         @id @default(uuid())
   restaurantId      String
@@ -524,18 +538,43 @@ model OrderItem {
   note               String? // jedna slobodna napomena po stavci (MVP)
   preparationStation PreparationStation @default(NONE) // snapshot stanice u trenutku slanja
 
+  // DRAFT pre-submit; afterwards this is a waiter-facing aggregate of
+  // stationStates (least-advanced station). KDS never mutates it directly.
   status    OrderItemStatus @default(DRAFT)
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
   order    Order     @relation(fields: [orderId], references: [id])
   menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  stationStates OrderItemStation[]
 
   @@index([orderId])
   @@index([menuItemId])
   @@index([status])
   @@index([preparationStation])
   @@map("order_items")
+}
+
+// Per-station production state. OrderItem remains the single commercial item;
+// this model only allows kitchen and bar to progress independently.
+model OrderItemStation {
+  id          String            @id @default(uuid())
+  orderItemId String
+  station     ProductionStation
+  status      OrderItemStatus   @default(SUBMITTED)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([orderItemId, station])
+  @@index([station, status])
+  @@map("order_item_stations")
+}
+
+enum ProductionStation {
+  KITCHEN
+  BAR
 }
 
 enum OrderItemStatus {

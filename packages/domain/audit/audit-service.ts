@@ -5,7 +5,7 @@
  * dosledan (vidi requireEntry ispod).
  */
 
-import { prisma } from "@rcs/db";
+import { prisma, type Prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
 
 export interface AuditEntryInput {
@@ -18,8 +18,12 @@ export interface AuditEntryInput {
   ipAddress?: string;
 }
 
-export async function recordAuditEntry(ctx: AuthContext, entry: AuditEntryInput): Promise<void> {
-  await prisma.auditLog.create({
+export async function recordAuditEntry(
+  ctx: AuthContext,
+  entry: AuditEntryInput,
+  db: Prisma.TransactionClient | typeof prisma = prisma
+): Promise<void> {
+  await db.auditLog.create({
     data: {
       restaurantId: ctx.restaurantId,
       userId: ctx.userId,

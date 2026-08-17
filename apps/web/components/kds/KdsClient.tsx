@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { LogoutButton } from "../ui/LogoutButton";
 
 interface StationItem {
   id: string;
@@ -109,11 +110,11 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     return () => clearInterval(interval);
   }, [load]);
 
-  async function advance(orderId: string, itemId: string) {
+  async function advance(orderId: string, itemId: string, expectedStatus: StationItem["status"]) {
     try {
       await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
         method: "POST",
-        body: JSON.stringify({ station }),
+        body: JSON.stringify({ station, expectedStatus }),
       });
       await load();
     } catch (e) {
@@ -125,7 +126,10 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     <div className="min-h-screen p-4">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-cream-100">{title}</h1>
-        <span className="text-xs text-cream-300/70">{orders.length} aktivnih porudžbina</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-cream-300/70">{orders.length} aktivnih porudžbina</span>
+          <LogoutButton theme="dark" />
+        </div>
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
@@ -179,7 +183,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                       </div>
                       {STATUS_ACTION_LABEL[item.status] && (
                         <button
-                          onClick={() => advance(order.orderId, item.id)}
+                          onClick={() => advance(order.orderId, item.id, item.status)}
                           className="mt-2 w-full rounded-sm bg-gold py-2 text-sm font-semibold text-white active:scale-95 hover:bg-gold-dark transition-colors"
                         >
                           {STATUS_ACTION_LABEL[item.status]}

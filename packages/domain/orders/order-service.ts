@@ -4,6 +4,8 @@ import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
 import { getActiveShift } from "../shifts/shift-service";
 import { getTable } from "../tables/table-service";
+import { stationsForPreparation } from "../production/station-state";
+import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, SubmitOrderInput } from "@rcs/shared";
 
 /**
@@ -13,6 +15,7 @@ import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, SubmitOrd
  * smene nema unosa porudžbina).
  */
 export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
+  requireOrderOperator(ctx);
   const table = await getTable(ctx, input.tableId);
   const shift = await getActiveShift(ctx, table.floor.locationId);
   if (!shift) {
@@ -22,29 +25,33 @@ export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
   const existingDraft = await prisma.order.findFirst({
     where: { ...scopeToRestaurant(ctx), tableId: input.tableId, status: "DRAFT" },
   });
-  if (existingDraft) return existingDraft;
+  if (existingDraft) {
+    requireDraftOwnership(ctx, existingDraft.openedBy);
+    return existingDraft;
+  }
 
-  const order = await prisma.order.create({
-    data: {
-      restaurantId: ctx.restaurantId,
-      locationId: table.floor.locationId,
-      tableId: input.tableId,
-      shiftId: shift.id,
-      openedBy: ctx.employeeId,
-      guestCount: input.guestCount,
-    },
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.order.create({
+      data: {
+        restaurantId: ctx.restaurantId,
+        locationId: table.floor.locationId,
+        tableId: input.tableId,
+        shiftId: shift.id,
+        openedBy: ctx.employeeId,
+        guestCount: input.guestCount,
+      },
+    });
+
+    await tx.restaurantTable.update({ where: { id: input.tableId }, data: { status: "OCCUPIED" } });
+    await tx.orderEvent.create({
+      data: { orderId: order.id, type: "order_opened", createdBy: ctx.employeeId },
+    });
+    return order;
   });
-
-  await prisma.restaurantTable.update({ where: { id: input.tableId }, data: { status: "OCCUPIED" } });
-
-  await prisma.orderEvent.create({
-    data: { orderId: order.id, type: "order_opened", createdBy: ctx.employeeId },
-  });
-
-  return order;
 }
 
 async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
+  requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({ where: { id: orderId, ...scopeToRestaurant(ctx) } });
   if (!order) throw new Error("Porudžbina nije pronađena");
   // Restoran može imati više lokacija — restaurantId scoping sam po sebi
@@ -52,16 +59,19 @@ async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
   // porudžbinu Lokacije B u istom restoranu).
   requireLocationAccess(ctx, order.locationId);
   if (order.status !== "DRAFT") throw new Error("Porudžbina više nije u nacrtu — ne može se menjati ovim putem");
+  requireDraftOwnership(ctx, order.openedBy);
   return order;
 }
 
 export async function getOrder(ctx: AuthContext, orderId: string) {
+  requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({
     where: { id: orderId, ...scopeToRestaurant(ctx) },
     include: { items: { orderBy: { createdAt: "asc" } }, table: true },
   });
   if (!order) throw new Error("Porudžbina nije pronađena");
   requireLocationAccess(ctx, order.locationId);
+  if (order.status === "DRAFT") requireDraftOwnership(ctx, order.openedBy);
   return order;
 }
 
@@ -80,29 +90,30 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
   // konobar treba da vidi tačnu cenu u pregledu porudžbine pre slanja.
   // Cena se PONOVO snapshot-uje (ne menja) pri submitOrder ispod, na
   // slučaj da je cena promenjena između dodavanja u draft i slanja.
-  const item = await prisma.orderItem.create({
-    data: {
-      orderId,
-      menuItemId: menuItem.id,
-      name: menuItem.name,
-      price: menuItem.price,
-      taxRate: menuItem.taxRate,
-      quantity: input.quantity,
-      note: input.note,
-      preparationStation: menuItem.preparationStation,
-    },
-  });
+  return prisma.$transaction(async (tx) => {
+    const item = await tx.orderItem.create({
+      data: {
+        orderId,
+        menuItemId: menuItem.id,
+        name: menuItem.name,
+        price: menuItem.price,
+        taxRate: menuItem.taxRate,
+        quantity: input.quantity,
+        note: input.note,
+        preparationStation: menuItem.preparationStation,
+      },
+    });
 
-  await prisma.orderEvent.create({
-    data: {
-      orderId,
-      type: "item_added",
-      createdBy: ctx.employeeId,
-      payload: { menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity },
-    },
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        type: "item_added",
+        createdBy: ctx.employeeId,
+        payload: { menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity },
+      },
+    });
+    return item;
   });
-
-  return item;
 }
 
 export async function updateItem(ctx: AuthContext, orderId: string, itemId: string, input: UpdateOrderItemInput) {
@@ -111,13 +122,13 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
   const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
   if (!item) throw new Error("Stavka nije pronađena");
 
-  const updated = await prisma.orderItem.update({ where: { id: itemId }, data: input });
-
-  await prisma.orderEvent.create({
-    data: { orderId, type: "item_updated", createdBy: ctx.employeeId, payload: input },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.orderItem.update({ where: { id: itemId }, data: input });
+    await tx.orderEvent.create({
+      data: { orderId, type: "item_updated", createdBy: ctx.employeeId, payload: input },
+    });
+    return updated;
   });
-
-  return updated;
 }
 
 export async function removeItem(ctx: AuthContext, orderId: string, itemId: string) {
@@ -130,10 +141,11 @@ export async function removeItem(ctx: AuthContext, orderId: string, itemId: stri
   // brisanje je bezbedno ovde. Nakon submit-a, uklanjanje stavke ide kroz
   // sasvim drugu putanju (item_cancel_requested/approved, Faza 5), NIKAD
   // ovom funkcijom — vidi pravilo "poslata stavka se ne menja in-place".
-  await prisma.orderItem.delete({ where: { id: itemId } });
-
-  await prisma.orderEvent.create({
-    data: { orderId, type: "item_removed", createdBy: ctx.employeeId, payload: { itemId, name: item.name } },
+  await prisma.$transaction(async (tx) => {
+    await tx.orderItem.delete({ where: { id: itemId } });
+    await tx.orderEvent.create({
+      data: { orderId, type: "item_removed", createdBy: ctx.employeeId, payload: { itemId, name: item.name } },
+    });
   });
 }
 
@@ -169,12 +181,12 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
 
   const order = await getOwnedDraftOrder(ctx, orderId);
 
-  const items = await prisma.orderItem.findMany({ where: { orderId } });
-  if (items.length === 0) {
-    throw new Error("Porudžbina nema nijednu stavku");
-  }
-
   const submitted = await prisma.$transaction(async (tx) => {
+    const items = await tx.orderItem.findMany({ where: { orderId } });
+    if (items.length === 0) {
+      throw new Error("Porudžbina nema nijednu stavku");
+    }
+
     // Re-snapshot cene/naziva u trenutku SLANJA (ne samo dodavanja u draft)
     // — ako je cena promenjena u međuvremenu kroz Admin Panel, porudžbina
     // odlazi kuhinji/šanku sa cenom koja važi SADA, ne sa zastarelom.
@@ -190,6 +202,21 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     }
 
     await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });
+    await tx.orderItem.updateMany({
+      where: { orderId, preparationStation: "NONE" },
+      data: { status: "SERVED" },
+    });
+
+    const stationRows = items.flatMap((item) =>
+      stationsForPreparation(item.preparationStation).map((station) => ({
+        orderItemId: item.id,
+        station,
+        status: "SUBMITTED" as const,
+      }))
+    );
+    if (stationRows.length > 0) {
+      await tx.orderItemStation.createMany({ data: stationRows });
+    }
 
     const updatedOrder = await tx.order.update({
       where: { id: orderId },
@@ -204,14 +231,14 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       data: { orderId, type: "order_submitted", createdBy: ctx.employeeId, payload: { itemCount: items.length } },
     });
 
-    return updatedOrder;
-  });
+    await recordAuditEntry(ctx, {
+      entityType: "Order",
+      entityId: orderId,
+      action: "order.submitted",
+      newValue: { itemCount: items.length },
+    }, tx);
 
-  await recordAuditEntry(ctx, {
-    entityType: "Order",
-    entityId: orderId,
-    action: "order.submitted",
-    newValue: { itemCount: items.length },
+    return updatedOrder;
   });
 
   // Real-time obaveštenje TEK posle uspešnog COMMIT-a.
