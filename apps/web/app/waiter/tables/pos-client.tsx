@@ -20,10 +20,10 @@ interface Shift {
 }
 
 const STATUS_STYLE: Record<Table["status"], string> = {
-  FREE: "bg-white border-line text-ink",
+  FREE: "bg-white border-line text-ink hover:border-gold/60",
   OCCUPIED: "bg-graphite text-white border-gold",
   AWAITING_BILL: "bg-warn text-white border-warn",
-  NEEDS_CLEANING: "bg-ink/10 text-ink/50 border-line",
+  NEEDS_CLEANING: "bg-cream-300/30 text-ink/40 border-line",
 };
 
 const STATUS_LABEL: Record<Table["status"], string> = {
@@ -98,14 +98,14 @@ export function PosClient() {
   }
 
   if (loading) {
-    return <div className="flex min-h-screen items-center justify-center text-ink/40">Učitavanje…</div>;
+    return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
   }
 
   if (!shift) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6">
         <h1 className="text-xl font-semibold text-ink">Nema aktivne smene</h1>
-        <p className="text-center text-sm text-ink/60">Unesi početno stanje kase da otvoriš smenu i počneš rad.</p>
+        <p className="text-center text-sm text-ink/70">Unesi početno stanje kase da otvoriš smenu i počneš rad.</p>
         {error && <div className="text-sm text-danger">{error}</div>}
         <input
           className="w-48 rounded-md border border-line px-4 py-3 text-center text-lg"
@@ -133,7 +133,7 @@ export function PosClient() {
       {error && <div className="mb-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
       {floors.map((floor) => (
         <div key={floor.id} className="mb-6">
-          <h2 className="mb-2 text-sm font-medium text-ink/60">{floor.name}</h2>
+          <h2 className="mb-2 text-sm font-medium text-ink/70">{floor.name}</h2>
           <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6">
             {floor.tables.map((table) => (
               <button

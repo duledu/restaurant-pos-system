@@ -1,15 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
-
 body {
-  background: #F7F3EC;
-  color: #1E1D1B;
+  background: #F6FAFD;
+  color: #0A1931;
 }
 
 :focus-visible {
-  outline: 2px solid #B8935A;
+  outline: 2px solid #4A7FA7;
   outline-offset: 2px;
 }

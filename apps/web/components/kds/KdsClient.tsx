@@ -32,8 +32,8 @@ const STATUS_ACTION_LABEL: Record<string, string> = {
 };
 
 const STATUS_BADGE: Record<string, string> = {
-  SUBMITTED: "bg-info text-white",
-  ACCEPTED: "bg-gold text-graphite-900",
+  SUBMITTED: "bg-gold-soft text-gold-dark",
+  ACCEPTED: "bg-gold text-white",
   PREPARING: "bg-warn text-white",
   READY: "bg-success text-white",
 };
@@ -124,18 +124,18 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   return (
     <div className="min-h-screen p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="font-display text-2xl font-medium text-cream-100">{title}</h1>
-        <span className="text-xs text-cream-300/50">{orders.length} aktivnih porudžbina</span>
+        <h1 className="text-2xl font-semibold text-cream-100">{title}</h1>
+        <span className="text-xs text-cream-300/70">{orders.length} aktivnih porudžbina</span>
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
 
       {loading ? (
-        <div className="py-24 text-center text-cream-300/40">Učitavanje…</div>
+        <div className="py-24 text-center text-cream-300/60">Učitavanje…</div>
       ) : orders.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 py-24 text-center">
           <p className="text-lg font-medium text-cream-100">Nema aktivnih porudžbina</p>
-          <p className="text-sm text-cream-300/50">Nove porudžbine će se automatski pojaviti ovde.</p>
+          <p className="text-sm text-cream-300/70">Nove porudžbine će se automatski pojaviti ovde.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -152,7 +152,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <div className="text-lg font-bold text-cream-100">{order.tableLabel}</div>
-                    <div className="text-xs text-cream-300/50">{order.waiterName}</div>
+                    <div className="text-xs text-cream-300/70">{order.waiterName}</div>
                   </div>
                   <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/70"}`}>
                     {waitMin} min
@@ -167,7 +167,11 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                           <div className="font-medium text-cream-100">
                             {item.quantity}× {item.name}
                           </div>
-                          {item.note && <div className="mt-0.5 text-xs italic text-gold">„{item.note}“</div>}
+                          {item.note && (
+                            <div className="mt-0.5 text-xs italic text-cream-300/70">
+                              {item.note}
+                            </div>
+                          )}
                         </div>
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[item.status] ?? "bg-graphite text-cream-100"}`}>
                           {STATUS_LABEL[item.status] ?? item.status}
@@ -176,7 +180,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                       {STATUS_ACTION_LABEL[item.status] && (
                         <button
                           onClick={() => advance(order.orderId, item.id)}
-                          className="mt-2 w-full rounded-sm bg-gold py-2 text-sm font-semibold text-graphite-900 active:scale-95"
+                          className="mt-2 w-full rounded-sm bg-gold py-2 text-sm font-semibold text-white active:scale-95 hover:bg-gold-dark transition-colors"
                         >
                           {STATUS_ACTION_LABEL[item.status]}
                         </button>

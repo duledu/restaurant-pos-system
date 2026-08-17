@@ -1,36 +1,33 @@
 import type { Config } from "tailwindcss";
 
-// ── Restoran Evropa MM — design token sistem ────────────────────────────
-// Paleta: tamna grafitna (primarni tekst/površine), topla krem (pozadina),
-// diskretan zlatni akcenat (samo za ključne CTA i brend momente — NE za
-// svaki dugme, da ne postane dekorativno umesto funkcionalno).
-// Status boje su namerno odvojene od brend palete — funkcionalne, ne
-// dekorativne (zelena=uspeh/aktivno, ćilibar=upozorenje/čeka, crvena=greška).
+// ── TableCore — design token sistem ────────────────────────────────────────
+// Paleta: duboka mornarsko-plava (primarni tekst/površine/nav), hladna bela
+// (pozadina stranica, kartice), Primary Blue kao interaktivni akcenat.
+// Status boje su namerno odvojene od brend palete — funkcionalne, ne dekorativne.
 const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        // Površine
-        graphite: { DEFAULT: "#1E1D1B", 900: "#141312", 800: "#1E1D1B", 700: "#2A2825" },
-        cream: { DEFAULT: "#F7F3EC", 100: "#FCFAF6", 200: "#F7F3EC", 300: "#EDE6D8" },
+        // Tamne površine (nav, KDS, zaglavlja)
+        graphite: { DEFAULT: "#0A1931", 900: "#06111E", 800: "#0F2340", 700: "#1A3D63" },
+        // Svetle površine (pozadine stranica, kartice, tekst na tamnom)
+        cream: { DEFAULT: "#F6FAFD", 100: "#FFFFFF", 200: "#F6FAFD", 300: "#B3CFE5" },
         // Tekst
-        ink: "#1E1D1B",
-        inkSoft: "#5C5850",
-        // Brend akcenat — zlatna, koristi se ŠTEDLJIVO (CTA, aktivni tab, brend mark)
-        gold: { DEFAULT: "#B8935A", soft: "#F0E6D4", dark: "#8F6E3F" },
-        // Linije/granice
-        line: "#E4DFD3",
-        lineDark: "#3A3733",
-        // Funkcionalne status boje (odvojeno od brend palete)
-        success: { DEFAULT: "#2F6D4F", soft: "#E6F0EA" },
-        warn: { DEFAULT: "#B5541A", soft: "#FBEEE4" },
-        danger: { DEFAULT: "#B3261E", soft: "#FBEAE9" },
-        info: { DEFAULT: "#2F5D50", soft: "#E8F0ED" },
+        ink: "#0A1931",
+        inkSoft: "#1A4A73",
+        // Brend akcenat — Primary Blue, za interaktivne elemente i CTA
+        gold: { DEFAULT: "#4A7FA7", soft: "#D4E8F4", dark: "#1A3D63" },
+        // Linije / granice
+        line: "#C8DDEF",
+        lineDark: "#1A3D63",
+        // Funkcionalne status boje
+        success: { DEFAULT: "#15803D", soft: "#DCFCE7" },
+        warn: { DEFAULT: "#B45309", soft: "#FEF3C7" },
+        danger: { DEFAULT: "#B91C1C", soft: "#FEE2E2" },
+        info: { DEFAULT: "#4A7FA7", soft: "#D4E8F4" },
       },
       fontFamily: {
-        // Display: karakterna serif za brend momente (login, admin header)
-        display: ["Fraunces", "Georgia", "serif"],
         sans: ["Inter", "system-ui", "sans-serif"],
       },
       borderRadius: {
@@ -39,8 +36,8 @@ const config: Config = {
         lg: "16px",
       },
       boxShadow: {
-        card: "0 1px 2px rgba(30,29,27,0.04), 0 1px 12px rgba(30,29,27,0.03)",
-        elevated: "0 8px 24px rgba(30,29,27,0.10)",
+        card: "0 1px 2px rgba(10,25,49,0.06), 0 1px 12px rgba(10,25,49,0.04)",
+        elevated: "0 8px 24px rgba(10,25,49,0.12)",
       },
       keyframes: {
         "fade-in": { from: { opacity: "0" }, to: { opacity: "1" } },

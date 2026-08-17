@@ -1,16 +1,41 @@
+import Link from "next/link";
 import { requireRouteAccess } from "../../lib/route-guard";
 import { ADMIN_ROLES } from "@rcs/shared";
+import { TableCoreLogo } from "../../components/ui/TableCoreLogo";
+import { AdminNav } from "../../components/admin/AdminNav";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   await requireRouteAccess(ADMIN_ROLES);
 
   return (
-    <div className="min-h-screen bg-cream">
-      <header className="border-b border-line bg-graphite px-6 py-4">
-        <span className="font-display text-lg font-medium text-cream-100">Evropa MM</span>
-        <span className="ml-3 text-xs text-cream-300/60">Administracija</span>
-      </header>
-      <main className="p-6">{children}</main>
+    <div className="flex min-h-screen">
+      {/* ── Sidebar ───────────────────────────────────────────────────── */}
+      <aside className="fixed inset-y-0 left-0 z-20 flex w-56 flex-col bg-graphite">
+        {/* Brand */}
+        <div className="flex h-14 shrink-0 items-center border-b border-graphite-700 px-4">
+          <Link href="/dashboard" aria-label="TableCore — Kontrolna tabla">
+            <TableCoreLogo theme="dark" size="sm" variant="full" />
+          </Link>
+        </div>
+
+        {/* Nav */}
+        <nav className="flex-1 overflow-y-auto py-4">
+          <p className="mb-1 px-4 text-[10px] font-semibold uppercase tracking-widest text-white/40">
+            Upravljanje
+          </p>
+          <AdminNav />
+        </nav>
+
+        {/* Footer */}
+        <div className="shrink-0 border-t border-graphite-700 px-4 py-3">
+          <p className="text-[10px] text-cream-300/30 tracking-wide">TableCore · v0.1</p>
+        </div>
+      </aside>
+
+      {/* ── Main content ─────────────────────────────────────────────── */}
+      <div className="flex flex-1 flex-col pl-56">
+        <main className="flex-1 p-6">{children}</main>
+      </div>
     </div>
   );
 }

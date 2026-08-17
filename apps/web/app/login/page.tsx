@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "../../components/ui/Button";
+import { TableCoreLogo } from "../../components/ui/TableCoreLogo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -36,9 +37,10 @@ export default function LoginPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-graphite px-4">
       <div className="w-full max-w-sm animate-slide-up">
-        <div className="mb-8 text-center">
-          <p className="font-display text-3xl font-medium text-cream-100">Evropa MM</p>
-          <p className="mt-2 text-sm text-cream-300/70">Prijava za osoblje restorana</p>
+        {/* Logo */}
+        <div className="mb-8 flex flex-col items-center gap-3">
+          <TableCoreLogo theme="dark" size="lg" variant="full" className="justify-center" />
+          <p className="text-sm text-cream-300/60">Prijava za osoblje restorana</p>
         </div>
 
         <form onSubmit={submit} className="rounded-lg bg-white p-6 shadow-elevated">
@@ -53,7 +55,7 @@ export default function LoginPage() {
             type="email"
             autoComplete="username"
             required
-            className="mb-4 w-full rounded-sm border border-line px-3 py-2.5 text-sm focus:border-gold"
+            className="mb-4 w-full rounded-sm border border-line px-3 py-2.5 text-sm focus:border-gold focus:outline-none"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
@@ -64,7 +66,7 @@ export default function LoginPage() {
               type={showPassword ? "text" : "password"}
               autoComplete="current-password"
               required
-              className="w-full rounded-sm border border-line px-3 py-2.5 pr-16 text-sm focus:border-gold"
+              className="w-full rounded-sm border border-line px-3 py-2.5 pr-16 text-sm focus:border-gold focus:outline-none"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
@@ -90,8 +92,8 @@ export default function LoginPage() {
 
 function DevTestAccounts() {
   return (
-    <div className="mt-6 rounded-md border border-cream-300/20 bg-white/5 p-4 text-xs text-cream-300/70">
-      <p className="mb-2 font-medium text-cream-100">Test nalozi (samo development)</p>
+    <div className="mt-6 rounded-md border border-cream-300/15 bg-white/5 p-4 text-xs text-cream-300/60">
+      <p className="mb-2 font-medium text-cream-300/80">Test nalozi (samo development)</p>
       <ul className="space-y-0.5">
         <li>owner@dev.local / DevOwner123!</li>
         <li>admin@dev.local / DevAdmin123!</li>

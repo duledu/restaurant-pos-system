@@ -26,36 +26,35 @@ export interface CategorySeed {
   type: CategoryTypeValue;
 }
 
-// Redosled niza = sortOrder. Tačno kategorije iz zahteva, bez izmena naziva.
+// Redosled niza = sortOrder. Nazivi kategorija na srpskom latiničnom pismu.
 export const CATEGORIES: CategorySeed[] = [
-  { name: "Breakfast", type: "FOOD" },
-  { name: "Cold Appetizers", type: "FOOD" },
-  { name: "Hot Appetizers", type: "FOOD" },
-  { name: "Grill", type: "FOOD" },
-  { name: "Made To Order", type: "FOOD" },
-  { name: "Salads", type: "FOOD" },
-  { name: "Winter Salads", type: "FOOD" },
-  { name: "Fish", type: "FOOD" },
-  { name: "Bread", type: "FOOD" },
-  { name: "Desserts", type: "FOOD" },
-  { name: "Hot Drinks", type: "DRINK" },
-  { name: "Soft Drinks", type: "DRINK" },
-  { name: "Water", type: "DRINK" },
-  { name: "Beer", type: "DRINK" },
-  { name: "Spirits", type: "DRINK" },
-  { name: "Wine", type: "DRINK" },
+  { name: "Doručak",              type: "FOOD" },
+  { name: "Hladna predjela",      type: "FOOD" },
+  { name: "Topla predjela",       type: "FOOD" },
+  { name: "Roštilj",             type: "FOOD" },
+  { name: "Jela po narudžbini",  type: "FOOD" },
+  { name: "Salate",               type: "FOOD" },
+  { name: "Zimske salate",        type: "FOOD" },
+  { name: "Riba",                 type: "FOOD" },
+  { name: "Hleb",                 type: "FOOD" },
+  { name: "Deserti",              type: "FOOD" },
+  { name: "Topli napici",         type: "DRINK" },
+  { name: "Bezalkoholna pića",    type: "DRINK" },
+  { name: "Voda",                 type: "DRINK" },
+  { name: "Pivo",                 type: "DRINK" },
+  { name: "Žestoka pića",         type: "DRINK" },
+  { name: "Vino",                 type: "DRINK" },
 ];
 
 export const REVIEW_NOTE =
   "Cena nije dostavljena sa zvaničnog menija — uneti kroz Admin Panel (Meni → klik na cenu) pre aktiviranja artikla.";
 
-// Nazivi tačno kako su dostavljeni — bez prevoda, skraćivanja ili izmene
-// (uključujući gramature koje su deo naziva, npr. "Pljeskavica 200 g", jer
-// je tako navedeno na meniju, ne kao odvojeno structured polje).
+// Nazivi artikala tačno kako su dostavljeni. Ključevi su slugovi kategorija
+// koji moraju da odgovaraju slugify(category.name) iz CATEGORIES niza iznad.
 export const MENU_BY_CATEGORY: Record<string, string[]> = {
-  breakfast: ["Pileća čorba", "Omlet", "Omlet sa sirom", "Omlet sa šunkom", "Omlet sa slaninom"],
-  "cold-appetizers": ["Ordever"],
-  "hot-appetizers": [
+  dorucak: ["Pileća čorba", "Omlet", "Omlet sa sirom", "Omlet sa šunkom", "Omlet sa slaninom"],
+  "hladna-predjela": ["Ordever"],
+  "topla-predjela": [
     "Pohovani kačkavalj",
     "Pohovana zdenka",
     "Pomfrit",
@@ -65,7 +64,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Grilovano povrće",
     "Topla daska",
   ],
-  grill: [
+  rostilj: [
     "Ćevap",
     "Pljeskavica 200 g",
     "Pljeskavica 300 g",
@@ -84,7 +83,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Bečka šnicla (pileća)",
     "Bečka šnicla (svinjska)",
   ],
-  "made-to-order": [
+  "jela-po-naruzbini": [
     "Pileći prsti",
     "Pileća krilca",
     "Pileća Karađorđeva",
@@ -103,7 +102,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Svinjska kobasica",
     "Svinjski file",
   ],
-  salads: [
+  salate: [
     "Srpska salata",
     "Šopska salata",
     "Grčka salata",
@@ -119,7 +118,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Masline",
     "Ljuta papričica",
   ],
-  "winter-salads": [
+  "zimske-salate": [
     "Mešana zimska salata",
     "Zimski kupus",
     "Krompir salata",
@@ -128,11 +127,11 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Trljanica",
     "Paprika u pavlaci",
   ],
-  fish: ["Pastrmka", "Škarpina"],
-  bread: ["Lepinja", "Lepinja sa sirom"],
-  desserts: ["Palačinka sa kremom"],
-  "hot-drinks": ["Espresso", "Čaj"],
-  "soft-drinks": [
+  riba: ["Pastrmka", "Škarpina"],
+  hleb: ["Lepinja", "Lepinja sa sirom"],
+  deserti: ["Palačinka sa kremom"],
+  "topli-napici": ["Espresso", "Čaj"],
+  "bezalkoholna-pica": [
     "Coca-Cola",
     "Coca-Cola Zero",
     "Fanta",
@@ -145,8 +144,8 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Ultra Energy",
     "Red Bull",
   ],
-  water: ["Rosa 0.33", "Rosa 0.75", "Bivoda 0.20", "Bivoda 1 l", "Heba", "BiAqua"],
-  beer: [
+  voda: ["Rosa 0.33", "Rosa 0.75", "Bivoda 0.20", "Bivoda 1 l", "Heba", "BiAqua"],
+  pivo: [
     "Zaječarsko 0.33",
     "Zaječarsko 0.50",
     "Pils",
@@ -163,7 +162,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Bavaria",
     "Stella Artois",
   ],
-  spirits: [
+  "zestoka-pica": [
     "Šljivovica",
     "Dunjevača",
     "Žolta Tikveš",
@@ -181,7 +180,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Medovača",
     "Badel",
   ],
-  wine: [
+  vino: [
     "Graševina",
     "Smederevka",
     "Ždrepčeva krv",
