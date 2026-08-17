@@ -220,13 +220,19 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
         {allServed && (
           <div className="mt-4 rounded-md bg-info-soft px-3 py-2 text-center text-sm text-info">
-            Sve stavke su servirane. Zatvaranje računa dolazi u sledećoj fazi.
+            Sve stavke su servirane. Spremno za naplatu.
           </div>
         )}
 
         <button
+          onClick={() => router.push(`/waiter/tables/${tableId}/bill`)}
+          className="mt-6 w-full rounded-md bg-gold py-4 text-lg font-semibold text-white transition-colors hover:bg-gold-dark"
+        >
+          Račun / Naplata
+        </button>
+        <button
           onClick={() => router.push("/waiter/tables")}
-          className="mt-6 w-full rounded-md bg-graphite py-3 text-base font-medium text-cream-100 transition-colors hover:bg-graphite-700"
+          className="mt-3 w-full rounded-md bg-graphite py-3 text-base font-medium text-cream-100 transition-colors hover:bg-graphite-700"
         >
           Nazad na stolove
         </button>

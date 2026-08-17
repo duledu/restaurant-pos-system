@@ -33,3 +33,11 @@ export const submitOrderSchema = z.object({
   idempotencyKey: z.string().uuid(),
 });
 export type SubmitOrderInput = z.infer<typeof submitOrderSchema>;
+
+export const completePaymentSchema = z.object({
+  method: z.enum(["CASH", "CARD"]),
+  // Samo za CASH, samo za obračun kusura — NIKAD se ne koristi kao iznos
+  // naplate (taj se uvek računa na serveru iz OrderItem redova).
+  tenderedAmount: z.number().nonnegative().optional(),
+});
+export type CompletePaymentInput = z.infer<typeof completePaymentSchema>;

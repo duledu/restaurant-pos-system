@@ -22,12 +22,17 @@ export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
     throw new Error("Nema aktivne smene na ovoj lokaciji — otvori smenu pre unosa porudžbina");
   }
 
-  const existingDraft = await prisma.order.findFirst({
-    where: { ...scopeToRestaurant(ctx), tableId: input.tableId, status: "DRAFT" },
+  // Ne samo DRAFT — I poslata, još nenaplaćena porudžbina za ovaj sto se
+  // vraća umesto da se kreira nova. Bez ovoga bi ponovni tap na zauzet sto
+  // (dok je porudžbina već SUBMITTED/PREPARING/...) tiho otvorio DRUGU
+  // paralelnu porudžbinu na istom stolu — kritično za Fazu 2 gde račun mora
+  // nedvosmisleno odgovarati JEDNOJ porudžbini po stolu.
+  const existingActive = await prisma.order.findFirst({
+    where: { ...scopeToRestaurant(ctx), tableId: input.tableId, status: { notIn: ["COMPLETED", "CANCELLED"] } },
   });
-  if (existingDraft) {
-    requireDraftOwnership(ctx, existingDraft.openedBy);
-    return existingDraft;
+  if (existingActive) {
+    if (existingActive.status === "DRAFT") requireDraftOwnership(ctx, existingActive.openedBy);
+    return existingActive;
   }
 
   return prisma.$transaction(async (tx) => {
