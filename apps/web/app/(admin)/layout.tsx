@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireRouteAccess } from "../../lib/route-guard";
 import { ADMIN_ROLES } from "@rcs/shared";
-import { TableCoreLogo } from "../../components/ui/TableCoreLogo";
+import { AppLogo, APP_NAME } from "../../components/branding/AppLogo";
 import { AdminNav } from "../../components/admin/AdminNav";
 import { LogoutButton } from "../../components/ui/LogoutButton";
 
@@ -14,8 +14,8 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       <aside className="fixed inset-y-0 left-0 z-20 flex w-56 flex-col bg-graphite">
         {/* Brand */}
         <div className="flex h-14 shrink-0 items-center border-b border-graphite-700 px-4">
-          <Link href="/dashboard" aria-label="TableCore — Kontrolna tabla">
-            <TableCoreLogo theme="dark" size="sm" variant="full" />
+          <Link href="/dashboard" aria-label={`${APP_NAME} — Kontrolna tabla`}>
+            <AppLogo theme="dark" size="sm" variant="full" />
           </Link>
         </div>
 
@@ -30,7 +30,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         {/* Footer */}
         <div className="shrink-0 border-t border-graphite-700 px-4 py-3">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-[10px] text-cream-300/30 tracking-wide">TableCore · v0.1</p>
+            <p className="text-[10px] text-cream-300/30 tracking-wide">{APP_NAME} · v0.1</p>
             <LogoutButton theme="dark" />
           </div>
         </div>

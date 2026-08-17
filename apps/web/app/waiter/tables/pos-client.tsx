@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
+import { AppLogo } from "../../../components/branding/AppLogo";
 
 interface Table {
   id: string;
@@ -106,6 +107,7 @@ export function PosClient() {
     return (
       <div className="relative flex min-h-screen flex-col items-center justify-center gap-4 p-6">
         <div className="absolute right-3 top-3"><LogoutButton /></div>
+        <AppLogo variant="full" size="md" />
         <h1 className="text-xl font-semibold text-ink">Nema aktivne smene</h1>
         <p className="text-center text-sm text-ink/70">Unesi početno stanje kase da otvoriš smenu i počneš rad.</p>
         {error && <div className="text-sm text-danger">{error}</div>}
@@ -129,7 +131,10 @@ export function PosClient() {
   return (
     <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
+        <div className="flex items-center gap-3">
+          <AppLogo variant="mark" size="sm" />
+          <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
+        </div>
         <div className="flex items-center gap-2">
           <span className="rounded-full bg-gold-soft px-3 py-1 text-xs font-medium text-gold-dark">Smena aktivna</span>
           <LogoutButton />

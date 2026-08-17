@@ -81,6 +81,26 @@ tests/                   unit i integration testovi (vitest)
 docs/                    arhitektonski planovi po fazama
 ```
 
+## Branding
+
+**Global App Logo** — ovo je logo TableCore PROIZVODA, ne logo pojedinačnog
+restorana koji ga koristi. Da promeniš logo svuda u aplikaciji (login,
+admin sidebar, kuhinja/šank, konobarski ekrani), zameni jedan fajl:
+
+```
+apps/web/public/branding/app-logo.png
+```
+
+Svi ekrani ga prikazuju preko `AppLogo` komponente
+(`apps/web/components/branding/AppLogo.tsx`) — ne dodavaj `<img>`/`<Image>`
+ručno za brend po ekranima, koristi `AppLogo`. Ako fajl privremeno ne
+postoji ili ne uspe da se učita, aplikacija se ne ruši — tiho prelazi na
+ugrađeni SVG fallback (`TableCoreLogo`).
+
+Logo pojedinačnog restorana (npr. za štampu računa, Faza 6) je NAMERNO
+odvojen koncept — ne koristi `AppLogo`/`app-logo.png` za to; ta grana
+branding-a postaje po-restoranu konfigurabilna kasnije.
+
 ## Requirements
 
 - Node.js ≥ 20

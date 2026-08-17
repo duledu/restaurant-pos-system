@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { LogoutButton } from "../ui/LogoutButton";
+import { AppLogo } from "../branding/AppLogo";
 
 interface StationItem {
   id: string;
@@ -125,7 +126,10 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   return (
     <div className="min-h-screen p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-cream-100">{title}</h1>
+        <div className="flex items-center gap-3">
+          <AppLogo variant="mark" theme="dark" size="sm" />
+          <h1 className="text-2xl font-semibold text-cream-100">{title}</h1>
+        </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-cream-300/70">{orders.length} aktivnih porudžbina</span>
           <LogoutButton theme="dark" />

@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { APP_NAME } from "../components/branding/constants";
 
 export const metadata: Metadata = {
-  title: "TableCore | Restaurant Control System",
-  description: "TableCore — sistem za upravljanje restoranom",
+  title: `${APP_NAME} | Restaurant Control System`,
+  description: `${APP_NAME} — sistem za upravljanje restoranom`,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

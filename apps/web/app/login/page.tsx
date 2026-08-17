@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "../../components/ui/Button";
-import { TableCoreLogo } from "../../components/ui/TableCoreLogo";
+import { AppLogo } from "../../components/branding/AppLogo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -39,7 +39,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm animate-slide-up self-start">
         {/* Logo */}
         <header className="mb-[clamp(1.25rem,4dvh,1.75rem)] flex w-full flex-col items-center gap-2.5 text-center">
-          <TableCoreLogo theme="dark" size="lg" variant="full" className="mx-auto justify-center" />
+          <AppLogo theme="dark" size="lg" variant="full" className="mx-auto justify-center" />
           <p className="w-full text-center text-sm leading-5 text-cream-300/70">Prijava za osoblje restorana</p>
         </header>
 
