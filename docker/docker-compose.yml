@@ -18,6 +18,31 @@ services:
       timeout: 5s
       retries: 10
 
+  # Odvojena, disposable TEST baza — ISTI princip kao scripts/lib/local-test-db.mjs
+  # (drugi port/naziv/kredencijali od "postgres" iznad), samo preko Dockera za
+  # okruženja gde embedded-postgres ne može da pokrene proces (npr. CI/shell
+  # koji radi kao Windows Administrator — Postgres na Windows-u odbija da
+  # pokrene server pod administrativnim tokenom, bez obzira na flagove).
+  # Koristi npm run test:db:mark posle prvog podizanja da je obeležiš.
+  postgres-test:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rcs_test
+      POSTGRES_PASSWORD: rcs_test_password
+      POSTGRES_DB: rcs_test
+    ports:
+      - "55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rcs_test -d rcs_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # NAMERNO bez volume-a — svaki `docker compose down -v` (ili potpuni
+    # kontejner restart) daje potpuno praznu bazu, u skladu sa "TEST baza je
+    # disposable" principom (docs/database-safety.md). migrate:deploy je brz
+    # i idempotentan, pa se ovo ne oseća pri normalnom radu.
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped

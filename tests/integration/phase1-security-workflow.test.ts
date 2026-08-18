@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 import {
   ForbiddenError,
   UnauthorizedError,
@@ -89,7 +90,7 @@ async function createFixture(): Promise<Fixture> {
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

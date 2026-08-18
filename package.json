@@ -24,6 +24,11 @@
     "db:migrate:categories": "dotenv -e .env -- npx tsx packages/db/prisma/update-category-names.ts",
     "db:studio": "dotenv -e .env -- npm run studio --workspace=packages/db",
     "test:unit": "vitest run",
+    "test:integration": "node scripts/run-integration-tests.mjs",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:db:local": "node scripts/test-db-local.mjs",
+    "test:db:mark": "npx tsx scripts/mark-test-database.ts",
+    "db:counts": "dotenv -e .env -- node scripts/db-count-critical-tables.mjs",
     "docker:up": "docker compose -f docker/docker-compose.yml up -d",
     "docker:down": "docker compose -f docker/docker-compose.yml down"
   },

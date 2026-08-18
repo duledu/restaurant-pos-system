@@ -5,6 +5,7 @@ import { ForbiddenError, createSessionToken, requireAuth, verifyPin } from "@rcs
 import type { AuthContext } from "@rcs/auth";
 import { employees, orders, billing, shifts } from "@rcs/domain";
 import { POST as pinLogin } from "../../apps/web/app/api/auth/pin-login/route";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
   restaurantId: string;
@@ -90,7 +91,7 @@ async function createOwner(fixture: Fixture) {
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

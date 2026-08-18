@@ -313,11 +313,37 @@ npm run dev              # razvoj
 npm run build            # produkcioni build
 npm run typecheck        # TypeScript provera bez emitovanja
 npm run lint             # ESLint
-npm run test:unit        # vitest (unit + integration)
+npm run test:unit        # vitest — čista logika, bez baze
+npm run test:integration # vitest — protiv IZOLOVANE test baze (auto-podignute)
+npm run test             # test:unit + test:integration
 npm run db:studio        # Prisma Studio (vizuelni pregled baze)
-npm run docker:up        # pokreni lokalni Postgres
-npm run docker:down      # zaustavi lokalni Postgres
+npm run db:counts        # broj redova u kritičnim tabelama trenutne DATABASE_URL baze (read-only)
+npm run docker:up        # pokreni lokalni Postgres (dev) + redis
+npm run docker:down      # zaustavi lokalni Postgres + redis
 ```
+
+## Testing
+
+```bash
+npm run test:unit         # brzo, ne dodiruje bazu
+npm run test:integration  # protiv realnog Postgres-a
+npm run test              # oba
+```
+
+`npm run test:integration` (`scripts/run-integration-tests.mjs`) sam podiže
+izolovanu, disposable embedded Postgres TEST bazu (port **55433**, baza
+`rcs_test` — potpuno odvojenu od DEV baze na 55432), primenjuje migracije,
+obeležava je i tek onda pokreće testove. **Integration testovi NIKAD ne
+koriste `DATABASE_URL` kao fallback** — `TEST_DATABASE_URL` mora biti
+eksplicitno postavljen i mora pokazivati na eksplicitno obeleženu test bazu,
+inače se ceo run ABORTUJE pre nego što ijedan test krene. Vidi
+[`docs/database-safety.md`](docs/database-safety.md) za punu arhitekturu i
+razlog (incident iz avgusta 2026. — testovi su obrisali dev podatke).
+
+Za CI/okruženja gde se embedded Postgres proces ne može pokrenuti (npr. shell
+koji radi kao Windows Administrator — Postgres na Windows-u to odbija),
+koristi `docker/docker-compose.yml` servis `postgres-test`, ili posebnu Neon
+"test" granu + `npm run test:db:mark` (jednokratno).
 
 ## License
 

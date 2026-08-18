@@ -13,10 +13,15 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { Client } from "pg";
 import { randomUUID } from "crypto";
+import { resetPgTestTables } from "../setup/reset-test-db";
 
-const connectionString =
-  process.env.TEST_DATABASE_URL ??
-  "postgresql://rcs:rcs_dev_password@localhost:5432/rcs_dev?schema=public";
+// TEST_DATABASE_URL je već proveren i garantovan od strane
+// tests/setup/require-test-database.ts (vitest setupFiles, učitava se pre
+// ovog fajla) — NEMA fallback-a na drugu bazu, namerno (vidi docs/database-safety.md).
+const connectionString = process.env.TEST_DATABASE_URL;
+if (!connectionString) {
+  throw new Error("[db-safety] TEST_DATABASE_URL nedostaje — require-test-database.ts je trebalo da abortuje run pre ovoga.");
+}
 
 let client: Client;
 
@@ -30,9 +35,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await client.query(
-    `TRUNCATE tenants, restaurants, locations, roles, employees, employee_roles,
-     employee_locations, users, devices, permissions, role_permissions, audit_logs CASCADE`
+  await resetPgTestTables(
+    client,
+    "tenants, restaurants, locations, roles, employees, employee_roles, employee_locations, users, devices, permissions, role_permissions, audit_logs"
   );
 });
 

@@ -32,6 +32,10 @@ coverage/
 # Lokalna embedded Postgres baza (scripts/dev-local.mjs, scripts/db-local.mjs)
 .local-postgres-data/
 
+# Lokalna embedded TEST Postgres baza (scripts/run-integration-tests.mjs) —
+# potpuno odvojena od DEV baze iznad, vidi docs/database-safety.md
+.local-postgres-data-test/
+
 # Editor
 .vscode/
 .idea/

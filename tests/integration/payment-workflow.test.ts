@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
 import { orders, billing } from "@rcs/domain";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
   restaurantId: string;
@@ -77,7 +78,7 @@ async function openAndSubmitOrder(fixture: Fixture, waiter: AuthContext, menuIte
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

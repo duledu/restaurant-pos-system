@@ -4,6 +4,7 @@ import { prisma } from "@rcs/db";
 import { ForbiddenError, UnauthorizedError, createSessionToken, requireAuth, hashPin } from "@rcs/auth";
 import type { AuthContext } from "@rcs/auth";
 import { employees, orders, shifts, devices } from "@rcs/domain";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 import { POST as pinLogin } from "../../apps/web/app/api/auth/pin-login/route";
 import { POST as lockTerminal } from "../../apps/web/app/api/auth/lock/route";
 
@@ -106,7 +107,7 @@ async function setupTableAndMenu(fixture: Fixture) {
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

@@ -15,6 +15,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { employees, devices } from "@rcs/domain";
 import { hashPassword, type AuthContext } from "@rcs/auth";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 import { POST as pinLogin } from "../../apps/web/app/api/auth/pin-login/route";
 import { GET as staffDirectory } from "../../apps/web/app/api/auth/staff-directory/route";
 
@@ -88,7 +89,7 @@ function pinLoginRequest(params: { deviceId: string; pin: string; employeeId?: s
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, users, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, users, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

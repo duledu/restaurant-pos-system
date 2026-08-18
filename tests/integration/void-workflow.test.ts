@@ -4,6 +4,7 @@ import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
 import type { AuthContext } from "@rcs/auth";
 import { orders, voids, billing, audit } from "@rcs/domain";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
   restaurantId: string;
@@ -72,7 +73,7 @@ async function submitOrderWithQuantity(fixture: Fixture, waiter: AuthContext, qu
 const VALID_EXPLANATION = "Entered 2 instead of 1 by mistake, correcting before service.";
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());

@@ -5,6 +5,7 @@ import { employees } from "@rcs/domain";
 import { hashPin, type AuthContext } from "@rcs/auth";
 import { POST as pinLogin } from "../../apps/web/app/api/auth/pin-login/route";
 import { GET as staffDirectory } from "../../apps/web/app/api/auth/staff-directory/route";
+import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
   restaurantId: string;
@@ -92,7 +93,7 @@ function pinLoginRequest(params: { deviceId: string; pin: string; employeeId: st
 }
 
 beforeEach(async () => {
-  await prisma.$executeRawUnsafe(`TRUNCATE tenants, permissions, login_throttles CASCADE`);
+  await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
 afterAll(async () => prisma.$disconnect());
