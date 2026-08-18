@@ -29,6 +29,7 @@ const GridIcon = () => (
 );
 const MenuIcon = () => icon("M3 6h18M3 12h18M3 18h18");
 const ChartIcon = () => icon("M3 3v18h18 M7 16v-5 M12 16V8 M17 16v-9");
+const ItemsIcon = () => icon("M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2 M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2 M9 5a2 2 0 0 0 2-2h2a2 2 0 0 0 2 2 M9 12h6 M9 16h4");
 const ClockIcon = () => icon("M12 8v4l3 3 M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z");
 const VoidIcon = () => icon("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 9l6 6 M15 9l-6 6");
 const UsersIcon = () => icon("M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75");
@@ -49,6 +50,7 @@ const NAV_SECTIONS: NavSection[] = [
     title: "Izveštaji",
     items: [
       { href: "/reports/sales", label: "Prodaja", icon: <ChartIcon /> },
+      { href: "/reports/items", label: "Prodati artikli", icon: <ItemsIcon /> },
       { href: "/reports/shifts", label: "Smene", icon: <ClockIcon /> },
       { href: "/reports/voids", label: "Poništavanja", icon: <VoidIcon /> },
       { href: "/reports/employees", label: "Zaposleni", icon: <UsersIcon /> },

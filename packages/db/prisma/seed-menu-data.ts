@@ -83,7 +83,7 @@ export const MENU_BY_CATEGORY: Record<string, string[]> = {
     "Bečka šnicla (pileća)",
     "Bečka šnicla (svinjska)",
   ],
-  "jela-po-naruzbini": [
+  "jela-po-narudzbini": [
     "Pileći prsti",
     "Pileća krilca",
     "Pileća Karađorđeva",

@@ -13,6 +13,7 @@ interface Employee {
   lastName: string;
   status: "ACTIVE" | "SUSPENDED" | "TERMINATED";
   hasPin: boolean;
+  hasLoginCredentials: boolean;
   createdAt: string;
   roles: { role: { name: string } }[];
   locations: { location: { id: string; name: string } }[];
@@ -338,6 +339,118 @@ function ChangePinModal({ employee, onCancel, onDone }: { employee: Employee; on
   );
 }
 
+function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Employee; onCancel: () => void; onDone: () => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const passwordValid = password.length >= 10;
+  const passwordsMatch = password === confirmPassword;
+  const canSubmit = emailValid && passwordValid && passwordsMatch;
+
+  async function submit() {
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/employees/${employee.id}/login-credentials`, {
+        method: "POST",
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      });
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri postavljanju pristupnih podataka");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <ModalShell title={`Pristupni podaci — ${employee.firstName} ${employee.lastName}`} onCancel={onCancel}>
+      <div className="space-y-3">
+        {employee.hasLoginCredentials ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            Ovaj zaposleni već ima pristupne podatke. Unosom novih podataka ispod postojeći će biti zamenjeni.
+          </div>
+        ) : (
+          <p className="text-sm text-inkSoft">
+            Postavi email i lozinku da bi zaposleni mogao da registruje lični uređaj. Admin ne može pregledati postojeće podatke — samo ih podesiti iznova.
+          </p>
+        )}
+
+        <div>
+          <label className="mb-1 block text-sm font-medium text-inkSoft">Email adresa</label>
+          <input
+            type="email"
+            inputMode="email"
+            autoComplete="off"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded-md border border-line px-3 py-2.5 text-base"
+            placeholder="zaposleni@primer.rs"
+          />
+          {email && !emailValid && <p className="mt-1 text-xs text-danger">Neispravna email adresa.</p>}
+        </div>
+
+        <div>
+          <label className="mb-1 block text-sm font-medium text-inkSoft">Nova lozinka</label>
+          <div className="relative">
+            <input
+              type={showPassword ? "text" : "password"}
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-md border border-line px-3 py-2.5 pr-10 text-base"
+              placeholder="najmanje 10 karaktera"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-inkSoft hover:text-ink"
+              tabIndex={-1}
+            >
+              {showPassword ? "Sakrij" : "Pokaži"}
+            </button>
+          </div>
+          {password && !passwordValid && <p className="mt-1 text-xs text-danger">Lozinka mora imati najmanje 10 karaktera.</p>}
+        </div>
+
+        <div>
+          <label className="mb-1 block text-sm font-medium text-inkSoft">Potvrdi lozinku</label>
+          <input
+            type={showPassword ? "text" : "password"}
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            className="w-full rounded-md border border-line px-3 py-2.5 text-base"
+            placeholder="ponovi lozinku"
+          />
+          {confirmPassword && !passwordsMatch && <p className="mt-1 text-xs text-danger">Lozinke se ne poklapaju.</p>}
+        </div>
+
+        {error && <div className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
+
+        <div className="flex gap-3 pt-2">
+          <button onClick={onCancel} className="flex-1 rounded-md border border-line py-3 text-base font-medium text-ink">
+            Otkaži
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canSubmit || submitting}
+            className="flex-1 rounded-md bg-graphite py-3 text-base font-semibold text-cream-100 disabled:opacity-40"
+          >
+            {submitting ? "Čuvanje…" : employee.hasLoginCredentials ? "Resetuj podatke" : "Postavi podatke"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
 export function StaffClient() {
   const [staff, setStaff] = useState<Employee[] | null>(null);
   const [locations, setLocations] = useState<LocationOption[]>([]);
@@ -348,6 +461,7 @@ export function StaffClient() {
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [changingPin, setChangingPin] = useState<Employee | null>(null);
+  const [settingCredentials, setSettingCredentials] = useState<Employee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -445,6 +559,9 @@ export function StaffClient() {
                         <button onClick={() => setChangingPin(emp)} className="text-gold-dark hover:underline">
                           Promeni PIN
                         </button>
+                        <button onClick={() => setSettingCredentials(emp)} className="text-gold-dark hover:underline">
+                          {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
+                        </button>
                         <button
                           onClick={() => toggleStatus(emp)}
                           disabled={busyId === emp.id}
@@ -492,6 +609,17 @@ export function StaffClient() {
           onDone={() => {
             setChangingPin(null);
             setNotice("PIN je uspešno promenjen.");
+          }}
+        />
+      )}
+      {settingCredentials && (
+        <SetLoginCredentialsModal
+          employee={settingCredentials}
+          onCancel={() => setSettingCredentials(null)}
+          onDone={() => {
+            setSettingCredentials(null);
+            setNotice("Pristupni podaci su uspešno postavljeni.");
+            load();
           }}
         />
       )}

@@ -49,13 +49,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Neispravan zahtev" }, { status: 400 });
     }
 
-    const { employeeId, pin, deviceId } = parsed.data;
+    const { pin, deviceId } = parsed.data;
+    let { employeeId } = parsed.data;
 
     // Uređaj mora biti unapred registrovan i aktivan — PIN prijava sa
     // neregistrovanog uređaja se ne pokušava ni proveravati.
     const device = await prisma.device.findUnique({ where: { id: deviceId } });
     if (!device || !device.isActive) {
       return NextResponse.json({ error: "Uređaj nije registrovan" }, { status: 403 });
+    }
+
+    // Lični uređaj: uvek koristi employeeId vlasnika uređaja (ignorišemo sve
+    // što je klijent eventualno poslao) da bismo sprečili upotrebu tuđeg PIN-a
+    // na ličnom uređaju čak i ako napadač zna ID drugog zaposlenog.
+    if (device.employeeId) {
+      employeeId = device.employeeId;
     }
 
     let employee: LockedPinEmployee | undefined;

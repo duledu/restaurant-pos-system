@@ -11,6 +11,26 @@ if (process.env.DATABASE_URL && !process.env.TEST_DATABASE_URL) {
   process.env.TEST_DATABASE_URL = process.env.DATABASE_URL;
 }
 
+// ⚠️  UPOZORENJE — DELJENA BAZA (NEON)
+//
+// Integration testovi koriste `TRUNCATE ... CASCADE` u svakom beforeEach.
+// Ako DATABASE_URL pokazuje na istu Neon bazu koju koristi razvojna aplikacija,
+// testovi ĆE OBRISATI sve dev naloge (owner@dev.local, manager@dev.local ...).
+//
+// PREPORUČENO REŠENJE: postavi TEST_DATABASE_URL u .env koji pokazuje na
+// posebnu Neon granu ("test" branch) ili lokalni embedded Postgres:
+//   TEST_DATABASE_URL=postgresql://rcs:rcs_dev_password@127.0.0.1:55432/rcs_dev
+// Tada ova skripta preusmeri DATABASE_URL za celo vitest pokretanje na bazu
+// za testove i dev nalozi ostaju netaknuti.
+//
+// AKO NE POSTAVIŠ TEST_DATABASE_URL: posle svakog pokretanja integration
+// testova pokreni `npx tsx scripts/dev-repair-accounts.ts` da vratiš dev naloge.
+if (process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL !== process.env.DATABASE_URL) {
+  // Preusmeri Prisma klijent (koji čita DATABASE_URL) na test bazu
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+  console.warn(`[test-setup] Koristim TEST_DATABASE_URL za integracionе testove.`);
+}
+
 // Vitest daje SVAKOM test fajlu izolovan modul-registar, pa
 // tests/integration/*.test.ts uvozi @rcs/db 28 puta nezavisno — svaki uvoz
 // pravi SOPSTVENI PrismaClient sa podrazumevanom veličinom pool-a

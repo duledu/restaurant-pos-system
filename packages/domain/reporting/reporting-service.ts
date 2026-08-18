@@ -8,6 +8,9 @@
  *
  * PERMISIJA: sve funkcije ovde zahtevaju "audit.view" (isto kao Faza 4
  * getSuspiciousActivity) — namerno NIJE uvedena nova "reports.view"
+ *
+ * agregacija prodatih artikala je izvučena kao čista funkcija
+ * `aggregateSoldItems` kako bi mogla biti unit-testirana bez baze.
  * permisija, jer bi trenutno pokrivala IDENTIČAN skup rola
  * (OWNER/ADMIN/MANAGER); nova permisija bez stvarne razlike u dodeli je
  * prerana apstrakcija (isti princip kao i drugde u projektu). Ako se
@@ -555,4 +558,191 @@ export async function getActivityLog(
     reason: e.reason,
     createdAt: e.createdAt.toISOString(),
   }));
+}
+
+// ── PRODATI ARTIKLI ─────────────────────────────────────────────────────
+
+export type SoldItemsStationFilter = "ALL" | "KITCHEN" | "BAR";
+
+export interface SoldItemRow {
+  name: string;
+  station: string;
+  categoryName: string | null;
+  totalQuantity: number;
+  totalRevenue: string;
+  avgPrice: string;
+}
+
+export interface SoldItemsSummary {
+  allQuantity: number;
+  allRevenue: string;
+  kitchenQuantity: number;
+  kitchenRevenue: string;
+  barQuantity: number;
+  barRevenue: string;
+}
+
+export interface SoldItemsReport {
+  range: { from: string; to: string };
+  currency: string;
+  station: SoldItemsStationFilter;
+  rows: SoldItemRow[];
+  summary: SoldItemsSummary;
+}
+
+export interface RawSoldItem {
+  name: string;
+  price: Prisma.Decimal | string | number;
+  quantity: number;
+  preparationStation: string;
+  menuItem: { category: { name: string } | null } | null;
+}
+
+/**
+ * Cista agregaciona funkcija — ne dirá bazu, uzima vec ucitane rawItems.
+ * Eksportovana radi unit testabilnosti (tests/unit/sold-items-attribution).
+ *
+ * KITCHEN_AND_BAR pravilo: finansijski se pripisuje ISKLJUCIVO kuhinji
+ * (kitchenRevenue), nikad sanku — sprecava duplo brojanje istog prihoda.
+ */
+export function aggregateSoldItems(
+  rawItems: RawSoldItem[],
+  station: SoldItemsStationFilter
+): { rows: SoldItemRow[]; summary: SoldItemsSummary } {
+  interface Bucket {
+    name: string;
+    station: string;
+    categoryName: string | null;
+    qty: number;
+    revenue: Prisma.Decimal;
+  }
+  const buckets = new Map<string, Bucket>();
+
+  let allQuantity = 0;
+  let allRevenue = new Prisma.Decimal(0);
+  let kitchenQuantity = 0;
+  let kitchenRevenue = new Prisma.Decimal(0);
+  let barQuantity = 0;
+  let barRevenue = new Prisma.Decimal(0);
+
+  for (const item of rawItems) {
+    const lineRevenue = new Prisma.Decimal(item.price).mul(item.quantity);
+    allQuantity += item.quantity;
+    allRevenue = allRevenue.add(lineRevenue);
+
+    const st = item.preparationStation;
+    if (st === "KITCHEN" || st === "KITCHEN_AND_BAR") {
+      kitchenQuantity += item.quantity;
+      kitchenRevenue = kitchenRevenue.add(lineRevenue);
+    } else if (st === "BAR") {
+      barQuantity += item.quantity;
+      barRevenue = barRevenue.add(lineRevenue);
+    }
+
+    const key = `${item.name}::${st}`;
+    const b = buckets.get(key);
+    if (b) {
+      b.qty += item.quantity;
+      b.revenue = b.revenue.add(lineRevenue);
+    } else {
+      buckets.set(key, {
+        name: item.name,
+        station: st,
+        categoryName: item.menuItem?.category?.name ?? null,
+        qty: item.quantity,
+        revenue: lineRevenue,
+      });
+    }
+  }
+
+  let rows = Array.from(buckets.values());
+  if (station === "KITCHEN") {
+    rows = rows.filter((r) => r.station === "KITCHEN" || r.station === "KITCHEN_AND_BAR");
+  } else if (station === "BAR") {
+    rows = rows.filter((r) => r.station === "BAR");
+  }
+
+  const sortedRows = rows
+    .sort((a, b) => b.revenue.cmp(a.revenue))
+    .slice(0, LIST_ROW_CAP)
+    .map((r) => ({
+      name: r.name,
+      station: r.station,
+      categoryName: r.categoryName,
+      totalQuantity: r.qty,
+      totalRevenue: r.revenue.toString(),
+      avgPrice: r.qty > 0 ? r.revenue.div(r.qty).toDecimalPlaces(2).toString() : "0",
+    }));
+
+  return {
+    rows: sortedRows,
+    summary: {
+      allQuantity,
+      allRevenue: allRevenue.toString(),
+      kitchenQuantity,
+      kitchenRevenue: kitchenRevenue.toString(),
+      barQuantity,
+      barRevenue: barRevenue.toString(),
+    },
+  };
+}
+
+/**
+ * Prodati artikli — grupisan po nazivu i stanici za izabrani period.
+ *
+ * IZVOR ISTINE: Payment.completedAt + OrderItem.price (snapshot zamrznjen u
+ * trenutku porudžbine) — izmena cene artikla sutra ne menja istorijski
+ * izveštaj. Poništene stavke su automatski isključene jer OrderItem.quantity
+ * odražava preostalu količinu posle svakog void-a, a CANCELLED stavke se
+ * eksplicitno filtriraju.
+ *
+ * ATRIBUCIJA KUHINJA_AND_BAR: Artikli sa stanicom KITCHEN_AND_BAR se
+ * finansijski pripisuju Kuhinji (kitchenRevenue). Na taj način zbir
+ * kitchenRevenue + barRevenue uvek tačno iznosi allRevenue — nema
+ * dupliranja istog RSD iznosa i u Kuhinji i u Šanku. Filter "Kuhinja"
+ * prikazuje KITCHEN + KITCHEN_AND_BAR; filter "Šank" prikazuje samo BAR.
+ */
+export async function getSoldItems(
+  ctx: AuthContext,
+  filters: ReportFilters,
+  station: SoldItemsStationFilter = "ALL"
+): Promise<SoldItemsReport> {
+  const { locationIds, range, currency } = await resolveContext(ctx, filters);
+
+  const payments = await prisma.payment.findMany({
+    where: {
+      restaurantId: ctx.restaurantId,
+      locationId: { in: locationIds },
+      completedAt: { gte: range.from, lt: range.to },
+    },
+    select: { orderId: true },
+  });
+
+  const orderIds = payments.map((p) => p.orderId);
+  const emptyRange = { from: range.from.toISOString(), to: range.to.toISOString() };
+  const emptySummary: SoldItemsSummary = {
+    allQuantity: 0,
+    allRevenue: "0",
+    kitchenQuantity: 0,
+    kitchenRevenue: "0",
+    barQuantity: 0,
+    barRevenue: "0",
+  };
+  if (orderIds.length === 0) {
+    return { range: emptyRange, currency, station, rows: [], summary: emptySummary };
+  }
+
+  const rawItems = await prisma.orderItem.findMany({
+    where: { orderId: { in: orderIds }, status: { not: "CANCELLED" } },
+    select: {
+      name: true,
+      price: true,
+      quantity: true,
+      preparationStation: true,
+      menuItem: { select: { category: { select: { name: true } } } },
+    },
+  });
+
+  const { rows, summary } = aggregateSoldItems(rawItems, station);
+  return { range: emptyRange, currency, station, rows, summary };
 }

@@ -18,7 +18,12 @@ import { verifySessionToken, sessionCookieOptions } from "@rcs/auth/session";
  * a javne rute se moraju eksplicitno navesti ispod.
  */
 const PUBLIC_PAGE_PATHS = new Set(["/login"]);
-const PUBLIC_API_PATHS = new Set(["/api/auth/login", "/api/auth/pin-login", "/api/auth/staff-directory"]);
+const PUBLIC_API_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/pin-login",
+  "/api/auth/staff-directory",
+  "/api/device/personal-register",
+]);
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PAGE_PATHS.has(pathname) || PUBLIC_API_PATHS.has(pathname);

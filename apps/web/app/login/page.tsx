@@ -8,7 +8,12 @@ import { PinPad } from "../../components/auth/PinPad";
 import { getDeviceId } from "../../lib/shared-pos";
 import { ROLE_LABEL } from "../../components/admin/role-labels";
 
-type Mode = "staff" | "admin";
+// Tri stanja prijave:
+// "admin"            – email + lozinka (OWNER/ADMIN/MANAGER)
+// "staff"            – PIN sa imenikom zaposlenih (registrovani deljeni terminal)
+// "personal-device"  – lični uređaj (PIN zaposlenog, nema imenika osim njega)
+// "register-personal"– forma za prvi put registrovanje ličnog uređaja
+type Mode = "admin" | "staff" | "personal-device" | "register-personal";
 
 interface StaffEntry {
   id: string;
@@ -21,17 +26,20 @@ export default function LoginPage() {
   const [mode, setMode] = useState<Mode>("admin");
 
   useEffect(() => {
-    // Ovaj browser ima registrovan uređaj (packages/domain/devices,
-    // /device-setup) — podrazumevani ekran je Zaposleni + PIN, brže za
-    // svakodnevni rad na deljenom/ličnom uređaju (i povratna tačka posle
-    // Quick Lock-a, vidi QuickLockButton). Bez registrovanog uređaja ostaje
-    // email forma — nema drugog načina da se pre PIN-a bezbedno zna kom
-    // restoranu/lokaciji uređaj pripada (vidi napomenu u
-    // devices/device-service.ts listStaffForDevice).
     const id = getDeviceId();
     setDeviceId(id);
-    if (id) setMode("staff");
+    if (id) {
+      // Device registered — let StaffLoginForm figure out shared vs personal
+      // based on staff-directory response (1 entry = personal)
+      setMode("staff");
+    }
   }, []);
+
+  function handlePersonalRegistered(newDeviceId: string) {
+    setDeviceId(newDeviceId);
+    // Keep mode="staff" — StaffLoginForm will load the single-employee view
+    setMode("staff");
+  }
 
   return (
     <main className="flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-graphite px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(2rem,10dvh,5rem)] sm:px-6">
@@ -53,19 +61,60 @@ export default function LoginPage() {
           <p className="w-full text-center text-sm leading-5 text-cream-300/70">Prijava za osoblje restorana</p>
         </header>
 
-        {mode === "staff" && deviceId ? <StaffLoginForm deviceId={deviceId} /> : <PasswordLoginForm />}
+        {/* Registered device — shared POS or personal device (StaffLoginForm handles both) */}
+        {deviceId && mode === "staff" && <StaffLoginForm deviceId={deviceId} />}
 
-        <div className="mt-5 text-center">
-          {deviceId ? (
+        {/* Admin email login */}
+        {mode === "admin" && <PasswordLoginForm />}
+
+        {/* Personal device first-time registration */}
+        {mode === "register-personal" && (
+          <PersonalDeviceRegistrationForm
+            onRegistered={handlePersonalRegistered}
+            onCancel={() => setMode("admin")}
+          />
+        )}
+
+        {/* Footer links */}
+        <div className="mt-5 space-y-2 text-center">
+          {deviceId && mode === "staff" && (
             <button
               type="button"
-              onClick={() => setMode((m) => (m === "staff" ? "admin" : "staff"))}
+              onClick={() => setMode("admin")}
               className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
             >
-              {mode === "staff" ? "Administratorska prijava" : "← Prijava za osoblje"}
+              Administratorska prijava
             </button>
-          ) : (
-            <p className="text-xs text-cream-300/40">Ovaj uređaj još nije podešen za PIN prijavu.</p>
+          )}
+          {mode === "admin" && (
+            <div className="space-y-1.5">
+              {deviceId ? (
+                <button
+                  type="button"
+                  onClick={() => setMode("staff")}
+                  className="block w-full text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+                >
+                  ← Prijava za osoblje
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setMode("register-personal")}
+                  className="block w-full text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+                >
+                  Prijava zaposlenog (lični uređaj) →
+                </button>
+              )}
+            </div>
+          )}
+          {mode === "register-personal" && (
+            <button
+              type="button"
+              onClick={() => setMode("admin")}
+              className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+            >
+              ← Administratorska prijava
+            </button>
           )}
         </div>
       </div>
@@ -133,32 +182,47 @@ function StaffLoginForm({ deviceId }: { deviceId: string }) {
     return <div className="rounded-sm bg-danger-soft px-3 py-2 text-center text-sm text-danger">{staffError}</div>;
   }
 
+  // Lični uređaj — 1 zaposleni, ne prikazuj dropdown
+  const isPersonalDevice = staff !== null && staff.length === 1;
+
   return (
     <div className="flex flex-col items-center">
       <div className="mb-5 w-full rounded-lg bg-white p-4 shadow-elevated">
-        <label htmlFor="employee" className="mb-1.5 block text-sm font-medium text-inkSoft">
-          Zaposleni
-        </label>
-        <select
-          id="employee"
-          className="h-14 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
-          value={employeeId}
-          disabled={!staff || staff.length === 0}
-          onChange={(e) => {
-            setEmployeeId(e.target.value);
-            setPin("");
-            setError(null);
-          }}
-        >
-          {!staff && <option>Učitavanje…</option>}
-          {staff?.length === 0 && <option>Nema dostupnog osoblja</option>}
-          {staff?.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-        {selected?.role && <p className="mt-1.5 text-sm text-inkSoft">{ROLE_LABEL[selected.role] ?? selected.role}</p>}
+        {isPersonalDevice && selected ? (
+          // Lični uređaj: prikaži samo ime, bez imenika
+          <div>
+            <p className="mb-0.5 text-xs font-medium uppercase tracking-wide text-inkSoft">Zaposleni</p>
+            <p className="text-base font-semibold text-ink">{selected.name}</p>
+            {selected.role && <p className="mt-0.5 text-sm text-inkSoft">{ROLE_LABEL[selected.role] ?? selected.role}</p>}
+          </div>
+        ) : (
+          // Deljeni terminal: prikaži dropdown sa imenikom
+          <>
+            <label htmlFor="employee" className="mb-1.5 block text-sm font-medium text-inkSoft">
+              Zaposleni
+            </label>
+            <select
+              id="employee"
+              className="h-14 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
+              value={employeeId}
+              disabled={!staff || staff.length === 0}
+              onChange={(e) => {
+                setEmployeeId(e.target.value);
+                setPin("");
+                setError(null);
+              }}
+            >
+              {!staff && <option>Učitavanje…</option>}
+              {staff?.length === 0 && <option>Nema dostupnog osoblja</option>}
+              {staff?.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            {selected?.role && <p className="mt-1.5 text-sm text-inkSoft">{ROLE_LABEL[selected.role] ?? selected.role}</p>}
+          </>
+        )}
       </div>
 
       {error && (
@@ -169,6 +233,106 @@ function StaffLoginForm({ deviceId }: { deviceId: string }) {
 
       <PinPad value={pin} onChange={setPin} onSubmit={submit} disabled={loading || !employeeId} />
     </div>
+  );
+}
+
+function PersonalDeviceRegistrationForm({
+  onRegistered,
+  onCancel,
+}: {
+  onRegistered: (deviceId: string) => void;
+  onCancel: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/device/personal-register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Registracija nije uspela");
+      // Store deviceId in localStorage (same mechanism as shared POS setup)
+      const { setDeviceId } = await import("../../lib/shared-pos");
+      setDeviceId(body.deviceId);
+      onRegistered(body.deviceId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Neočekivana greška");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="rounded-lg bg-white p-5 shadow-elevated sm:p-6">
+      <p className="mb-4 text-sm text-inkSoft">
+        Unesite vaše korisničke podatke koje je postavio administrator. Ovaj telefon/tablet
+        biće registrovan kao vaš lični uređaj za PIN prijavu.
+      </p>
+
+      {error && (
+        <div className="mb-4 rounded-sm bg-danger-soft px-3 py-2 text-sm text-danger animate-fade-in">
+          {error}
+        </div>
+      )}
+
+      <div className="mb-4">
+        <label htmlFor="personal-email" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+          Email
+        </label>
+        <input
+          id="personal-email"
+          type="email"
+          autoComplete="username"
+          required
+          suppressHydrationWarning
+          className="h-11 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+      </div>
+
+      <div className="mb-5">
+        <label htmlFor="personal-password" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+          Lozinka
+        </label>
+        <div className="relative">
+          <input
+            id="personal-password"
+            type={showPassword ? "text" : "password"}
+            autoComplete="current-password"
+            required
+            suppressHydrationWarning
+            className="h-11 w-full rounded-md border border-line px-3 pr-11 text-base text-ink focus:border-gold focus:outline-none"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword((v) => !v)}
+            aria-controls="personal-password"
+            aria-pressed={showPassword}
+            aria-label={showPassword ? "Sakrij lozinku" : "Prikaži lozinku"}
+            className="absolute inset-y-0 right-0 flex h-11 w-11 items-center justify-center rounded-r-md text-inkSoft transition-colors hover:text-ink"
+          >
+            {showPassword ? <EyeOffIcon /> : <EyeIcon />}
+          </button>
+        </div>
+      </div>
+
+      <Button type="submit" variant="primary" size="lg" loading={loading} className="h-12 w-full py-0">
+        {loading ? "Registrovanje…" : "Registruj lični uređaj"}
+      </Button>
+    </form>
   );
 }
 
@@ -236,6 +400,7 @@ function PasswordLoginForm() {
           type="email"
           autoComplete="username"
           required
+          suppressHydrationWarning
           className="h-11 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -252,6 +417,7 @@ function PasswordLoginForm() {
             type={showPassword ? "text" : "password"}
             autoComplete="current-password"
             required
+            suppressHydrationWarning
             className="h-11 w-full rounded-md border border-line px-3 pr-11 text-base text-ink focus:border-gold focus:outline-none"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

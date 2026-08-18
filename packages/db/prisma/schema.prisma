@@ -158,10 +158,11 @@ model Employee {
   updatedAt         DateTime       @updatedAt
   createdBy         String?
 
-  restaurant Restaurant         @relation(fields: [restaurantId], references: [id])
-  user       User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
-  roles      EmployeeRole[]
-  locations  EmployeeLocation[]
+  restaurant     Restaurant         @relation(fields: [restaurantId], references: [id])
+  user           User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  roles          EmployeeRole[]
+  locations      EmployeeLocation[]
+  personalDevice Device?
 
   @@index([restaurantId])
   @@index([status])
@@ -246,6 +247,10 @@ model Device {
   id           String     @id @default(uuid())
   restaurantId String
   locationId   String?
+  // Ako je postavljeno, ovo je LIČNI uređaj tog zaposlenog — ne deli se sa
+  // ostalim zaposlenima. Prijava na takvom uređaju zahteva samo PIN tog
+  // zaposlenog (imenik zaposlenih se ne prikazuje). Null = deljeni terminal.
+  employeeId   String?    @unique
   name         String
   deviceType   DeviceType @default(POS)
   registeredAt DateTime   @default(now())
@@ -253,6 +258,7 @@ model Device {
 
   restaurant Restaurant @relation(fields: [restaurantId], references: [id])
   location   Location?  @relation(fields: [locationId], references: [id])
+  employee   Employee?  @relation(fields: [employeeId], references: [id], onDelete: SetNull)
 
   @@index([restaurantId])
   @@index([locationId])

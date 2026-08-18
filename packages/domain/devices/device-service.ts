@@ -1,5 +1,5 @@
 import { prisma } from "@rcs/db";
-import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requirePermission, scopeToRestaurant, verifyPassword, normalizeEmail, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import type { RegisterDeviceInput } from "@rcs/shared";
 
@@ -85,6 +85,9 @@ export interface StaffDirectoryEntry {
  * nemaju PIN pa se prirodno ne pojavljuju ovde, bez potrebe za posebnom
  * listom dozvoljenih rola koja bi mogla da se raziđe od Staff Management-a.
  *
+ * Ako je `device.employeeId` postavljen (LIČNI uređaj), vraća SAMO tog
+ * zaposlenog — imenik se ne prikazuje. Deaktiviran zaposleni → null (403).
+ *
  * Vraća `null` ako uređaj nije registrovan/aktivan — poziva se pre PIN-a pa
  * ruta ovo mapira na 403, isto kao pin-login.
  */
@@ -92,6 +95,31 @@ export async function listStaffForDevice(deviceId: string): Promise<StaffDirecto
   const device = await prisma.device.findUnique({ where: { id: deviceId } });
   if (!device || !device.isActive) return null;
 
+  // Lični uređaj — prikaži SAMO vlasnika uređaja (ne ceo imenik)
+  if (device.employeeId) {
+    const employee = await prisma.employee.findUnique({
+      where: { id: device.employeeId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        status: true,
+        pinHash: true,
+        roles: { select: { role: { select: { name: true } } } },
+      },
+    });
+    // Deaktiviran zaposleni ili bez PIN-a → ne može se prijaviti
+    if (!employee || employee.status !== "ACTIVE" || !employee.pinHash) return null;
+    return [
+      {
+        id: employee.id,
+        name: `${employee.firstName} ${employee.lastName}`.trim(),
+        role: employee.roles[0]?.role.name ?? null,
+      },
+    ];
+  }
+
+  // Deljeni terminal — vrati sve aktivne zaposlene sa PIN-om za tu lokaciju
   const employees = await prisma.employee.findMany({
     where: {
       restaurantId: device.restaurantId,
@@ -113,4 +141,94 @@ export async function listStaffForDevice(deviceId: string): Promise<StaffDirecto
     name: `${e.firstName} ${e.lastName}`.trim(),
     role: e.roles[0]?.role.name ?? null,
   }));
+}
+
+/**
+ * Registracija LIČNOG uređaja — zaposleni se identifikuje sopstvenim
+ * email+lozinkom (postavljenim od strane admina), bez aktivne sesije.
+ *
+ * Bezbednost:
+ * - Ne prima restaurantId/locationId od klijenta — sve se izvodi iz
+ *   verifikovanog naloga zaposlenog.
+ * - Ako zaposleni već ima registrovan lični uređaj, stari se deaktivira
+ *   (pristup sa prethodnog telefona se odmah blokira — sledeći PIN pokušaj
+ *   vraća 403 jer device.isActive = false).
+ * - Deaktiviran/suspendovan zaposleni ne može registrovati uređaj.
+ * - Audit zapis prati registraciju (bez lozinke/PIN-a u logu).
+ *
+ * Vraća: { deviceId: string } — klijent čuva u localStorage (isti mehanizam
+ * kao kod deljenog terminala).
+ */
+export async function registerPersonalDevice(params: { email: string; password: string }): Promise<{ deviceId: string; employeeName: string }> {
+  const email = normalizeEmail(params.email);
+
+  // Učitaj User + Employee + Restaurant scoped
+  const user = await prisma.user.findUnique({
+    where: { email },
+    include: {
+      employee: {
+        include: {
+          restaurant: { select: { id: true, status: true } },
+          locations: { select: { locationId: true }, orderBy: { locationId: "asc" } },
+        },
+      },
+    },
+  });
+
+  const GENERIC = "Neispravan email ili lozinka";
+  if (!user || !user.passwordHash || !user.isActive) throw new Error(GENERIC);
+
+  const passwordOk = await verifyPassword(params.password, user.passwordHash);
+  if (!passwordOk) throw new Error(GENERIC);
+
+  const employee = user.employee;
+  if (!employee) throw new Error(GENERIC);
+  if (employee.status !== "ACTIVE") throw new Error("Nalog zaposlenog nije aktivan");
+  if (employee.restaurant.status !== "ACTIVE") throw new Error("Restoran nije aktivan");
+
+  // Izaberi prvu lokaciju zaposlenog (za locationId na uređaju)
+  const primaryLocationId = employee.locations[0]?.locationId ?? null;
+
+  const device = await prisma.$transaction(async (tx) => {
+    // Deaktiviraj stari lični uređaj ako postoji — employeeId se nullira
+    // da bi novi uređaj mogao preuzeti tu vezу (unique constraint).
+    const existing = await tx.device.findUnique({ where: { employeeId: employee.id } });
+    if (existing) {
+      await tx.device.update({ where: { id: existing.id }, data: { isActive: false, employeeId: null } });
+    }
+
+    const created = await tx.device.create({
+      data: {
+        restaurantId: employee.restaurantId,
+        locationId: primaryLocationId,
+        employeeId: employee.id,
+        name: `Lični uređaj — ${employee.firstName} ${employee.lastName}`,
+        deviceType: "POS",
+        isActive: true,
+      },
+    });
+
+    // Audit zapis bez lozinke — samo činjenica registracije
+    await tx.auditLog.create({
+      data: {
+        restaurantId: employee.restaurantId,
+        userId: employee.id,
+        role: null,
+        action: "device.personal_registered",
+        entityType: "Device",
+        entityId: created.id,
+        newValue: { employeeId: employee.id, locationId: primaryLocationId },
+        severity: "INFO",
+        isSuspicious: false,
+        locationId: primaryLocationId,
+      },
+    });
+
+    return created;
+  });
+
+  return {
+    deviceId: device.id,
+    employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
+  };
 }

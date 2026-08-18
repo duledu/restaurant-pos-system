@@ -28,16 +28,18 @@ export async function listEmployees(ctx: AuthContext) {
     include: {
       roles: { include: { role: true } },
       locations: { include: { location: true } },
+      user: { select: { id: true, passwordHash: true } },
     },
     orderBy: { createdAt: "desc" },
   });
 
-  // pinHash/failedPinAttempts/pinLockedUntil su interna bezbednosna
-  // knjigovodstva — nikad se ne šalju klijentu, čak ni kao heš. Klijent
-  // dobija samo da li PIN prijava uopšte postoji za tog zaposlenog.
-  return rows.map(({ pinHash, failedPinAttempts, pinLockedUntil, ...rest }) => ({
+  // pinHash/failedPinAttempts/pinLockedUntil i user.passwordHash su interna
+  // bezbednosna knjigovodstva — nikad se ne šalju klijentu, čak ni kao heš.
+  // Klijent dobija samo binarne zastavice da li PIN/login nalog postoji.
+  return rows.map(({ pinHash, failedPinAttempts, pinLockedUntil, user, ...rest }) => ({
     ...rest,
     hasPin: pinHash !== null,
+    hasLoginCredentials: Boolean(user?.passwordHash),
   }));
 }
 
@@ -391,6 +393,63 @@ export async function resetEmployeePin(ctx: AuthContext, employeeId: string, new
  * kaskadno obrisao (namerna arhitektura od Faze 1, vidi napomene u
  * schema.prisma), pa istorija ostaje čitljiva/tačna zauvek.
  */
+/**
+ * Admin postavlja ili resetuje lozinku za prijavu zaposlenog.
+ *
+ * Kreira User nalog ako zaposleni još nema jedan (PIN-only zaposleni koji
+ * treba lični uređaj). Ako nalog već postoji, menja hash lozinke.
+ *
+ * Ograničenja:
+ * - Admin NIJE u mogućnosti da pročita trenutnu lozinku (nije stored plain)
+ * - Audit zapis ne sadrži ni plain tekst ni hash lozinke
+ * - Email mora biti jedinstven u celoj bazi (User.email @unique)
+ */
+export async function setEmployeeLoginPassword(
+  ctx: AuthContext,
+  employeeId: string,
+  params: { email: string; password: string }
+) {
+  requirePermission(ctx, EMPLOYEES_MANAGE);
+
+  if (params.password.length < 10) {
+    throw new Error("Lozinka mora imati najmanje 10 karaktera");
+  }
+
+  const employee = await prisma.employee.findFirst({
+    where: { id: employeeId, ...scopeToRestaurant(ctx) },
+    include: { user: true },
+  });
+  if (!employee) throw new Error("Zaposleni nije pronađen");
+
+  const email = normalizeEmail(params.email);
+  const passwordHash = await hashPassword(params.password);
+
+  await prisma.$transaction(async (tx) => {
+    if (employee.user) {
+      // Zaposleni već ima User nalog — ažuriraj email i lozinku
+      await tx.user.update({
+        where: { id: employee.user.id },
+        data: { email, passwordHash },
+      });
+    } else {
+      // PIN-only zaposleni — kreiraj User nalog i poveži ga
+      const user = await tx.user.create({ data: { email, passwordHash } });
+      await tx.employee.update({ where: { id: employeeId }, data: { userId: user.id } });
+    }
+
+    await recordAuditEntry(
+      ctx,
+      {
+        entityType: "Employee",
+        entityId: employeeId,
+        action: "employee.login_credential_set",
+        newValue: { email },
+      },
+      tx
+    );
+  });
+}
+
 export async function setEmployeeStatus(ctx: AuthContext, employeeId: string, status: "ACTIVE" | "SUSPENDED") {
   requirePermission(ctx, EMPLOYEES_MANAGE);
 
