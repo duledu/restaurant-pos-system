@@ -41,7 +41,9 @@ export interface ReportFilters {
   to?: string;
 }
 
-async function resolveContext(ctx: AuthContext, filters: ReportFilters) {
+// FAZA 7: eksportovano — analytics-service.ts ponovo koristi ISTU
+// permisiju/lokaciju/vremenski-opseg logiku umesto da je duplira.
+export async function resolveContext(ctx: AuthContext, filters: ReportFilters) {
   requirePermission(ctx, REPORTING_PERMISSION);
 
   let locationIds: string[];
@@ -57,11 +59,20 @@ async function resolveContext(ctx: AuthContext, filters: ReportFilters) {
 
   const restaurant = await prisma.restaurant.findUniqueOrThrow({
     where: { id: ctx.restaurantId },
-    select: { timezone: true, currency: true },
+    select: { timezone: true, currency: true, createdAt: true },
   });
   const range = resolveDateRange(filters.preset, restaurant.timezone, { customFrom: filters.from, customTo: filters.to });
 
-  return { locationIds, range, currency: restaurant.currency, timezone: restaurant.timezone };
+  return {
+    locationIds,
+    range,
+    currency: restaurant.currency,
+    timezone: restaurant.timezone,
+    // FAZA 7: koristi getKpiComparison da razlikuje "prethodni period je
+    // stvarno imao nula prodaje" od "prethodni period prethodi postojanju
+    // restorana" — ne prikazuje lažnu % promenu u drugom slučaju.
+    restaurantCreatedAt: restaurant.createdAt,
+  };
 }
 
 function decimalToString(value: Prisma.Decimal | null | undefined): string {
@@ -113,7 +124,22 @@ export interface SalesSummary {
 
 export async function getSalesSummary(ctx: AuthContext, filters: ReportFilters): Promise<SalesSummary> {
   const { locationIds, range, currency } = await resolveContext(ctx, filters);
+  return computeSalesSummaryForRange(ctx, locationIds, range, currency);
+}
 
+/**
+ * FAZA 7: telo bivšeg getSalesSummary, izdvojeno da bi getKpiComparison
+ * (packages/domain/analytics/analytics-service.ts) moglo da ga pozove
+ * DVAPUT — jednom za tekući, jednom za prethodni period — bez ikakve
+ * promene same finansijske logike (identičan kod, samo parametrizovan
+ * po već-rešenom `range` umesto da ga sam rešava iz preseta).
+ */
+export async function computeSalesSummaryForRange(
+  ctx: AuthContext,
+  locationIds: string[],
+  range: { from: Date; to: Date },
+  currency: string
+): Promise<SalesSummary> {
   const [grouped, receiptAgg, voidAgg] = await Promise.all([
     prisma.payment.groupBy({
       by: ["method"],

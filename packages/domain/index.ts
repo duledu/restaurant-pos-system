@@ -11,5 +11,6 @@ export * as production from "./production/production-service";
 export * as reporting from "./reporting/reporting-service";
 export * as printing from "./printing/print-service";
 export * as settings from "./settings/settings-service";
+export * as analytics from "./analytics/analytics-service";
 export * from "./realtime/publisher";
 export { ssePublisher, subscribe } from "./realtime/sse-publisher";

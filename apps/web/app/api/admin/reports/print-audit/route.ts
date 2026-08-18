@@ -8,7 +8,20 @@ import { withApiAuth } from "../../../../../lib/api-helpers";
 // odatle — ta lista nije eksportovana, i ovo je jedini drugi poziv koji je
 // koristi, pa lokalna kopija ostaje jednostavnija od dodatnog deljenog
 // modula za dva mesta).
-const REPORT_TYPES = ["sales", "items", "employees", "shifts", "voids", "daily-summary"] as const;
+const REPORT_TYPES = [
+  "sales",
+  "items",
+  "employees",
+  "shifts",
+  "voids",
+  "daily-summary",
+  // ── Faza 7 (BI dashboard) ──
+  "dashboard",
+  "categories",
+  "discounts-by-employee",
+  "payments",
+  "employees-normalized",
+] as const;
 
 /**
  * Klijent poziva OVO neposredno pre window.print() na bilo kom izveštaju —

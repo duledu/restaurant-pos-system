@@ -36,6 +36,10 @@ coverage/
 # potpuno odvojena od DEV baze iznad, vidi docs/database-safety.md
 .local-postgres-data-test/
 
+# Database backups (scripts/db-backup.mjs) — contain real business data,
+# NEVER commit. See docs/database-backup-recovery.md.
+/backups/
+
 # Editor
 .vscode/
 .idea/

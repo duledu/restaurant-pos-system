@@ -8,6 +8,7 @@ export const REPORT_PRESETS = [
   "thisMonth",
   "lastMonth",
   "thisYear",
+  "lastYear",
   "last7days",
   "last30days",
   "custom",

@@ -33,6 +33,7 @@ export const REPORT_PRESETS = [
   "thisMonth",
   "lastMonth",
   "thisYear",
+  "lastYear",
   "last7days",
   "last30days",
   "custom",
@@ -46,13 +47,15 @@ export interface DateRange {
   to: Date;
 }
 
-interface ZonedYMD {
+export interface ZonedYMD {
   year: number;
   month: number;
   day: number;
 }
 
-function zonedYMD(date: Date, timeZone: string): ZonedYMD {
+// FAZA 7: eksportovano — potrebno analytics-service.ts (npr. brojanje koliko
+// se puta dati dan u nedelji pojavio u periodu) van ovog modula.
+export function zonedYMD(date: Date, timeZone: string): ZonedYMD {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(
     date
   );
@@ -91,7 +94,7 @@ function zonedMidnightUtc({ year, month, day }: ZonedYMD, timeZone: string): Dat
   return new Date(guess - offset);
 }
 
-function addDaysYMD(ymd: ZonedYMD, days: number): ZonedYMD {
+export function addDaysYMD(ymd: ZonedYMD, days: number): ZonedYMD {
   const d = new Date(Date.UTC(ymd.year, ymd.month - 1, ymd.day));
   d.setUTCDate(d.getUTCDate() + days);
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
@@ -174,6 +177,11 @@ export function resolveDateRange(
     const start: ZonedYMD = { year: todayYMD.year, month: 1, day: 1 };
     return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc({ year: start.year + 1, month: 1, day: 1 }, timeZone) };
   }
+  if (preset === "lastYear") {
+    const thisYearStart: ZonedYMD = { year: todayYMD.year, month: 1, day: 1 };
+    const start: ZonedYMD = { year: todayYMD.year - 1, month: 1, day: 1 };
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc(thisYearStart, timeZone) };
+  }
 
   // custom
   if (!options.customFrom || !options.customTo) {
@@ -185,4 +193,34 @@ export function resolveDateRange(
   const to = zonedMidnightUtc(addDaysYMD(parseYMD(options.customTo), 1), timeZone);
   if (from >= to) throw new Error("Period 'od' mora biti pre perioda 'do'");
   return { from, to };
+}
+
+/**
+ * FAZA 7 — "prethodni uporedivi period" za poređenje (#1/#16 specifikacije).
+ *
+ * Za fiksno-široke prozore (today/yesterday/last7days/last30days/custom/
+ * thisWeek/lastWeek) je pomeranje unazad za TAČNO istu širinu uvek
+ * kalendarski ispravno (dan je uvek 24h lokalno osim DST prelaza, nedelja
+ * je uvek 7 dana — zonedMidnightUtc/addDaysYMD gore već ispravno hvataju
+ * DST). Za mesec/godinu širina VARIRA (28-31 dan, 365-366 dana), pa se
+ * prethodni period računa PRAVOM kalendarskom aritmetikom (isti mehanizam
+ * kao thisMonth/lastMonth/thisYear/lastYear iznad), ne generičkim pomerajem
+ * — u suprotnom bi "prošli mesec" od 31-dnevnog meseca mogao da upadne na
+ * pogrešan datum početka.
+ */
+export function resolvePreviousPeriodRange(preset: ReportPreset, timeZone: string, currentRange: DateRange): DateRange {
+  if (preset === "thisMonth" || preset === "lastMonth") {
+    const startYMD = zonedYMD(currentRange.from, timeZone);
+    const prevMonthStart = addMonthsToFirstOfMonth(firstOfMonthYMD(startYMD), -1);
+    return { from: zonedMidnightUtc(prevMonthStart, timeZone), to: currentRange.from };
+  }
+  if (preset === "thisYear" || preset === "lastYear") {
+    const startYMD = zonedYMD(currentRange.from, timeZone);
+    const prevYearStart: ZonedYMD = { year: startYMD.year - 1, month: 1, day: 1 };
+    return { from: zonedMidnightUtc(prevYearStart, timeZone), to: currentRange.from };
+  }
+  // Generičko pomeranje unazad za tačnu širinu — kalendarski ispravno za sve
+  // ostale (fiksno-široke) presete, uključujući custom.
+  const widthMs = currentRange.to.getTime() - currentRange.from.getTime();
+  return { from: new Date(currentRange.from.getTime() - widthMs), to: currentRange.from };
 }

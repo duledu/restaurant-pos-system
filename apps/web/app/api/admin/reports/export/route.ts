@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { reporting, audit } from "@rcs/domain";
+import { reporting, audit, analytics } from "@rcs/domain";
 import { withApiAuth } from "../../../../../lib/api-helpers";
 import { parseReportFilters } from "../../../../../lib/report-filters";
 
@@ -11,7 +11,19 @@ import { parseReportFilters } from "../../../../../lib/report-filters";
  * Ovo izbegava novu server-side PDF zavisnost (npr. puppeteer) za MVP dok
  * se ne pokaže stvarna potreba za serverski generisanim PDF-om.
  */
-const REPORT_TYPES = ["sales", "items", "employees", "shifts", "voids", "daily-summary"] as const;
+const REPORT_TYPES = [
+  "sales",
+  "items",
+  "employees",
+  "shifts",
+  "voids",
+  "daily-summary",
+  // ── Faza 7 (BI dashboard) — nove, ranije nepostojeće CSV tabele ──
+  "categories",
+  "discounts-by-employee",
+  "payments",
+  "employees-normalized",
+] as const;
 type ReportType = (typeof REPORT_TYPES)[number];
 
 function toCsv(rows: Record<string, unknown>[]): string {
@@ -59,6 +71,18 @@ export const GET = withApiAuth(async (ctx, request) => {
       rows = [{ label: summary.label, generatedAt: summary.generatedAt, ...summary.sales } as unknown as Record<string, unknown>];
       break;
     }
+    case "categories":
+      rows = (await analytics.getCategoryPerformance(ctx, filters)).categories as unknown as Record<string, unknown>[];
+      break;
+    case "discounts-by-employee":
+      rows = (await analytics.getDiscountIntelligence(ctx, filters)).byEmployee as unknown as Record<string, unknown>[];
+      break;
+    case "payments":
+      rows = (await analytics.getPaymentBreakdown(ctx, filters)).methods as unknown as Record<string, unknown>[];
+      break;
+    case "employees-normalized":
+      rows = (await analytics.getEmployeeNormalizedMetrics(ctx, filters)).rows as unknown as Record<string, unknown>[];
+      break;
   }
 
   // Audit PRE odgovora — export od finansijske/istorijske vrednosti se

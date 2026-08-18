@@ -12,6 +12,7 @@ export interface ReportFilterState {
     | "thisMonth"
     | "lastMonth"
     | "thisYear"
+    | "lastYear"
     | "last7days"
     | "last30days"
     | "custom";
@@ -32,6 +33,7 @@ const PRESETS: { value: ReportFilterState["preset"]; label: string }[] = [
   { value: "thisMonth", label: "Ovaj mesec" },
   { value: "lastMonth", label: "Prošli mesec" },
   { value: "thisYear", label: "Ova godina" },
+  { value: "lastYear", label: "Prošla godina" },
   { value: "custom", label: "Period" },
 ];
 

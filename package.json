@@ -30,7 +30,15 @@
     "test:db:mark": "npx tsx scripts/mark-test-database.ts",
     "db:counts": "dotenv -e .env -- node scripts/db-count-critical-tables.mjs",
     "docker:up": "docker compose -f docker/docker-compose.yml up -d",
-    "docker:down": "docker compose -f docker/docker-compose.yml down"
+    "docker:down": "docker compose -f docker/docker-compose.yml down",
+    "db:backup": "node scripts/db-backup.mjs",
+    "db:backup:verify": "node scripts/db-backup-verify.mjs",
+    "db:backup:status": "node scripts/db-backup-status.mjs",
+    "db:backup:readiness": "node scripts/db-backup-readiness.mjs",
+    "db:backup:prune": "node scripts/db-backup-prune.mjs",
+    "db:premigration-check": "node scripts/db-premigration-check.mjs",
+    "db:postmigration-check": "node scripts/db-postmigration-check.mjs",
+    "db:restore-drill": "node scripts/db-restore-drill.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
