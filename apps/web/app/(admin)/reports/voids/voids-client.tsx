@@ -6,6 +6,7 @@ import { Card } from "../../../../components/ui/Card";
 import { EmptyState } from "../../../../components/ui/EmptyState";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
+import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
 
 interface VoidRow {
   id: string;
@@ -73,8 +74,13 @@ export function VoidsClient() {
           <h1 className="text-2xl font-bold text-ink">Poništavanja poslatih stavki</h1>
           <p className="mt-1 text-sm text-inkSoft">Dokazi za pregled — ne optužba. Ovo su ispravke već poslatih stavki.</p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} />
+        <ReportFilters value={filters} onChange={setFilters} reportType="voids" />
       </div>
+
+      <ReportPrintHeader
+        title="Poništavanja poslatih stavki"
+        periodLabel={filters.preset === "custom" ? `${filters.from ?? "?"} — ${filters.to ?? "?"}` : filters.preset}
+      />
 
       {error && <div className="mb-6 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>}
 

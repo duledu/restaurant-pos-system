@@ -97,17 +97,43 @@ export interface SalesSummary {
   averageOrderValue: string;
   cashPercent: number;
   cardPercent: number;
+  // ── FAZA 6: netSales JE totalSales (iznos STVARNO naplaćen, posle
+  // popusta) — polje se dodaje pod svojim finansijskim imenom da izveštaj
+  // ne mora da nagađa da su "totalSales" i "net" isto. grossSales = netSales
+  // + discountTotal (koliko bi bilo BEZ popusta). taxTotal je PDV sadržan u
+  // totalSales (ne dodaje se na njega). Izvor: Receipt snapshot (subtotal/
+  // taxTotal/discountAmount su zamrznuti u trenutku plaćanja), NIKAD
+  // preračunato iz trenutnog MenuItem/OrderItem stanja.
+  grossSales: string;
+  netSales: string;
+  discountTotal: string;
+  taxTotal: string;
+  voidTotal: string;
 }
 
 export async function getSalesSummary(ctx: AuthContext, filters: ReportFilters): Promise<SalesSummary> {
   const { locationIds, range, currency } = await resolveContext(ctx, filters);
 
-  const grouped = await prisma.payment.groupBy({
-    by: ["method"],
-    where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, completedAt: { gte: range.from, lt: range.to } },
-    _sum: { amount: true },
-    _count: { _all: true },
-  });
+  const [grouped, receiptAgg, voidAgg] = await Promise.all([
+    prisma.payment.groupBy({
+      by: ["method"],
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, completedAt: { gte: range.from, lt: range.to } },
+      _sum: { amount: true },
+      _count: { _all: true },
+    }),
+    prisma.receipt.aggregate({
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        payment: { completedAt: { gte: range.from, lt: range.to } },
+      },
+      _sum: { taxTotal: true, discountAmount: true },
+    }),
+    prisma.orderItemVoid.aggregate({
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: { gte: range.from, lt: range.to } },
+      _sum: { voidedValue: true },
+    }),
+  ]);
 
   let cashSales = new Prisma.Decimal(0);
   let cardSales = new Prisma.Decimal(0);
@@ -122,6 +148,12 @@ export async function getSalesSummary(ctx: AuthContext, filters: ReportFilters):
   const cashPercent = totalSales.isZero() ? 0 : cashSales.div(totalSales).mul(100).toDecimalPlaces(1).toNumber();
   const cardPercent = totalSales.isZero() ? 0 : cardSales.div(totalSales).mul(100).toDecimalPlaces(1).toNumber();
 
+  const discountTotal = new Prisma.Decimal(receiptAgg._sum.discountAmount ?? 0);
+  const taxTotal = new Prisma.Decimal(receiptAgg._sum.taxTotal ?? 0);
+  const voidTotal = new Prisma.Decimal(voidAgg._sum.voidedValue ?? 0);
+  const netSales = totalSales;
+  const grossSales = netSales.add(discountTotal);
+
   return {
     range: { from: range.from.toISOString(), to: range.to.toISOString() },
     currency,
@@ -132,6 +164,11 @@ export async function getSalesSummary(ctx: AuthContext, filters: ReportFilters):
     averageOrderValue: averageOrderValue.toString(),
     cashPercent,
     cardPercent,
+    grossSales: grossSales.toString(),
+    netSales: netSales.toString(),
+    discountTotal: discountTotal.toString(),
+    taxTotal: taxTotal.toString(),
+    voidTotal: voidTotal.toString(),
   };
 }
 
@@ -382,6 +419,8 @@ export interface EmployeeActivityRow {
   sales: string;
   cashHandled: string;
   cardHandled: string;
+  averageOrderValue: string;
+  discountTotal: string;
   voidCount: number;
   voidValue: string;
   shiftsClosedCount: number;
@@ -391,7 +430,7 @@ export interface EmployeeActivityRow {
 export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilters): Promise<EmployeeActivityRow[]> {
   const { locationIds, range } = await resolveContext(ctx, filters);
 
-  const [salesGroups, voidGroups, closedShifts] = await Promise.all([
+  const [salesGroups, voidGroups, closedShifts, discountedOrders] = await Promise.all([
     prisma.payment.groupBy({
       by: ["completedBy", "method"],
       where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, completedAt: { gte: range.from, lt: range.to } },
@@ -408,6 +447,19 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
       where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, status: "CLOSED", closedAt: { gte: range.from, lt: range.to } },
       select: { closedBy: true, cashDifference: true },
     }),
+    // FAZA 6: popust se pripisuje zaposlenom koji je ZAVRŠIO naplatu
+    // (Payment.completedBy) — Order sam po sebi nema svog "ko je odobrio
+    // popust" agregatno polje van AuditLog-a, a naplata je trenutak kad
+    // popust postaje deo istorijskog prometa.
+    prisma.order.findMany({
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        discountAmount: { not: null },
+        payment: { completedAt: { gte: range.from, lt: range.to } },
+      },
+      select: { discountAmount: true, payment: { select: { completedBy: true } } },
+    }),
   ]);
 
   interface Bucket {
@@ -415,6 +467,7 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
     sales: Prisma.Decimal;
     cash: Prisma.Decimal;
     card: Prisma.Decimal;
+    discountTotal: Prisma.Decimal;
     voidCount: number;
     voidValue: Prisma.Decimal;
     cashDifference: Prisma.Decimal;
@@ -429,6 +482,7 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
         sales: new Prisma.Decimal(0),
         cash: new Prisma.Decimal(0),
         card: new Prisma.Decimal(0),
+        discountTotal: new Prisma.Decimal(0),
         voidCount: 0,
         voidValue: new Prisma.Decimal(0),
         cashDifference: new Prisma.Decimal(0),
@@ -458,6 +512,11 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
     b.cashDifference = b.cashDifference.add(s.cashDifference ?? 0);
     b.shiftsClosedCount += 1;
   }
+  for (const o of discountedOrders) {
+    if (!o.payment?.completedBy) continue;
+    const b = bucketFor(o.payment.completedBy);
+    b.discountTotal = b.discountTotal.add(o.discountAmount ?? 0);
+  }
 
   const employeeIds = Array.from(byEmployee.keys());
   const nameById = await resolveEmployeeDisplayNames(ctx.restaurantId, employeeIds);
@@ -465,6 +524,7 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
   return employeeIds
     .map((id) => {
       const b = byEmployee.get(id) as Bucket;
+      const averageOrderValue = b.orders > 0 ? b.sales.div(b.orders).toDecimalPlaces(2) : new Prisma.Decimal(0);
       return {
         employeeId: id,
         employeeName: nameById.get(id)?.name ?? "?",
@@ -473,6 +533,8 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
         sales: b.sales.toString(),
         cashHandled: b.cash.toString(),
         cardHandled: b.card.toString(),
+        averageOrderValue: averageOrderValue.toString(),
+        discountTotal: b.discountTotal.toString(),
         voidCount: b.voidCount,
         voidValue: b.voidValue.toString(),
         shiftsClosedCount: b.shiftsClosedCount,
@@ -571,6 +633,7 @@ export interface SoldItemRow {
   totalQuantity: number;
   totalRevenue: string;
   avgPrice: string;
+  voidedQuantity: number;
 }
 
 export interface SoldItemsSummary {
@@ -607,7 +670,8 @@ export interface RawSoldItem {
  */
 export function aggregateSoldItems(
   rawItems: RawSoldItem[],
-  station: SoldItemsStationFilter
+  station: SoldItemsStationFilter,
+  voidedQuantityByName: Map<string, number> = new Map()
 ): { rows: SoldItemRow[]; summary: SoldItemsSummary } {
   interface Bucket {
     name: string;
@@ -672,6 +736,7 @@ export function aggregateSoldItems(
       totalQuantity: r.qty,
       totalRevenue: r.revenue.toString(),
       avgPrice: r.qty > 0 ? r.revenue.div(r.qty).toDecimalPlaces(2).toString() : "0",
+      voidedQuantity: voidedQuantityByName.get(r.name) ?? 0,
     }));
 
   return {
@@ -732,17 +797,90 @@ export async function getSoldItems(
     return { range: emptyRange, currency, station, rows: [], summary: emptySummary };
   }
 
-  const rawItems = await prisma.orderItem.findMany({
-    where: { orderId: { in: orderIds }, status: { not: "CANCELLED" } },
-    select: {
-      name: true,
-      price: true,
-      quantity: true,
-      preparationStation: true,
-      menuItem: { select: { category: { select: { name: true } } } },
-    },
-  });
+  const [rawItems, voidGroups] = await Promise.all([
+    prisma.orderItem.findMany({
+      where: { orderId: { in: orderIds }, status: { not: "CANCELLED" } },
+      select: {
+        name: true,
+        price: true,
+        quantity: true,
+        preparationStation: true,
+        menuItem: { select: { category: { select: { name: true } } } },
+      },
+    }),
+    // FAZA 6: voidovana količina po nazivu artikla (snapshot, ne live
+    // MenuItem) za isti skup porudžbina — vidi #20 specifikacije.
+    prisma.orderItemVoid.groupBy({
+      by: ["itemName"],
+      where: { orderId: { in: orderIds } },
+      _sum: { voidedQuantity: true },
+    }),
+  ]);
+  const voidedQuantityByName = new Map(voidGroups.map((g) => [g.itemName, g._sum.voidedQuantity ?? 0]));
 
-  const { rows, summary } = aggregateSoldItems(rawItems, station);
+  const { rows, summary } = aggregateSoldItems(rawItems, station, voidedQuantityByName);
   return { range: emptyRange, currency, station, rows, summary };
+}
+
+// ── FAZA 6: DNEVNI/Z-STIL MENADŽERSKI IZVEŠTAJ ──────────────────────────
+//
+// NIJE zakonski fiskalni Z izveštaj (nema fiskalizacione integracije) —
+// eksplicitno naslovljen "TableCore dnevni izveštaj". Sastavljen
+// ISKLJUČIVO od već postojećih funkcija ovog fajla — nema paralelne
+// finansijske kalkulacije (zahtev #23).
+
+export interface DailySummaryReport {
+  label: string;
+  generatedAt: string;
+  sales: SalesSummary;
+  shifts: ShiftReportRow[];
+  employees: EmployeeActivityRow[];
+}
+
+export async function getDailySummary(ctx: AuthContext, filters: ReportFilters): Promise<DailySummaryReport> {
+  const [sales, shifts, employees] = await Promise.all([
+    getSalesSummary(ctx, filters),
+    getShiftReport(ctx, filters),
+    getEmployeeActivity(ctx, filters),
+  ]);
+
+  return {
+    label: "TableCore dnevni izveštaj",
+    generatedAt: new Date().toISOString(),
+    sales,
+    shifts,
+    employees,
+  };
+}
+
+// ── FAZA 6: KOMPAKTAN 80mm TERMALNI SAŽETAK ─────────────────────────────
+//
+// Isti getSalesSummary agregat, samo preformatiran za uzak papir — NIKAD
+// druga finansijska kalkulacija za termalni izlaz (zahtev #25).
+
+export interface ThermalDailySummary {
+  totalSales: string;
+  cashSales: string;
+  cardSales: string;
+  completedOrders: number;
+  averageOrderValue: string;
+  voidTotal: string;
+  discountTotal: string;
+  currency: string;
+  generatedAt: string;
+}
+
+export async function getSalesSummaryThermal(ctx: AuthContext, filters: ReportFilters): Promise<ThermalDailySummary> {
+  const sales = await getSalesSummary(ctx, filters);
+  return {
+    totalSales: sales.totalSales,
+    cashSales: sales.cashSales,
+    cardSales: sales.cardSales,
+    completedOrders: sales.completedOrders,
+    averageOrderValue: sales.averageOrderValue,
+    voidTotal: sales.voidTotal,
+    discountTotal: sales.discountTotal,
+    currency: sales.currency,
+    generatedAt: new Date().toISOString(),
+  };
 }

@@ -81,6 +81,7 @@ model Restaurant {
   floors    Floor[]
   shifts    Shift[]
   orders    Order[]
+  settings  RestaurantSettings?
 
   @@index([tenantId])
   @@index([status])
@@ -513,6 +514,12 @@ model Shift {
   @@index([restaurantId])
   @@index([locationId])
   @@index([status])
+  // ── FAZA 6: kompozitni indeks za 5-godišnje date-range izveštaje —
+  // dosadašnji indeksi su svi single-column, Postgres bi morao da preseca
+  // 2-3 odvojena index scan-a umesto jednog range scan-a po restoranu +
+  // lokaciji + datumu. Čisto aditivno, ne menja postojeće upite.
+  @@index([restaurantId, locationId, openedAt])
+  @@index([restaurantId, locationId, closedAt])
   @@map("shifts")
 }
 
@@ -534,6 +541,12 @@ model Order {
   status         OrderStatus @default(DRAFT)
   idempotencyKey String? // postavlja se TEK pri submitOrder — sprečava dupli submit istog draft-a
   submittedAt    DateTime?
+  // ── FAZA 6: popust na nivou porudžbine — MVP, additive, nullable. Nema
+  // posebnog Discount modela (vidi docs/01-RCS-Plan-v2-MVP.md, tačka 9:
+  // "popust je polje na Order/OrderItem, ne poseban model" dok ne preraste
+  // u kupone/pravila). Default null = postojeće porudžbine nepromenjene.
+  discountAmount Decimal? @db.Decimal(12, 2)
+  discountReason String?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
@@ -546,6 +559,7 @@ model Order {
   payment    Payment?
   receipt    Receipt?
   itemVoids  OrderItemVoid[]
+  printJobs  PrintJob[]
 
   // Idempotency key je jedinstven PO RESTORANU kad je postavljen — dupli
   // submit sa istim ključem (npr. duplo-kliknuto dugme, retry mreže) pada
@@ -703,6 +717,10 @@ model Payment {
   @@index([locationId])
   @@index([shiftId])
   @@index([completedAt])
+  // ── FAZA 6: Payment.completedAt je izvor istine za SVA finansijska
+  // grupisanja po danu (vidi reporting-service.ts) — ovaj kompozitni
+  // indeks je najvažniji za 5-godišnji istorijski upit performance.
+  @@index([restaurantId, locationId, completedAt])
   @@map("payments")
 }
 
@@ -734,6 +752,10 @@ model Receipt {
   // [{ taxRate, taxableAmount, taxAmount }] — grupisano po poreskoj stopi,
   // za prikaz PDV rekapitulacije na računu (Faza 6).
   taxBreakdown Json
+  // ── FAZA 6: zamrznut snapshot popusta primenjenog na Order u trenutku
+  // plaćanja (vidi Order.discountAmount) — nullable, postojeći računi
+  // ostaju nepromenjeni.
+  discountAmount Decimal? @db.Decimal(12, 2)
 
   order   Order   @relation(fields: [orderId], references: [id])
   payment Payment @relation(fields: [paymentId], references: [id])
@@ -814,5 +836,123 @@ model OrderItemVoid {
   @@index([shiftId])
   @@index([voidedBy])
   @@index([voidedAt])
+  // ── FAZA 6: kompozitni indeks za istorijski void izveštaj po periodu.
+  @@index([restaurantId, locationId, voidedAt])
   @@map("order_item_voids")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 6 — ŠTAMPA (kuhinjski/šank tiket, račun) I PODEŠAVANJA RESTORANA
+//
+// PrintJob je dispatch-tracking model, NE novi izvor istine za rutiranje
+// porudžbina — OrderItemStation ostaje jedini autoritativan mehanizam za
+// to (vidi production-service.ts). PrintJob samo beleži da je za već
+// postojeće stanje (poslata stavka na stanicu, storniranje, plaćanje)
+// pokušana/uspela štampa, i sprečava duple fizičke otiske.
+//
+// Idempotentnost: @@unique([orderId, dispatchKey]) — dispatchKey je
+// deterministički po vrsti događaja ("submit:KITCHEN", "void:{voidId}:BAR",
+// "receipt:{paymentId}", "receipt-reprint:{paymentId}:{clientKey}").
+// Ponovljen poziv (refresh, retry, React re-render) sa istim dispatchKey-jem
+// pogađa isti red (upsert) — nikad ne kreira drugi PrintJob za isti
+// događaj. Reprint svesno koristi NOVI dispatchKey (klijent generiše nov
+// ključ po kliku) — svaki reprint je zaseban, auditovan red, ne blokiran
+// unique constraint-om prethodnog ispisa.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum PrintJobType {
+  KITCHEN
+  BAR
+  RECEIPT
+}
+
+enum PrintJobStatus {
+  PENDING
+  PRINTING
+  PRINTED
+  FAILED
+}
+
+model PrintJob {
+  id            String         @id @default(uuid())
+  restaurantId  String
+  locationId    String
+  orderId       String
+  type          PrintJobType
+  // KITCHEN | BAR za tiket-tipove; null za RECEIPT (račun nije vezan za
+  // pojedinačnu stanicu).
+  station       ProductionStation?
+  dispatchKey   String
+  status        PrintJobStatus @default(PENDING)
+  attemptCount  Int            @default(0)
+  // Renderovani sadržaj tiketa/računa u trenutku dispatch-a — zamrznut
+  // snapshot, ista konvencija kao Receipt: reprint NIKAD ne preračunava
+  // iz Order/OrderItem, samo ponovo ispisuje ovaj JSON.
+  content       Json
+  isReprint     Boolean        @default(false)
+  reprintOfId   String?
+  requestedBy   String // employeeId, bez FK — ista konvencija kao Order.openedBy
+  failureReason String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  printedAt     DateTime?
+
+  order     Order     @relation(fields: [orderId], references: [id])
+  reprintOf PrintJob? @relation("PrintJobReprints", fields: [reprintOfId], references: [id])
+  reprints  PrintJob[] @relation("PrintJobReprints")
+
+  @@unique([orderId, dispatchKey])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("print_jobs")
+}
+
+enum PrinterType {
+  BROWSER
+  ESC_POS_LAN
+  NETWORK
+}
+
+model RestaurantSettings {
+  restaurantId      String   @id
+  address           String?
+  phone             String?
+  taxIdNumber       String?
+  receiptFooterText String?
+  // Default primenjen na aplikativnom sloju kad je null: "Radni nalog –
+  // nije fiskalni račun" (vidi requirement #4 — ovo NIJE fiskalni račun
+  // dok ne postoji stvarna fiskalizaciona integracija).
+  receiptLegalNote  String?
+  logoUrl           String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@map("restaurant_settings")
+}
+
+model PrinterConfig {
+  id           String       @id @default(uuid())
+  restaurantId String
+  locationId   String
+  station      PrintJobType // KITCHEN | BAR | RECEIPT
+  name         String
+  printerType  PrinterType  @default(BROWSER)
+  paperWidthMm Int          @default(80) // 58mm podržan bez migracije — samo druga vrednost
+  isEnabled    Boolean      @default(true)
+  autoPrint    Boolean      @default(false)
+  copies       Int          @default(1)
+  ipAddress    String? // rezervisano za budući ESC_POS_LAN/NETWORK adapter
+  port         Int?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@unique([locationId, station])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@map("printer_configs")
 }

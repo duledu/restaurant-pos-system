@@ -1,11 +1,12 @@
 import { prisma, Prisma } from "@rcs/db";
-import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requireLocationAccess, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
 import { getActiveShift } from "../shifts/shift-service";
 import { getOrder } from "../orders/order-service";
-import { requireOrderOperator, requireDraftOwnership } from "../orders/order-access";
+import { requireOrderOperator, requireDraftOwnership, isOrderManager } from "../orders/order-access";
 import { computeOrderTotals } from "../orders/order-totals";
+import { dispatchReceiptPrintJob } from "../printing/print-service";
 import type { CompletePaymentInput } from "@rcs/shared";
 
 const PAYABLE_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
@@ -31,16 +32,57 @@ async function loadOrderForBilling(ctx: AuthContext, orderId: string) {
 export async function getBillPreview(ctx: AuthContext, orderId: string) {
   const order = await loadOrderForBilling(ctx, orderId);
   const payableItems = order.items.filter((item) => item.status !== "CANCELLED");
-  const totals = computeOrderTotals(payableItems);
+  const totals = computeOrderTotals(payableItems, order.discountAmount ?? 0);
 
   return {
     order,
     subtotal: totals.subtotal.toString(),
     tax: totals.tax.toString(),
+    discount: totals.discount.toString(),
     total: totals.total.toString(),
     taxBreakdown: totals.taxBreakdown,
     isPaid: order.status === "COMPLETED",
   };
+}
+
+/**
+ * Popust na nivou cele porudžbine (Faza 6) — menadžment-only, ista logika
+ * osetljivosti kao void (konobar ne sme sam sebi "popustiti" račun). Sme se
+ * primeniti samo dok porudžbina NIJE naplaćena — posle completePayment-a
+ * popust je već zamrznut u Receipt-u i menja se samo kroz Faza 4-stil
+ * korekciju (van obima ove faze).
+ */
+export async function applyOrderDiscount(
+  ctx: AuthContext,
+  orderId: string,
+  input: { amount: number; reason: string }
+) {
+  requireOrderOperator(ctx);
+  if (!isOrderManager(ctx)) {
+    throw new ForbiddenError("Samo menadžer ili vlasnik može odobriti popust");
+  }
+  const order = await prisma.order.findFirst({ where: { id: orderId, ...scopeToRestaurant(ctx) } });
+  if (!order) throw new Error("Porudžbina nije pronađena");
+  requireLocationAccess(ctx, order.locationId);
+  if (order.status === "COMPLETED" || order.status === "CANCELLED") {
+    throw new Error("Porudžbina je već zatvorena — popust se ne može primeniti");
+  }
+  if (input.amount < 0) throw new Error("Iznos popusta ne može biti negativan");
+
+  const updated = await prisma.order.update({
+    where: { id: orderId },
+    data: { discountAmount: input.amount, discountReason: input.reason.trim() || null },
+  });
+
+  await recordAuditEntry(ctx, {
+    entityType: "Order",
+    entityId: orderId,
+    action: "order.discount_applied",
+    newValue: { amount: input.amount, reason: input.reason },
+    locationId: order.locationId,
+  });
+
+  return updated;
 }
 
 /**
@@ -93,7 +135,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
   const payableItems = order.items.filter((item) => item.status !== "CANCELLED");
   if (payableItems.length === 0) throw new Error("Porudžbina nema nijednu stavku za naplatu");
 
-  const { subtotal, tax, total, taxBreakdown } = computeOrderTotals(payableItems);
+  const { subtotal, tax, discount, total, taxBreakdown } = computeOrderTotals(payableItems, order.discountAmount ?? 0);
 
   let tenderedAmount = total;
   let changeAmount = new Prisma.Decimal(0);
@@ -153,6 +195,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
         taxTotal: tax,
         total,
         currency: restaurant.currency,
+        discountAmount: discount.isZero() ? null : discount,
         items: payableItems.map((item) => ({
           name: item.name,
           price: item.price.toString(),
@@ -200,6 +243,19 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     payload: { orderId, tableId: order.tableId },
     occurredAt: new Date().toISOString(),
   });
+
+  // Faza 6: priprema (ne fizička štampa — ta je klijentska, vidi print-service.ts)
+  // kupčevog računa TEK POSLE uspešnog commit-a naplate, van transakcije —
+  // neuspeh ovde NIKAD ne sme oboriti već završeno plaćanje.
+  try {
+    await dispatchReceiptPrintJob(ctx, payment.id, {
+      isReprint: false,
+      dispatchKey: `receipt:${payment.id}`,
+      requestedBy: ctx.employeeId,
+    });
+  } catch (err) {
+    console.error("[printing] dispatchReceiptPrintJob failed for payment", payment.id, err);
+  }
 
   return { order: await getOrder(ctx, orderId), payment, receipt };
 }

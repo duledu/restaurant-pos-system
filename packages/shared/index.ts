@@ -5,3 +5,4 @@ export * from "./role-routes";
 export * from "./void-reasons";
 export * from "./currency";
 export * from "./reporting-schemas";
+export * from "./settings-schemas";

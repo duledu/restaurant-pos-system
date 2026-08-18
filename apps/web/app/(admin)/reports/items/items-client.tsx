@@ -7,6 +7,7 @@ import { EmptyState } from "../../../../components/ui/EmptyState";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { KpiCard } from "../../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
+import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
 
 type StationFilter = "ALL" | "KITCHEN" | "BAR";
 type SortField = "revenue" | "quantity" | "name";
@@ -140,8 +141,13 @@ export function ItemsClient() {
             Promet po artiklima — šta je prodato, koliko komada i koliko je zaradila svaka stanica
           </p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} />
+        <ReportFilters value={filters} onChange={setFilters} reportType="items" />
       </div>
+
+      <ReportPrintHeader
+        title="Prodaja artikala"
+        periodLabel={filters.preset === "custom" ? `${filters.from ?? "?"} — ${filters.to ?? "?"}` : filters.preset}
+      />
 
       {error && (
         <div className="mb-6 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>

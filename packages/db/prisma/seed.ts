@@ -18,7 +18,7 @@ function hashPassword(password: string): string {
   return `${salt}:${key}`;
 }
 
-const SYSTEM_ROLES = [
+export const SYSTEM_ROLES = [
   "OWNER",
   "ADMIN",
   "MANAGER",
@@ -32,7 +32,7 @@ const SYSTEM_ROLES = [
 // kod (npr. "menu.manage") iz ove liste; ako servis koristi kod koji ovde
 // nije definisan, requirePermission() će ga jednostavno odbiti za sve role
 // (fail-closed, ne fail-open) dok se permisija ne doda ovde.
-const PERMISSIONS = [
+export const PERMISSIONS = [
   { code: "employees.view", description: "Pregled liste zaposlenih" },
   { code: "employees.manage", description: "Kreiranje/izmena zaposlenih, rola i dozvola" },
   { code: "menu.view", description: "Pregled menija (kategorije i artikli)" },
@@ -42,17 +42,19 @@ const PERMISSIONS = [
   { code: "production.manage", description: "Promena statusa stavki na kuhinji/šanku" },
   { code: "audit.view", description: "Pregled audit evidencije i sumnjive aktivnosti (Faza 4/5)" },
   { code: "devices.manage", description: "Registracija POS/KDS uređaja i podešavanje Deljenog POS režima" },
+  { code: "orders.print", description: "Štampa/pregled/reprint kuhinjskog, šank i kupčevog tiketa (Faza 6)" },
+  { code: "settings.manage", description: "Podešavanja restorana i konfiguracija štampača (Faza 6)" },
 ] as const;
 
 // Ko dobija koju permisiju — MVP je namerno grub (role → skup permisija),
 // bez UI-ja za fino podešavanje (to je extension point za punu verziju).
 // Ključno pravilo iz specifikacije: WAITER/KITCHEN/BAR NIKAD ne dobijaju
 // menu.manage niti employees.manage.
-const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> = {
-  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
-  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
-  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage"],
-  WAITER: ["menu.view", "shifts.manage"],
+export const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> = {
+  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  WAITER: ["menu.view", "shifts.manage", "orders.print"],
   KITCHEN: ["menu.view", "production.view", "production.manage"],
   BAR: ["menu.view", "production.view", "production.manage"],
   INVENTORY_MANAGER: ["menu.view"],

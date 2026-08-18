@@ -2,6 +2,7 @@ import { prisma, Prisma } from "@rcs/db";
 import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
+import { dispatchCancellationPrintJob } from "../printing/print-service";
 import { requireOrderOperator, isOrderManager, requireVoidAuthority } from "./order-access";
 import { isMeaningfulVoidExplanation } from "@rcs/shared";
 import type { VoidOrderItemInput } from "@rcs/shared";
@@ -190,6 +191,16 @@ export async function voidOrderItem(
     payload: { orderId, itemId, quantityAfter, isFullVoid },
     occurredAt: new Date().toISOString(),
   });
+
+  // Faza 6: STORNO tiket za stanice koje su stvarno primile stavku, TEK
+  // POSLE commit-a — neuspeh štampe nikad ne sme oboriti već izvršeno
+  // poništavanje. Nema efekta za delimično poništavanje (isFullVoid=false),
+  // vidi napomenu u dispatchCancellationPrintJob.
+  try {
+    await dispatchCancellationPrintJob(ctx, voidRecord.id);
+  } catch (err) {
+    console.error("[printing] dispatchCancellationPrintJob failed for void", voidRecord.id, err);
+  }
 
   return voidRecord;
 }

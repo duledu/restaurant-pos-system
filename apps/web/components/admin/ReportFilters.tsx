@@ -4,7 +4,17 @@ import { useEffect, useState } from "react";
 
 export interface ReportFilterState {
   locationId: string; // "ALL" ili konkretan ID
-  preset: "today" | "yesterday" | "last7days" | "last30days" | "custom";
+  preset:
+    | "today"
+    | "yesterday"
+    | "thisWeek"
+    | "lastWeek"
+    | "thisMonth"
+    | "lastMonth"
+    | "thisYear"
+    | "last7days"
+    | "last30days"
+    | "custom";
   from?: string;
   to?: string;
 }
@@ -17,8 +27,11 @@ interface LocationOption {
 const PRESETS: { value: ReportFilterState["preset"]; label: string }[] = [
   { value: "today", label: "Danas" },
   { value: "yesterday", label: "Juče" },
-  { value: "last7days", label: "7 dana" },
-  { value: "last30days", label: "30 dana" },
+  { value: "thisWeek", label: "Ova nedelja" },
+  { value: "lastWeek", label: "Prošla nedelja" },
+  { value: "thisMonth", label: "Ovaj mesec" },
+  { value: "lastMonth", label: "Prošli mesec" },
+  { value: "thisYear", label: "Ova godina" },
   { value: "custom", label: "Period" },
 ];
 
@@ -35,12 +48,29 @@ async function apiFetch(url: string) {
  * zaposleni ima pristup — vidi listAccessibleLocations) i select se
  * uopšte ne prikazuje ako postoji samo jedna (nema smisla birati).
  */
+async function postAudit(reportType: string, filters: ReportFilterState) {
+  try {
+    await fetch("/api/admin/reports/print-audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportType, preset: filters.preset, from: filters.from, to: filters.to }),
+    });
+  } catch {
+    // Audit log neuspeh ne sme blokirati štampu — vidi napomenu u
+    // print-service.ts (isti princip: sporedna radnja nikad ne obara
+    // glavnu, korisnik i dalje vidi/štampa izveštaj).
+  }
+}
+
 export function ReportFilters({
   value,
   onChange,
+  reportType,
 }: {
   value: ReportFilterState;
   onChange: (next: ReportFilterState) => void;
+  /** Kad je prosleđeno, prikazuje dugmad Štampaj/Export CSV/Export PDF za taj izveštaj (zahtev #24/#26). */
+  reportType?: string;
 }) {
   const [locations, setLocations] = useState<LocationOption[]>([]);
 
@@ -51,7 +81,7 @@ export function ReportFilters({
   }, []);
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="no-print flex flex-wrap items-center gap-2">
       <div className="flex flex-wrap gap-1 rounded-md bg-ink/[0.04] p-1">
         {PRESETS.map((p) => (
           <button
@@ -97,6 +127,27 @@ export function ReportFilters({
             </option>
           ))}
         </select>
+      )}
+
+      {reportType && (
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={async () => {
+              await postAudit(reportType, value);
+              window.print();
+            }}
+            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-inkSoft hover:text-ink"
+          >
+            Štampaj / PDF
+          </button>
+          <a
+            href={`/api/admin/reports/export?reportType=${reportType}&${reportFiltersToQuery(value)}`}
+            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-inkSoft hover:text-ink"
+          >
+            Export CSV
+          </a>
+        </div>
       )}
     </div>
   );

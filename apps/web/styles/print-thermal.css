@@ -1,0 +1,126 @@
+/**
+ * Faza 6 — termalni tiket/račun (80mm primarno; 58mm podržan promenom
+ * jedne CSS promenljive, bez arhitektonske izmene — zahtev #10).
+ *
+ * Van @media print ovaj sloj je potpuno nevidljiv (position:fixed, van
+ * ekrana) — dashboard styling se NIKAD ne oslanja na ove klase, i obrnuto.
+ */
+
+.print-ticket-root {
+  --ticket-width: 80mm;
+  position: fixed;
+  left: -9999px;
+  top: 0;
+}
+
+.print-ticket {
+  width: var(--ticket-width);
+  background: #fff;
+  color: #000;
+  font-family: "Courier New", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 4mm;
+  box-sizing: border-box;
+}
+
+.print-ticket * {
+  box-shadow: none !important;
+  background-image: none !important;
+  text-shadow: none !important;
+}
+
+.print-ticket .t-center {
+  text-align: center;
+}
+
+.print-ticket .t-header {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.05em;
+  text-align: center;
+}
+
+.print-ticket .t-station {
+  font-weight: 700;
+  font-size: 14px;
+  text-align: center;
+  margin: 2mm 0;
+}
+
+.print-ticket .t-meta {
+  font-size: 12px;
+  margin: 1mm 0;
+}
+
+.print-ticket .t-sep {
+  border: none;
+  border-top: 1px dashed #000;
+  margin: 2mm 0;
+}
+
+.print-ticket .t-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 2mm;
+  font-weight: 700;
+  font-size: 13px;
+  margin: 1.5mm 0 0 0;
+}
+
+.print-ticket .t-item-qty {
+  min-width: 8mm;
+}
+
+.print-ticket .t-note {
+  font-size: 11px;
+  font-style: italic;
+  padding-left: 8mm;
+  margin: 0.5mm 0 0 0;
+}
+
+.print-ticket .t-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin: 0.5mm 0;
+}
+
+.print-ticket .t-total {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+  font-size: 14px;
+  margin-top: 1mm;
+}
+
+.print-ticket .t-footer {
+  text-align: center;
+  font-size: 11px;
+  margin-top: 3mm;
+}
+
+.print-ticket .t-legal {
+  text-align: center;
+  font-size: 10px;
+  font-style: italic;
+  margin-top: 2mm;
+}
+
+@media print {
+  @page {
+    size: var(--ticket-width) auto;
+    margin: 0;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .print-ticket-root,
+  .print-ticket-root * {
+    visibility: visible;
+  }
+  .print-ticket-root {
+    position: static;
+    left: 0;
+  }
+}

@@ -25,7 +25,18 @@
  * zoni, ne računa fiksni offset ručno.
  */
 
-export const REPORT_PRESETS = ["today", "yesterday", "last7days", "last30days", "custom"] as const;
+export const REPORT_PRESETS = [
+  "today",
+  "yesterday",
+  "thisWeek",
+  "lastWeek",
+  "thisMonth",
+  "lastMonth",
+  "thisYear",
+  "last7days",
+  "last30days",
+  "custom",
+] as const;
 export type ReportPreset = (typeof REPORT_PRESETS)[number];
 
 export interface DateRange {
@@ -86,6 +97,29 @@ function addDaysYMD(ymd: ZonedYMD, days: number): ZonedYMD {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
+// ── FAZA 6: thisWeek/lastWeek/thisMonth/lastMonth/thisYear — weekday i
+// mesec/godina aritmetika rade nad "plain" Y-M-D trojkom (nezavisno od
+// vremenske zone, kalendarski datum je kalendarski datum), samo krajnja
+// granica prolazi kroz zonedMidnightUtc kao i kod postojećih preseta.
+// Nedelja počinje PONEDELJKOM (ISO 8601, standard u Srbiji).
+
+function startOfWeekYMD(ymd: ZonedYMD): ZonedYMD {
+  const weekday = new Date(Date.UTC(ymd.year, ymd.month - 1, ymd.day)).getUTCDay(); // 0=Ned..6=Sub
+  const isoWeekday = weekday === 0 ? 7 : weekday; // 1=Pon..7=Ned
+  return addDaysYMD(ymd, -(isoWeekday - 1));
+}
+
+function firstOfMonthYMD(ymd: ZonedYMD): ZonedYMD {
+  return { year: ymd.year, month: ymd.month, day: 1 };
+}
+
+function addMonthsToFirstOfMonth(ymd: ZonedYMD, months: number): ZonedYMD {
+  const total = ymd.year * 12 + (ymd.month - 1) + months;
+  const year = Math.floor(total / 12);
+  const month = (total % 12) + 1;
+  return { year, month, day: 1 };
+}
+
 function parseYMD(value: string): ZonedYMD {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) throw new Error(`Neispravan datum: ${value} (očekivan format GGGG-MM-DD)`);
@@ -118,6 +152,27 @@ export function resolveDateRange(
       from: zonedMidnightUtc(addDaysYMD(todayYMD, -29), timeZone),
       to: zonedMidnightUtc(addDaysYMD(todayYMD, 1), timeZone),
     };
+  }
+  if (preset === "thisWeek") {
+    const start = startOfWeekYMD(todayYMD);
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc(addDaysYMD(start, 7), timeZone) };
+  }
+  if (preset === "lastWeek") {
+    const start = addDaysYMD(startOfWeekYMD(todayYMD), -7);
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc(addDaysYMD(start, 7), timeZone) };
+  }
+  if (preset === "thisMonth") {
+    const start = firstOfMonthYMD(todayYMD);
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc(addMonthsToFirstOfMonth(start, 1), timeZone) };
+  }
+  if (preset === "lastMonth") {
+    const thisMonthStart = firstOfMonthYMD(todayYMD);
+    const start = addMonthsToFirstOfMonth(thisMonthStart, -1);
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc(thisMonthStart, timeZone) };
+  }
+  if (preset === "thisYear") {
+    const start: ZonedYMD = { year: todayYMD.year, month: 1, day: 1 };
+    return { from: zonedMidnightUtc(start, timeZone), to: zonedMidnightUtc({ year: start.year + 1, month: 1, day: 1 }, timeZone) };
   }
 
   // custom

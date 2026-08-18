@@ -7,6 +7,7 @@ import { EmptyState } from "../../../../components/ui/EmptyState";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { KpiCard } from "../../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
+import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
 
 interface SalesSummary {
   currency: string;
@@ -17,6 +18,11 @@ interface SalesSummary {
   averageOrderValue: string;
   cashPercent: number;
   cardPercent: number;
+  grossSales: string;
+  netSales: string;
+  discountTotal: string;
+  taxTotal: string;
+  voidTotal: string;
 }
 interface EmployeeSales {
   employeeId: string;
@@ -69,8 +75,15 @@ export function SalesClient() {
           <h1 className="text-2xl font-bold text-ink">Izveštaj o prodaji</h1>
           <p className="mt-1 text-sm text-inkSoft">Ukupna prodaja, gotovina/kartica i prodaja po zaposlenom</p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} />
+        <ReportFilters value={filters} onChange={setFilters} reportType="sales" />
       </div>
+
+      {summary && (
+        <ReportPrintHeader
+          title="Izveštaj o prodaji"
+          periodLabel={filters.preset === "custom" ? `${filters.from ?? "?"} — ${filters.to ?? "?"}` : filters.preset}
+        />
+      )}
 
       {error && <div className="mb-6 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>}
 
@@ -81,13 +94,21 @@ export function SalesClient() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          <KpiCard label="Ukupna prodaja" value={formatMoney(summary.totalSales, summary.currency)} accent />
-          <KpiCard label="Gotovina" value={formatMoney(summary.cashSales, summary.currency)} sub={`${summary.cashPercent}%`} />
-          <KpiCard label="Kartica" value={formatMoney(summary.cardSales, summary.currency)} sub={`${summary.cardPercent}%`} />
-          <KpiCard label="Porudžbine" value={String(summary.completedOrders)} />
-          <KpiCard label="Prosečna porudžbina" value={formatMoney(summary.averageOrderValue, summary.currency)} />
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <KpiCard label="Ukupna prodaja (neto)" value={formatMoney(summary.netSales, summary.currency)} accent />
+            <KpiCard label="Gotovina" value={formatMoney(summary.cashSales, summary.currency)} sub={`${summary.cashPercent}%`} />
+            <KpiCard label="Kartica" value={formatMoney(summary.cardSales, summary.currency)} sub={`${summary.cardPercent}%`} />
+            <KpiCard label="Porudžbine" value={String(summary.completedOrders)} />
+            <KpiCard label="Prosečna porudžbina" value={formatMoney(summary.averageOrderValue, summary.currency)} />
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <KpiCard label="Bruto prodaja" value={formatMoney(summary.grossSales, summary.currency)} />
+            <KpiCard label="Popusti" value={formatMoney(summary.discountTotal, summary.currency)} />
+            <KpiCard label="PDV" value={formatMoney(summary.taxTotal, summary.currency)} />
+            <KpiCard label="Storna" value={formatMoney(summary.voidTotal, summary.currency)} />
+          </div>
+        </>
       )}
 
       <section className="mt-8">

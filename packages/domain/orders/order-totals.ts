@@ -15,6 +15,7 @@ export interface TaxBreakdownEntry {
 export interface OrderTotals {
   subtotal: Prisma.Decimal;
   tax: Prisma.Decimal;
+  discount: Prisma.Decimal;
   total: Prisma.Decimal;
   taxBreakdown: TaxBreakdownEntry[];
 }
@@ -25,8 +26,17 @@ export interface OrderTotals {
  * nikad ne prihvata iznos poslat sa klijenta. Zaokruživanje na 2 decimale se
  * radi TEK na kraju (posle sabiranja svih stavki), ne po stavci, da se
  * izbegne akumulacija grešaka zaokruživanja kroz veliki broj stavki.
+ *
+ * FAZA 6 — popust: fiksan iznos na nivou cele porudžbine (Order.discountAmount),
+ * oduzima se OD UKUPNOG iznosa POSLE poreza (porez se i dalje računa na punu
+ * cenu artikala — isti pristup kao maloprodajni popust "na kraju računa", ne
+ * popust koji menja poresku osnovicu). Validacija (npr. popust > ukupno) je
+ * odgovornost pozivaoca (billing-service), ne ove čiste funkcije.
  */
-export function computeOrderTotals(lines: OrderTotalsLine[]): OrderTotals {
+export function computeOrderTotals(
+  lines: OrderTotalsLine[],
+  discountAmount: Prisma.Decimal | string | number = 0
+): OrderTotals {
   let subtotal = new Prisma.Decimal(0);
   let tax = new Prisma.Decimal(0);
   const byRate = new Map<string, { taxable: Prisma.Decimal; tax: Prisma.Decimal }>();
@@ -49,7 +59,8 @@ export function computeOrderTotals(lines: OrderTotalsLine[]): OrderTotals {
 
   subtotal = subtotal.toDecimalPlaces(2);
   tax = tax.toDecimalPlaces(2);
-  const total = subtotal.add(tax);
+  const discount = new Prisma.Decimal(discountAmount).toDecimalPlaces(2);
+  const total = subtotal.add(tax).sub(discount);
 
   const taxBreakdown = Array.from(byRate.entries())
     .sort(([a], [b]) => Number(a) - Number(b))
@@ -59,5 +70,5 @@ export function computeOrderTotals(lines: OrderTotalsLine[]): OrderTotals {
       taxAmount: bucket.tax.toDecimalPlaces(2).toString(),
     }));
 
-  return { subtotal, tax, total, taxBreakdown };
+  return { subtotal, tax, discount, total, taxBreakdown };
 }

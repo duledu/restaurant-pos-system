@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
+import { TicketPrintPanel, type TicketContent } from "../../../../../components/printing/TicketPrintPanel";
+import { fetchPrintJobs, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
 
 interface BillItem {
   id: string;
@@ -55,6 +57,10 @@ export function BillClient({ tableId }: { tableId: string }) {
   const [tendered, setTendered] = useState("");
   const [paying, setPaying] = useState(false);
   const [result, setResult] = useState<PayResult | null>(null);
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [printJob, setPrintJob] = useState<PrintJob | null>(null);
+  const [printBusy, setPrintBusy] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,6 +68,7 @@ export function BillClient({ tableId }: { tableId: string }) {
     try {
       const orderRes = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
       const orderId = orderRes.order.id;
+      setOrderId(orderId);
 
       if (orderRes.order.status === "COMPLETED") {
         const receiptRes = await apiFetch(`/api/pos/orders/${orderId}/receipt`);
@@ -90,6 +97,44 @@ export function BillClient({ tableId }: { tableId: string }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!result || !orderId) return;
+    fetchPrintJobs(orderId)
+      .then((jobs) => {
+        const receiptJob = jobs.find((j) => j.type === "RECEIPT" && !j.isReprint);
+        if (receiptJob) setPrintJob(receiptJob);
+      })
+      .catch(() => {});
+  }, [result, orderId]);
+
+  async function handlePrint() {
+    if (!orderId || !printJob || printBusy) return;
+    setPrintBusy(true);
+    setPrintError(null);
+    try {
+      await printAndConfirm(orderId, printJob.id);
+    } catch (e) {
+      setPrintError(e instanceof Error ? e.message : "Greška pri štampi");
+    } finally {
+      setPrintBusy(false);
+    }
+  }
+
+  async function handleReprint() {
+    if (!orderId || printBusy) return;
+    setPrintBusy(true);
+    setPrintError(null);
+    try {
+      const job = await reprintReceipt(orderId);
+      setPrintJob(job);
+      window.print();
+    } catch (e) {
+      setPrintError(e instanceof Error ? e.message : "Greška pri ponovnoj štampi");
+    } finally {
+      setPrintBusy(false);
+    }
+  }
 
   const total = useMemo(() => (bill ? Number(bill.total) : 0), [bill]);
   const change = useMemo(() => {
@@ -170,13 +215,36 @@ export function BillClient({ tableId }: { tableId: string }) {
             </div>
           </div>
 
+          {printError && <div className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{printError}</div>}
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={handlePrint}
+              disabled={!printJob || printBusy}
+              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
+            >
+              {printBusy ? "…" : "Štampaj račun"}
+            </button>
+            <button
+              type="button"
+              onClick={handleReprint}
+              disabled={printBusy}
+              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
+            >
+              Ponovo štampaj
+            </button>
+          </div>
+
           <button
             onClick={() => router.push("/waiter/tables")}
-            className="mt-6 w-full rounded-md bg-graphite py-4 text-lg font-semibold text-cream-100 transition-colors hover:bg-graphite-700"
+            className="mt-3 w-full rounded-md bg-graphite py-4 text-lg font-semibold text-cream-100 transition-colors hover:bg-graphite-700"
           >
             Sto oslobođen — Nazad na stolove
           </button>
         </div>
+
+        {printJob && <TicketPrintPanel content={printJob.content as TicketContent} />}
       </div>
     );
   }

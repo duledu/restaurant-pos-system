@@ -1,6 +1,17 @@
 import { z } from "zod";
 
-export const REPORT_PRESETS = ["today", "yesterday", "last7days", "last30days", "custom"] as const;
+export const REPORT_PRESETS = [
+  "today",
+  "yesterday",
+  "thisWeek",
+  "lastWeek",
+  "thisMonth",
+  "lastMonth",
+  "thisYear",
+  "last7days",
+  "last30days",
+  "custom",
+] as const;
 
 /**
  * Zajednički filter za sve Faza 5 izveštajne rute — GET query string, pa su
@@ -20,3 +31,12 @@ export const reportFiltersSchema = z
     message: "Prilagođeni period zahteva 'from' i 'to' datume",
   });
 export type ReportFiltersInput = z.infer<typeof reportFiltersSchema>;
+
+// ── FAZA 6: audit log za PRINT/EXPORT osetljivih (finansijskih) izveštaja ──
+export const reportPrintAuditSchema = z.object({
+  reportType: z.string().trim().min(1).max(50),
+  preset: z.string().trim().min(1).max(30),
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
+export type ReportPrintAuditInput = z.infer<typeof reportPrintAuditSchema>;

@@ -48,6 +48,27 @@ export const completePaymentSchema = z.object({
 });
 export type CompletePaymentInput = z.infer<typeof completePaymentSchema>;
 
+// ── FAZA 6: ŠTAMPA / POPUST ─────────────────────────────────────────────
+
+export const applyOrderDiscountSchema = z.object({
+  amount: z.number().nonnegative(),
+  reason: z.string().trim().min(1, "Razlog popusta je obavezan").max(300),
+});
+export type ApplyOrderDiscountInput = z.infer<typeof applyOrderDiscountSchema>;
+
+export const reprintReceiptSchema = z.object({
+  // Klijent generiše UUID po kliku na "Reprint" — isti obrazac kao
+  // submitOrderSchema.idempotencyKey (vidi print-service.ts).
+  idempotencyKey: z.string().uuid(),
+});
+export type ReprintReceiptInput = z.infer<typeof reprintReceiptSchema>;
+
+export const confirmPrintResultSchema = z.object({
+  success: z.boolean(),
+  errorMessage: z.string().trim().max(500).optional(),
+});
+export type ConfirmPrintResultInput = z.infer<typeof confirmPrintResultSchema>;
+
 export const voidOrderItemSchema = z.object({
   quantity: z.number().int().min(1),
   reasonCode: z.enum(VOID_REASON_CODES),

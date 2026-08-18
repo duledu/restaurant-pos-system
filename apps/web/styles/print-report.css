@@ -1,0 +1,77 @@
+/**
+ * Faza 6 — A4/Letter menadžerski izveštaji. Za razliku od termalnih tiketa
+ * (print-thermal.css, koji skriva CELU stranicu osim tiketa), izveštaji se
+ * štampaju iz VEĆ VIDLJIVOG ekrana: elementi koji ne treba da se štampaju
+ * (bočna navigacija, dugmad filtera) se označavaju `.no-print`, a iznad
+ * tabele se dodaje `.print-report-header` (na ekranu skriven, u štampi
+ * vidljiv) sa nazivom restorana/izveštaja/perioda/vremena generisanja.
+ *
+ * Ovo NAMERNO nije ista arhitektura kao print-thermal.css — izveštaj se
+ * štampa "šta vidiš to i dobiješ" iz postojećeg ekrana, ne iz paralelnog
+ * skrivenog dokumenta (zahtev "ne oslanjaj se na dashboard styling za
+ * ŠTAMPU" odnosi se na termalne tikete/račune, koji imaju sopstveni,
+ * potpuno odvojen vizuelni jezik — izveštaji ostaju vizuelno "isti podaci"
+ * na ekranu i na papiru, samo sa štampi-prilagođenim bojama/marginama).
+ */
+
+.print-report-header {
+  display: none;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  .print-report-header {
+    display: block;
+    background: #fff;
+    color: #000;
+    border-bottom: 2px solid #000;
+    padding-bottom: 3mm;
+    margin-bottom: 4mm;
+  }
+  .print-report-header .pr-restaurant {
+    font-weight: 700;
+    font-size: 16px;
+  }
+  .print-report-header .pr-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-top: 1mm;
+  }
+  .print-report-header .pr-meta {
+    font-size: 10px;
+    color: #333;
+    margin-top: 1mm;
+  }
+
+  body {
+    background: #fff !important;
+  }
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tr {
+    page-break-inside: avoid;
+  }
+  th,
+  td {
+    border-bottom: 1px solid #ccc;
+    color: #000 !important;
+    background: #fff !important;
+  }
+
+  @page {
+    size: A4;
+    margin: 15mm;
+  }
+}

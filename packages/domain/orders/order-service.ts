@@ -5,6 +5,7 @@ import { ssePublisher } from "../realtime/sse-publisher";
 import { getActiveShift } from "../shifts/shift-service";
 import { getTable } from "../tables/table-service";
 import { stationsForPreparation } from "../production/station-state";
+import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, SubmitOrderInput } from "@rcs/shared";
 
@@ -272,6 +273,15 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     payload: { orderId, tableId: submitted.tableId },
     occurredAt: new Date().toISOString(),
   });
+
+  // Faza 6: dispatch kuhinjskog/šank PrintJob-a TEK POSLE commit-a, van
+  // transakcije — neuspeh štampe NIKAD ne sme oboriti već poslatu porudžbinu
+  // niti KDS stanje (OrderItemStation je već zapisan gore, nezavisno od ovoga).
+  try {
+    await dispatchStationPrintJobs(ctx, orderId);
+  } catch (err) {
+    console.error("[printing] dispatchStationPrintJobs failed for order", orderId, err);
+  }
 
   return getOrder(ctx, orderId);
 }

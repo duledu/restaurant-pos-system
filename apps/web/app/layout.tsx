@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "../styles/print-thermal.css";
+import "../styles/print-report.css";
 import { APP_NAME } from "../components/branding/constants";
 
 export const metadata: Metadata = {

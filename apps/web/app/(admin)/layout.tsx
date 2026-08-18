@@ -12,7 +12,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   return (
     <div className="flex min-h-screen">
       {/* ── Sidebar ───────────────────────────────────────────────────── */}
-      <aside className="fixed inset-y-0 left-0 z-20 flex w-56 flex-col bg-graphite">
+      <aside className="no-print fixed inset-y-0 left-0 z-20 flex w-56 flex-col bg-graphite">
         {/* Brand */}
         <div className="flex h-14 shrink-0 items-center border-b border-graphite-700 px-4">
           <Link href="/dashboard" aria-label={`${APP_NAME} — Kontrolna tabla`}>
@@ -38,8 +38,8 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       </aside>
 
       {/* ── Main content ─────────────────────────────────────────────── */}
-      <div className="flex flex-1 flex-col pl-56">
-        <main className="flex-1 p-6">{children}</main>
+      <div className="flex flex-1 flex-col pl-56 print:pl-0">
+        <main className="flex-1 p-6 print:p-0">{children}</main>
       </div>
     </div>
   );

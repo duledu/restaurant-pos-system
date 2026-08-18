@@ -6,6 +6,7 @@ import { Card } from "../../../../components/ui/Card";
 import { EmptyState } from "../../../../components/ui/EmptyState";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
+import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
 
 interface EmployeeRow {
   employeeId: string;
@@ -15,6 +16,8 @@ interface EmployeeRow {
   sales: string;
   cashHandled: string;
   cardHandled: string;
+  averageOrderValue: string;
+  discountTotal: string;
   voidCount: number;
   voidValue: string;
   shiftsClosedCount: number;
@@ -58,8 +61,13 @@ export function EmployeesClient() {
           <h1 className="text-2xl font-bold text-ink">Aktivnost zaposlenih</h1>
           <p className="mt-1 text-sm text-inkSoft">Prodaja, gotovina/kartica i poništavanja po zaposlenom</p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} />
+        <ReportFilters value={filters} onChange={setFilters} reportType="employees" />
       </div>
+
+      <ReportPrintHeader
+        title="Aktivnost zaposlenih"
+        periodLabel={filters.preset === "custom" ? `${filters.from ?? "?"} — ${filters.to ?? "?"}` : filters.preset}
+      />
 
       {error && <div className="mb-6 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>}
 
@@ -97,6 +105,16 @@ export function EmployeesClient() {
                     {r.voidCount} {r.voidCount > 0 && `(${formatMoney(r.voidValue)})`}
                   </p>
                 </div>
+                <div>
+                  <p className="text-inkSoft">Pros. porudžbina</p>
+                  <p className="font-medium text-ink">{formatMoney(r.averageOrderValue)}</p>
+                </div>
+                {Number(r.discountTotal) > 0 && (
+                  <div>
+                    <p className="text-inkSoft">Popusti</p>
+                    <p className="font-medium text-ink">{formatMoney(r.discountTotal)}</p>
+                  </div>
+                )}
                 {r.cashDifference !== null && (
                   <div>
                     <p className="text-inkSoft">Razlika u gotovini</p>

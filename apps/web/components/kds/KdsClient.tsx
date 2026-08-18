@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { LogoutButton } from "../ui/LogoutButton";
 import { AppLogo } from "../branding/AppLogo";
+import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
+import { fetchPrintJobs, printAndConfirm, type PrintJob } from "../../lib/print-client";
 
 interface StationItem {
   id: string;
@@ -59,6 +61,8 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   const [error, setError] = useState<string | null>(null);
   const knownOrderIds = useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const [printBusyId, setPrintBusyId] = useState<string | null>(null);
+  const [pendingPrint, setPendingPrint] = useState<{ orderId: string; job: PrintJob } | null>(null);
 
   const endpoint = station === "KITCHEN" ? "/api/production/kitchen" : "/api/production/bar";
 
@@ -123,6 +127,35 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     }
   }
 
+  // Faza 6: bezbedan/ručni put za štampu tokom razvoja (zahtev #5) — auto-print
+  // se dešava na serveru pri submitOrder-u (dispatchStationPrintJobs); ovo
+  // dugme samo dovlači VEĆ POSTOJEĆI PrintJob za ovu stanicu i ponovo ga
+  // renderuje za browser štampu, ne kreira novu porudžbinu niti novi dispatch.
+  async function handlePrintTicket(orderId: string) {
+    setPrintBusyId(orderId);
+    setError(null);
+    try {
+      const jobs = await fetchPrintJobs(orderId);
+      const job = jobs.find((j) => j.station === station);
+      if (!job) {
+        setError("Nema tiketa za štampu za ovu porudžbinu");
+        return;
+      }
+      setPendingPrint({ orderId, job });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri učitavanju tiketa");
+    } finally {
+      setPrintBusyId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!pendingPrint) return;
+    printAndConfirm(pendingPrint.orderId, pendingPrint.job.id)
+      .catch((e) => setError(e instanceof Error ? e.message : "Greška pri štampi"))
+      .finally(() => setPendingPrint(null));
+  }, [pendingPrint]);
+
   return (
     <div className="min-h-screen p-4">
       <div className="mb-4 flex items-center justify-between">
@@ -162,9 +195,20 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                     <div className="text-lg font-bold text-cream-100">{order.tableLabel}</div>
                     <div className="text-xs text-cream-300/70">{order.waiterName}</div>
                   </div>
-                  <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/70"}`}>
-                    {waitMin} min
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/70"}`}>
+                      {waitMin} min
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handlePrintTicket(order.orderId)}
+                      disabled={printBusyId === order.orderId}
+                      title="Štampaj tiket"
+                      className="rounded-full bg-graphite-800 px-2.5 py-1 text-xs font-semibold text-cream-300/70 hover:bg-graphite-900 disabled:opacity-40"
+                    >
+                      🖶
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -201,6 +245,8 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           })}
         </div>
       )}
+
+      {pendingPrint && <TicketPrintPanel content={pendingPrint.job.content as TicketContent} />}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { Badge } from "../../../../components/ui/Badge";
 import { EmptyState } from "../../../../components/ui/EmptyState";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
+import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
 
 interface ShiftRow {
   id: string;
@@ -62,8 +63,13 @@ export function ShiftsClient() {
           <h1 className="text-2xl font-bold text-ink">Smene i rekonsilijacija gotovine</h1>
           <p className="mt-1 text-sm text-inkSoft">Otvorene i zatvorene smene, prijavljena gotovina i razlike</p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} />
+        <ReportFilters value={filters} onChange={setFilters} reportType="shifts" />
       </div>
+
+      <ReportPrintHeader
+        title="Izveštaj o smenama"
+        periodLabel={filters.preset === "custom" ? `${filters.from ?? "?"} — ${filters.to ?? "?"}` : filters.preset}
+      />
 
       {error && <div className="mb-6 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>}
 
