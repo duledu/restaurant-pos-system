@@ -160,7 +160,7 @@ export function PosClient() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => router.push("/waiter/shift")}
-            className="rounded-md border border-success/20 bg-success-soft px-3 py-2 text-xs font-semibold text-success transition-colors hover:border-success/40"
+            className="min-h-11 rounded-md border border-success/20 bg-success-soft px-3 py-2 text-xs font-semibold text-success transition-colors hover:border-success/40"
           >
             Smena aktivna — zatvori
           </button>
@@ -176,7 +176,7 @@ export function PosClient() {
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
-            className="flex h-9 w-9 items-center justify-center rounded-md text-ink/70 hover:bg-ink/[0.05]"
+            className="flex h-11 w-11 items-center justify-center rounded-md text-ink/70 hover:bg-ink/[0.05]"
             aria-label="Više opcija"
             aria-expanded={menuOpen}
           >

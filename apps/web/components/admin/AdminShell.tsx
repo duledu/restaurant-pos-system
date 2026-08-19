@@ -37,7 +37,7 @@ function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onCl
           <button
             type="button"
             onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-md text-white/70 hover:bg-white/[0.06] hover:text-white"
+            className="flex h-11 w-11 items-center justify-center rounded-md text-white/70 hover:bg-white/[0.06] hover:text-white"
             aria-label="Zatvori meni"
           >
             <CloseIcon />

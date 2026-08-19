@@ -703,27 +703,27 @@ export function StaffClient() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-3 whitespace-nowrap text-xs font-medium">
-                        <button onClick={() => setEditing(emp)} className="text-gold-dark hover:underline">
+                        <button onClick={() => setEditing(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
                           Izmeni
                         </button>
-                        <button onClick={() => setChangingPin(emp)} className="text-gold-dark hover:underline">
+                        <button onClick={() => setChangingPin(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
                           Promeni PIN
                         </button>
                         <button
                           onClick={() => togglePinLogin(emp)}
                           disabled={busyId === emp.id}
                           title={emp.pinLoginEnabled ? "Onemogući PIN prijavu za ovog zaposlenog" : "Omogući PIN prijavu za ovog zaposlenog"}
-                          className={emp.pinLoginEnabled ? "text-inkSoft hover:underline" : "text-success hover:underline"}
+                          className={`inline-flex min-h-11 items-center px-1 ${emp.pinLoginEnabled ? "text-inkSoft hover:underline" : "text-success hover:underline"}`}
                         >
                           {emp.pinLoginEnabled ? "Isključi PIN" : "Uključi PIN"}
                         </button>
-                        <button onClick={() => setSettingCredentials(emp)} className="text-gold-dark hover:underline">
+                        <button onClick={() => setSettingCredentials(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
                           {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
                         </button>
                         <button
                           onClick={() => toggleStatus(emp)}
                           disabled={busyId === emp.id}
-                          className={emp.status === "ACTIVE" ? "text-danger hover:underline" : "text-success hover:underline"}
+                          className={`inline-flex min-h-11 items-center px-1 ${emp.status === "ACTIVE" ? "text-danger hover:underline" : "text-success hover:underline"}`}
                         >
                           {emp.status === "ACTIVE" ? "Deaktiviraj" : "Aktiviraj"}
                         </button>

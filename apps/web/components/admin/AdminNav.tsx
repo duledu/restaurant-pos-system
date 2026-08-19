@@ -87,7 +87,7 @@ export function AdminNav() {
                 <li key={href}>
                   <Link
                     href={href}
-                    className={`relative flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all ${
+                    className={`relative flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all ${
                       active ? "bg-white/[0.11] text-white shadow-inner" : "text-white/65 hover:bg-white/[0.06] hover:text-white"
                     }`}
                   >

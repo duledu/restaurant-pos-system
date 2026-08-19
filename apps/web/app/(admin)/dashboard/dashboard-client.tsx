@@ -389,7 +389,7 @@ export function DashboardClient() {
                     key={n}
                     type="button"
                     onClick={() => setItemLimit(n)}
-                    className={`rounded-sm px-2.5 py-1 text-xs font-medium transition-colors ${itemLimit === n ? "bg-white text-ink shadow-sm" : "text-inkSoft hover:text-ink"}`}
+                    className={`min-h-11 rounded-sm px-2.5 py-1 text-xs font-medium transition-colors ${itemLimit === n ? "bg-white text-ink shadow-sm" : "text-inkSoft hover:text-ink"}`}
                   >
                     Top {n}
                   </button>
@@ -474,7 +474,7 @@ export function DashboardClient() {
                     key={key}
                     type="button"
                     onClick={() => setEmployeeSort(key)}
-                    className={`rounded-sm px-2.5 py-1 text-xs font-medium transition-colors ${employeeSort === key ? "bg-white text-ink shadow-sm" : "text-inkSoft hover:text-ink"}`}
+                    className={`min-h-11 rounded-sm px-2.5 py-1 text-xs font-medium transition-colors ${employeeSort === key ? "bg-white text-ink shadow-sm" : "text-inkSoft hover:text-ink"}`}
                   >
                     {label}
                   </button>

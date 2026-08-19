@@ -21,7 +21,7 @@ export function LogoutButton({ theme = "light" }: { theme?: "light" | "dark" }) 
       type="button"
       onClick={logout}
       disabled={loading}
-      className={`rounded-sm px-2.5 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${
+      className={`inline-flex min-h-11 items-center rounded-sm px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${
         theme === "dark"
           ? "text-cream-300/70 hover:bg-white/[0.06] hover:text-white"
           : "text-inkSoft hover:bg-ink/[0.05] hover:text-ink"

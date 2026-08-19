@@ -69,7 +69,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
       >
         <div className="flex items-center justify-between border-b border-line px-6 py-4">
           <h2 className="text-base font-semibold text-ink">{title}</h2>
-          <button onClick={onClose} aria-label="Zatvori" className="text-ink/40 hover:text-ink">✕</button>
+          <button onClick={onClose} aria-label="Zatvori" className="flex h-11 w-11 items-center justify-center rounded-md text-ink/50 hover:bg-ink/[.05] hover:text-ink">✕</button>
         </div>
         <div className="px-6 py-5">{children}</div>
       </div>
@@ -649,13 +649,13 @@ export function InventoryClient() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex justify-end gap-1.5 whitespace-nowrap text-xs font-semibold">
-                          <button onClick={() => setModal({ type: "receive", item })} className="rounded-md bg-gold-soft px-2.5 py-1.5 text-gold-dark hover:bg-gold/20">
+                          <button onClick={() => setModal({ type: "receive", item })} className="min-h-11 rounded-md bg-gold-soft px-2.5 py-1.5 text-gold-dark hover:bg-gold/20">
                             Prijem
                           </button>
-                          <button onClick={() => setModal({ type: "adjust", item })} className="rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
+                          <button onClick={() => setModal({ type: "adjust", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
                             Korekcija
                           </button>
-                          <button onClick={() => setModal({ type: "movements", item })} className="rounded-md px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">
+                          <button onClick={() => setModal({ type: "movements", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">
                             Historija
                           </button>
                         </div>

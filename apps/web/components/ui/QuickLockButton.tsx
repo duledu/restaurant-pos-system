@@ -67,7 +67,7 @@ export function QuickLockButton({ theme = "light" }: { theme?: "light" | "dark" 
         await lockTerminal();
       }}
       disabled={loading}
-      className={`flex items-center gap-1.5 rounded-sm px-2.5 py-2 text-xs font-semibold transition-colors disabled:opacity-50 ${
+      className={`flex min-h-11 items-center gap-1.5 rounded-sm px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-50 ${
         theme === "dark"
           ? "text-gold hover:bg-white/[0.06]"
           : "text-graphite hover:bg-ink/[0.05]"

@@ -204,9 +204,10 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                       onClick={() => handlePrintTicket(order.orderId)}
                       disabled={printBusyId === order.orderId}
                       title="Štampaj tiket"
-                      className="rounded-full bg-graphite-800 px-2.5 py-1 text-xs font-semibold text-cream-300/70 hover:bg-graphite-900 disabled:opacity-40"
+                      aria-label="Štampaj tiket"
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-graphite-800 text-cream-300/80 hover:bg-graphite-900 disabled:opacity-40"
                     >
-                      🖶
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z" /></svg>
                     </button>
                   </div>
                 </div>

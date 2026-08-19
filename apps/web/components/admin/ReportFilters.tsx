@@ -89,7 +89,7 @@ export function ReportFilters({
           <button
             key={p.value}
             onClick={() => onChange({ ...value, preset: p.value })}
-            className={`min-h-9 whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-semibold transition-colors ${
+            className={`min-h-11 whitespace-nowrap rounded-sm px-3 py-2 text-sm font-semibold transition-colors ${
               value.preset === p.value ? "bg-graphite text-white shadow-sm" : "text-inkSoft hover:bg-white hover:text-ink"
             }`}
           >
@@ -104,14 +104,14 @@ export function ReportFilters({
             type="date"
             value={value.from ?? ""}
             onChange={(e) => onChange({ ...value, from: e.target.value })}
-            className="min-h-10 rounded-md border border-line px-2 py-1.5 text-sm"
+            className="min-h-11 rounded-md border border-line px-2 py-1.5 text-sm"
           />
           <span className="text-sm text-inkSoft">—</span>
           <input
             type="date"
             value={value.to ?? ""}
             onChange={(e) => onChange({ ...value, to: e.target.value })}
-            className="min-h-10 rounded-md border border-line px-2 py-1.5 text-sm"
+            className="min-h-11 rounded-md border border-line px-2 py-1.5 text-sm"
           />
         </div>
       )}
@@ -120,7 +120,7 @@ export function ReportFilters({
         <select
           value={value.locationId}
           onChange={(e) => onChange({ ...value, locationId: e.target.value })}
-          className="min-h-10 rounded-md border border-line px-3 py-1.5 text-sm font-medium text-ink"
+          className="min-h-11 rounded-md border border-line px-3 py-2 text-sm font-medium text-ink"
         >
           <option value="ALL">Sve lokacije</option>
           {locations.map((loc) => (
@@ -139,13 +139,13 @@ export function ReportFilters({
               await postAudit(reportType, value);
               window.print();
             }}
-            className="min-h-10 rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
+            className="min-h-11 rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
           >
             Štampaj / PDF
           </button>
           <a
             href={`/api/admin/reports/export?reportType=${reportType}&${reportFiltersToQuery(value)}`}
-            className="inline-flex min-h-10 items-center rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
+            className="inline-flex min-h-11 items-center rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
           >
             Export CSV
           </a>

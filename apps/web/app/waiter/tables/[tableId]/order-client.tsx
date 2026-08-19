@@ -402,7 +402,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
     return (
       <div className="flex min-h-screen flex-col p-4">
         <div className="mb-4 flex items-center justify-between">
-          <button onClick={() => router.push("/waiter/tables")} className="text-sm font-medium text-gold-dark">
+          <button onClick={() => router.push("/waiter/tables")} className="inline-flex min-h-11 items-center text-sm font-medium text-gold-dark">
             ← Stolovi
           </button>
           <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
@@ -469,7 +469,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
   return (
     <div className="flex min-h-screen flex-col bg-cream-200 pb-52">
       <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
-        <button onClick={() => router.push("/waiter/tables")} className="mb-1 text-xs font-semibold text-gold-dark">
+        <button onClick={() => router.push("/waiter/tables")} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
           ← Stolovi
         </button>
         <div className="flex items-center justify-between gap-3">
