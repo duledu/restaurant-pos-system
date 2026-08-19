@@ -19,6 +19,7 @@ interface MenuItem {
 }
 interface OrderItem {
   id: string;
+  menuItemId: string | null;
   name: string;
   price: string;
   quantity: number;
@@ -203,6 +204,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [submitted, setSubmitted] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
+  const [cartBusy, setCartBusy] = useState(false);
 
   const canVoid = useMemo(() => roles.some((r) => MANAGEMENT_ROLES.has(r)), [roles]);
 
@@ -277,30 +279,91 @@ export function OrderClient({ tableId }: { tableId: string }) {
     [order]
   );
 
+  // Sve izmene korpe (dodavanje/uklanjanje/promena količine) dele JEDNU
+  // bravu — cartMutationRef je ref (sinhrono čitanje/pisanje, za razliku od
+  // useState čiji je efekat vidljiv tek na sledećem render-u). Bez ovoga,
+  // dva brza tap-a pre nego što prvi zahtev osveži order.items u state-u
+  // oba čitaju ISTO zastarelo stanje i oba odluče da POSTuju nov red umesto
+  // da drugi PATCH-uje postojeći — otkriveno testom, ne teorijski rizik.
+  const cartMutationRef = useRef(false);
+
+  async function withCartLock(fn: () => Promise<void>) {
+    if (cartMutationRef.current) return;
+    cartMutationRef.current = true;
+    setCartBusy(true);
+    try {
+      await fn();
+    } finally {
+      cartMutationRef.current = false;
+      setCartBusy(false);
+    }
+  }
+
   async function addItem(menuItemId: string) {
     if (!order) return;
     setError(null);
-    try {
-      await apiFetch(`/api/pos/orders/${order.id}/items`, {
-        method: "POST",
-        body: JSON.stringify({ menuItemId, quantity: 1 }),
-      });
-      const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-      setOrder(refreshed.order);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
-    }
+    await withCartLock(async () => {
+      // Ako artikal već postoji kao DRAFT stavka na ovoj porudžbini, ponovni
+      // tap povećava postojeći red umesto da pravi novi (max 50, isto
+      // ograničenje kao addOrderItemSchema) — koristi VEĆ POSTOJEĆI PATCH
+      // endpoint (updateOrderItemSchema.quantity), bez promene modela
+      // podataka ili logike odbitka zaliha (ta i dalje čita order.items u
+      // trenutku naplate, kakvi god redovi da postoje).
+      const existing = order.items.find((i) => i.menuItemId === menuItemId);
+      try {
+        if (existing) {
+          if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
+          await apiFetch(`/api/pos/orders/${order.id}/items/${existing.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ quantity: existing.quantity + 1 }),
+          });
+        } else {
+          await apiFetch(`/api/pos/orders/${order.id}/items`, {
+            method: "POST",
+            body: JSON.stringify({ menuItemId, quantity: 1 }),
+          });
+        }
+        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+        setOrder(refreshed.order);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
+      }
+    });
   }
 
   async function removeItem(itemId: string) {
     if (!order) return;
-    try {
-      await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
-      const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-      setOrder(refreshed.order);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Greška");
+    await withCartLock(async () => {
+      try {
+        await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
+        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+        setOrder(refreshed.order);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Greška");
+      }
+    });
+  }
+
+  async function changeQuantity(item: OrderItem, nextQuantity: number) {
+    if (!order) return;
+    if (nextQuantity <= 0) {
+      await removeItem(item.id);
+      return;
     }
+    if (nextQuantity > 50) return; // isto ograničenje kao updateOrderItemSchema
+    setError(null);
+    await withCartLock(async () => {
+      try {
+        await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ quantity: nextQuantity }),
+        });
+        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+        setOrder(refreshed.order);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Greška pri izmeni količine");
+      }
+    });
   }
 
   async function confirmVoid(quantity: number, reasonCode: VoidReasonCode, explanation: string) {
@@ -448,7 +511,8 @@ export function OrderClient({ tableId }: { tableId: string }) {
           <button
             key={item.id}
             onClick={() => addItem(item.id)}
-            className="rounded-md border border-line bg-white p-4 text-left shadow-sm active:scale-95"
+            disabled={cartBusy}
+            className="rounded-md border border-line bg-white p-4 text-left shadow-sm active:scale-95 disabled:opacity-60"
           >
             <div className="font-medium text-ink">{item.name}</div>
             <div className="text-sm text-ink/65">{Number(item.price).toFixed(2)} RSD</div>
@@ -462,16 +526,39 @@ export function OrderClient({ tableId }: { tableId: string }) {
         <div className="max-h-40 overflow-y-auto px-3 py-2">
           {order.items.length === 0 && <div className="py-2 text-center text-sm text-ink/55">Nema stavki još.</div>}
           {order.items.map((item) => (
-            <div key={item.id} className="flex items-center justify-between py-1 text-sm">
-              <span className="text-ink">
-                {item.quantity}× {item.name}
+            <div key={item.id} className="flex items-center gap-2 py-1.5 text-sm">
+              <span className="min-w-0 flex-1 truncate text-ink" title={item.name}>
+                {item.name}
               </span>
-              <div className="flex items-center gap-2">
-                <span className="text-ink/70">{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
-                <button onClick={() => removeItem(item.id)} className="text-danger/60 text-xs">
-                  Ukloni
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => changeQuantity(item, item.quantity - 1)}
+                  disabled={cartBusy}
+                  aria-label={`Umanji količinu — ${item.name}`}
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line text-base font-semibold text-ink disabled:opacity-40"
+                >
+                  −
+                </button>
+                <span className="w-6 text-center font-medium text-ink">{item.quantity}</span>
+                <button
+                  type="button"
+                  onClick={() => changeQuantity(item, item.quantity + 1)}
+                  disabled={cartBusy || item.quantity >= 50}
+                  aria-label={`Povećaj količinu — ${item.name}`}
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line text-base font-semibold text-ink disabled:opacity-40"
+                >
+                  +
                 </button>
               </div>
+              <span className="w-20 shrink-0 text-right text-ink/70">{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
+              <button
+                onClick={() => removeItem(item.id)}
+                disabled={cartBusy}
+                className="shrink-0 text-xs text-danger/60 disabled:opacity-40"
+              >
+                Ukloni
+              </button>
             </div>
           ))}
         </div>
