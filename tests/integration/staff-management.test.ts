@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError, createSessionToken, requireAuth, verifyPin } from "@rcs/auth";
@@ -94,7 +94,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("staff management: creation", () => {
   it("creates a PIN-only waiter with no email/password required", async () => {
@@ -251,7 +250,7 @@ describe("staff management: role changes affect authorization immediately", () =
     await prisma.employeeRole.create({ data: { employeeId: secondOwnerEmployee.id, roleId: fixture.roleIdByName.OWNER } });
     await prisma.employeeLocation.create({ data: { employeeId: secondOwnerEmployee.id, locationId: fixture.locationId } });
 
-    const user = await prisma.user.create({ data: { email: `${randomUUID()}@test.local`, isActive: true } });
+    const user = await prisma.user.create({ data: { username: `${randomUUID()}@test.local`, isActive: true } });
     const manager = await prisma.employee.create({
       data: { restaurantId: fixture.restaurantId, userId: user.id, firstName: "Ana", lastName: "Manager" },
     });
@@ -301,7 +300,7 @@ describe("staff management: deactivation", () => {
   it("rejects an existing session immediately after deactivation, via the existing active-session check", async () => {
     const fixture = await createFixture();
     const owner = await createOwner(fixture);
-    const user = await prisma.user.create({ data: { email: `${randomUUID()}@test.local`, isActive: true } });
+    const user = await prisma.user.create({ data: { username: `${randomUUID()}@test.local`, isActive: true } });
     const waiter = await prisma.employee.create({
       data: { restaurantId: fixture.restaurantId, userId: user.id, firstName: "Marko", lastName: "M" },
     });

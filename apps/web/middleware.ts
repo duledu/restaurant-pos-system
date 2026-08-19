@@ -23,6 +23,7 @@ const PUBLIC_API_PATHS = new Set([
   "/api/auth/pin-login",
   "/api/auth/staff-directory",
   "/api/device/personal-register",
+  "/api/device/check",
 ]);
 
 function isPublicPath(pathname: string): boolean {

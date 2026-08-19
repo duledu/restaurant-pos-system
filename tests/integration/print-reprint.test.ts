@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
@@ -62,7 +62,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("receipt reprint: never mutates the order/payment/receipt it reprints", () => {
   it("leaves Order/Payment/Receipt totals byte-for-byte unchanged after a reprint", async () => {

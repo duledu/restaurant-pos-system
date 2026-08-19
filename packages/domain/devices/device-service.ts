@@ -105,11 +105,12 @@ export async function listStaffForDevice(deviceId: string): Promise<StaffDirecto
         lastName: true,
         status: true,
         pinHash: true,
+        pinLoginEnabled: true,
         roles: { select: { role: { select: { name: true } } } },
       },
     });
-    // Deaktiviran zaposleni ili bez PIN-a → ne može se prijaviti
-    if (!employee || employee.status !== "ACTIVE" || !employee.pinHash) return null;
+    // Deaktiviran zaposleni, bez PIN-a ili PIN prijava onemogućena → ne može se prijaviti
+    if (!employee || employee.status !== "ACTIVE" || !employee.pinHash || !employee.pinLoginEnabled) return null;
     return [
       {
         id: employee.id,
@@ -119,12 +120,13 @@ export async function listStaffForDevice(deviceId: string): Promise<StaffDirecto
     ];
   }
 
-  // Deljeni terminal — vrati sve aktivne zaposlene sa PIN-om za tu lokaciju
+  // Deljeni terminal — vrati sve aktivne zaposlene sa PIN-om i omogućenom PIN prijavom
   const employees = await prisma.employee.findMany({
     where: {
       restaurantId: device.restaurantId,
       status: "ACTIVE",
       pinHash: { not: null },
+      pinLoginEnabled: true,
       ...(device.locationId ? { locations: { some: { locationId: device.locationId } } } : {}),
     },
     select: {
@@ -159,12 +161,14 @@ export async function listStaffForDevice(deviceId: string): Promise<StaffDirecto
  * Vraća: { deviceId: string } — klijent čuva u localStorage (isti mehanizam
  * kao kod deljenog terminala).
  */
-export async function registerPersonalDevice(params: { email: string; password: string }): Promise<{ deviceId: string; employeeName: string }> {
-  const email = normalizeEmail(params.email);
+export async function registerPersonalDevice(params: { username?: string; email?: string; password: string }): Promise<{ deviceId: string; employeeName: string }> {
+  const loginName = params.username ?? params.email;
+  if (!loginName) throw new Error("Neispravno korisničko ime ili lozinka");
+  const username = normalizeEmail(loginName);
 
   // Učitaj User + Employee + Restaurant scoped
   const user = await prisma.user.findUnique({
-    where: { email },
+    where: { username },
     include: {
       employee: {
         include: {
@@ -175,7 +179,7 @@ export async function registerPersonalDevice(params: { email: string; password: 
     },
   });
 
-  const GENERIC = "Neispravan email ili lozinka";
+  const GENERIC = "Neispravno korisničko ime ili lozinka";
   if (!user || !user.passwordHash || !user.isActive) throw new Error(GENERIC);
 
   const passwordOk = await verifyPassword(params.password, user.passwordHash);

@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
@@ -65,7 +65,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("cancellation ticket (STORNO): only for items that actually reached a station", () => {
   it("creates a correct STORNO print job when a fully-voided item had already been dispatched to the kitchen", async () => {

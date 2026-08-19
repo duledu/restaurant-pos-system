@@ -6,6 +6,8 @@ import {
   normalizeEmail,
   hashPin,
   verifyPin,
+  encryptPin,
+  decryptPin,
   type AuthContext,
 } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
@@ -28,18 +30,20 @@ export async function listEmployees(ctx: AuthContext) {
     include: {
       roles: { include: { role: true } },
       locations: { include: { location: true } },
-      user: { select: { id: true, passwordHash: true } },
+      user: { select: { id: true, username: true, passwordHash: true } },
     },
     orderBy: { createdAt: "desc" },
   });
 
-  // pinHash/failedPinAttempts/pinLockedUntil i user.passwordHash su interna
-  // bezbednosna knjigovodstva — nikad se ne šalju klijentu, čak ni kao heš.
-  // Klijent dobija samo binarne zastavice da li PIN/login nalog postoji.
-  return rows.map(({ pinHash, failedPinAttempts, pinLockedUntil, user, ...rest }) => ({
+  // pinHash/encryptedPin/failedPinAttempts/pinLockedUntil i user.passwordHash
+  // su interna bezbednosna knjigovodstva — nikad se ne šalju klijentu.
+  // Klijent dobija samo binarne zastavice i username (vidljiv identifikator).
+  return rows.map(({ pinHash, encryptedPin, failedPinAttempts, pinLockedUntil, user, ...rest }) => ({
     ...rest,
     hasPin: pinHash !== null,
+    hasEncryptedPin: encryptedPin !== null,
     hasLoginCredentials: Boolean(user?.passwordHash),
+    username: user?.username ?? null,
   }));
 }
 
@@ -201,6 +205,7 @@ export async function createEmployee(ctx: AuthContext, input: CreateEmployeeInpu
 
   const passwordHash = input.password ? await hashPassword(input.password) : undefined;
   const pinHash = input.pin ? await hashPin(input.pin) : undefined;
+  const encryptedPinValue = input.pin ? encryptPin(input.pin) : undefined;
 
   const employee = await prisma.$transaction(async (tx) => {
     if (input.pin) {
@@ -209,8 +214,11 @@ export async function createEmployee(ctx: AuthContext, input: CreateEmployeeInpu
 
     let userId: string | undefined;
     if (input.email && passwordHash) {
+      const normalizedEmail = normalizeEmail(input.email);
+      // username = email za naloge kreirane sa email poljem (stari tok);
+      // Admin može promeniti username naknadno kroz setEmployeeLoginPassword.
       const user = await tx.user.create({
-        data: { email: normalizeEmail(input.email), passwordHash },
+        data: { username: normalizedEmail, email: normalizedEmail, passwordHash },
       });
       userId = user.id;
     }
@@ -222,6 +230,7 @@ export async function createEmployee(ctx: AuthContext, input: CreateEmployeeInpu
         firstName: input.firstName,
         lastName: input.lastName,
         pinHash,
+        ...(encryptedPinValue !== undefined ? { encryptedPin: encryptedPinValue } : {}),
         createdBy: ctx.employeeId,
       },
     });
@@ -302,12 +311,13 @@ export async function updateEmployee(ctx: AuthContext, employeeId: string, input
       });
     }
 
-    if (input.firstName !== undefined || input.lastName !== undefined) {
+    if (input.firstName !== undefined || input.lastName !== undefined || input.pinLoginEnabled !== undefined) {
       await tx.employee.update({
         where: { id: employeeId },
         data: {
           firstName: input.firstName ?? employee.firstName,
           lastName: input.lastName ?? employee.lastName,
+          ...(input.pinLoginEnabled !== undefined ? { pinLoginEnabled: input.pinLoginEnabled } : {}),
         },
       });
     }
@@ -362,13 +372,19 @@ export async function resetEmployeePin(ctx: AuthContext, employeeId: string, new
   if (!employee) throw new Error("Zaposleni nije pronađen");
 
   const pinHash = await hashPin(newPin);
+  const encryptedPinValue = encryptPin(newPin);
 
   await prisma.$transaction(async (tx) => {
     await withPinUniquenessLock(tx, ctx.restaurantId, () => assertPinAvailable(tx, ctx.restaurantId, newPin, employeeId));
 
     await tx.employee.update({
       where: { id: employeeId },
-      data: { pinHash, failedPinAttempts: 0, pinLockedUntil: null },
+      data: {
+        pinHash,
+        encryptedPin: encryptedPinValue,
+        failedPinAttempts: 0,
+        pinLockedUntil: null,
+      },
     });
 
     await recordAuditEntry(
@@ -407,7 +423,7 @@ export async function resetEmployeePin(ctx: AuthContext, employeeId: string, new
 export async function setEmployeeLoginPassword(
   ctx: AuthContext,
   employeeId: string,
-  params: { email: string; password: string }
+  params: { username?: string; email?: string; password: string }
 ) {
   requirePermission(ctx, EMPLOYEES_MANAGE);
 
@@ -421,19 +437,23 @@ export async function setEmployeeLoginPassword(
   });
   if (!employee) throw new Error("Zaposleni nije pronađen");
 
-  const email = normalizeEmail(params.email);
+  const loginName = params.username ?? params.email;
+  if (!loginName) throw new Error("Korisničko ime je obavezno");
+  const username = normalizeEmail(loginName);
+  if (username.length < 1) throw new Error("Korisničko ime je obavezno");
+
   const passwordHash = await hashPassword(params.password);
 
   await prisma.$transaction(async (tx) => {
     if (employee.user) {
-      // Zaposleni već ima User nalog — ažuriraj email i lozinku
+      // Zaposleni već ima User nalog — ažuriraj username i lozinku
       await tx.user.update({
         where: { id: employee.user.id },
-        data: { email, passwordHash },
+        data: { username, ...(params.email ? { email: username } : {}), passwordHash },
       });
     } else {
       // PIN-only zaposleni — kreiraj User nalog i poveži ga
-      const user = await tx.user.create({ data: { email, passwordHash } });
+      const user = await tx.user.create({ data: { username, ...(params.email ? { email: username } : {}), passwordHash } });
       await tx.employee.update({ where: { id: employeeId }, data: { userId: user.id } });
     }
 
@@ -443,11 +463,46 @@ export async function setEmployeeLoginPassword(
         entityType: "Employee",
         entityId: employeeId,
         action: "employee.login_credential_set",
-        newValue: { email },
+        newValue: { username },
       },
       tx
     );
   });
+}
+
+/**
+ * Otkriva PIN zaposlenog admin nalogu (OWNER/ADMIN/MANAGER sa employees.manage).
+ * Dešifruje encryptedPin koristeći PIN_ENCRYPTION_KEY iz env-a.
+ *
+ * Bezbednost:
+ * - Zahteva employees.manage permisiju.
+ * - Audit zapis se kreira pri svakom otkrivanju (staff.pin_revealed).
+ * - Vraćeni PIN se NIKAD ne loguje — samo činjenica radnje.
+ * - encryptedPin ne postoji (null) za zaposlene pre ove migracije ili bez PIN-a.
+ */
+export async function revealEmployeePin(ctx: AuthContext, employeeId: string): Promise<string> {
+  requirePermission(ctx, EMPLOYEES_MANAGE);
+
+  const employee = await prisma.employee.findFirst({
+    where: { id: employeeId, ...scopeToRestaurant(ctx) },
+    select: { id: true, encryptedPin: true },
+  });
+  if (!employee) throw new Error("Zaposleni nije pronađen");
+
+  if (!employee.encryptedPin) {
+    throw new Error("PIN nije dostupan za otkrivanje — zaposleni nema sačuvan šifrovan PIN. Postavi novi PIN.");
+  }
+
+  const pin = decryptPin(employee.encryptedPin);
+
+  await recordAuditEntry(ctx, {
+    entityType: "Employee",
+    entityId: employeeId,
+    action: "staff.pin_revealed",
+    severity: "WARNING",
+  });
+
+  return pin;
 }
 
 export async function setEmployeeStatus(ctx: AuthContext, employeeId: string, status: "ACTIVE" | "SUSPENDED") {

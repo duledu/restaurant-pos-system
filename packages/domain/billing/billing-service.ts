@@ -7,6 +7,7 @@ import { getOrder } from "../orders/order-service";
 import { requireOrderOperator, requireDraftOwnership, isOrderManager } from "../orders/order-access";
 import { computeOrderTotals } from "../orders/order-totals";
 import { dispatchReceiptPrintJob } from "../printing/print-service";
+import { validateAndDecrementInventoryInTx } from "../inventory/inventory-service";
 import type { CompletePaymentInput } from "@rcs/shared";
 
 const PAYABLE_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
@@ -180,6 +181,14 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
       },
     });
 
+    await validateAndDecrementInventoryInTx(tx, {
+      paymentId: payment.id,
+      orderId,
+      restaurantId: ctx.restaurantId,
+      locationId: order.locationId,
+      items: payableItems.map((it) => ({ menuItemId: it.menuItemId, quantity: it.quantity })),
+    });
+
     const receipt = await tx.receipt.create({
       data: {
         orderId,
@@ -244,9 +253,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     occurredAt: new Date().toISOString(),
   });
 
-  // Faza 6: priprema (ne fizička štampa — ta je klijentska, vidi print-service.ts)
-  // kupčevog računa TEK POSLE uspešnog commit-a naplate, van transakcije —
-  // neuspeh ovde NIKAD ne sme oboriti već završeno plaćanje.
+  // Receipt print job — dispatched AFTER commit, never fails the payment.
   try {
     await dispatchReceiptPrintJob(ctx, payment.id, {
       isReprint: false,

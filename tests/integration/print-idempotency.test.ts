@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
@@ -57,7 +57,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("print idempotency: duplicate dispatch never creates duplicate PrintJob rows", () => {
   it("submitOrder's own auto-dispatch already creates exactly one KITCHEN job", async () => {

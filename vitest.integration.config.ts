@@ -11,7 +11,15 @@ export default defineConfig({
     environment: "node",
     include: ["tests/integration/**/*.test.ts"],
     setupFiles: ["./tests/setup/require-test-database.ts"],
-    hookTimeout: 20000,
+    // Global teardown disconnects the shared Prisma singleton once after ALL
+    // test files complete. Individual afterAll calls have been removed from
+    // each test file — calling $disconnect() after each file forces Prisma
+    // to re-establish its connection pool for the next file, which on Windows
+    // with embedded PostgreSQL can exceed hookTimeout.
+    globalSetup: ["./tests/setup/global-teardown.ts"],
+    // Windows embedded Postgres can still have a one-off cold-start/reset hook
+    // just above 20s even with the corrected single-disconnect lifecycle.
+    hookTimeout: 30000,
     // Podignuto sa vitest default-a (5000ms) — Deljeni POS anonimni PIN
     // login (pin-login/route.ts) skenira SVE aktivne zaposlene restorana i
     // za svakog radi scrypt verifyPin, pa testovi sa više zaposlenih/više

@@ -44,7 +44,29 @@ export function DeviceSetupClient() {
   }, []);
 
   useEffect(() => {
-    refreshLocalState();
+    // Uvek verifikuj localStorage deviceId sa serverom pre prikazivanja statusa
+    // "Registrovan" — localStorage može sadržati zastareli UUID čiji Device red
+    // više ne postoji u bazi (npr. posle brisanja uređaja ili obnavljanja baze).
+    // Samo server je autoritativan izvor istine.
+    const storedId = getDeviceId();
+    if (storedId) {
+      fetch(`/api/device/check?deviceId=${encodeURIComponent(storedId)}`)
+        .then((r) => r.json())
+        .then((data: { registered: boolean }) => {
+          if (!data.registered) {
+            clearDevice(); // Zastareli ID — obriši localStorage pre prikazivanja statusa
+          }
+          refreshLocalState();
+        })
+        .catch(() => {
+          // Mrežna greška — ne brišemo ništa, localStorage ostaje; refreshLocalState
+          // će pokazati ID koji server nije uspeo da potvrdi (konzervativno).
+          refreshLocalState();
+        });
+    } else {
+      refreshLocalState();
+    }
+
     apiFetch("/api/device/locations")
       .then((body) => {
         setLocations(body.locations);

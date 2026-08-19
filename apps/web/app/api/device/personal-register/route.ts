@@ -2,12 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { devices } from "@rcs/domain";
 
-// Ova ruta se poziva PRE autentifikacije — zaposleni se identifikuje
-// email+lozinkom (postavljenim od strane admina), bez aktivne sesije.
-// Ne koristi withApiAuth jer nema sesiju u ovom trenutku.
-
 const schema = z.object({
-  email: z.string().trim().toLowerCase().email("Neispravna email adresa"),
+  username: z.string().trim().min(1, "Korisničko ime je obavezno"),
   password: z.string().min(1, "Lozinka je obavezna"),
 });
 
@@ -23,8 +19,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ deviceId: result.deviceId, employeeName: result.employeeName }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Registracija nije uspela";
-    // Prikazujemo genericku poruku za auth greške, ali detaljnu za ostale
-    const isAuthError = message === "Neispravan email ili lozinka";
+    const isAuthError = message === "Neispravno korisničko ime ili lozinka";
     return NextResponse.json({ error: message }, { status: isAuthError ? 401 : 400 });
   }
 }

@@ -127,7 +127,7 @@ async function main() {
     pin?: string;
   }) {
     const user = await prisma.user.create({
-      data: { email: params.email, passwordHash: hashPassword(params.password) },
+      data: { username: params.email, email: params.email, passwordHash: hashPassword(params.password) },
     });
     const employee = await prisma.employee.create({
       data: {

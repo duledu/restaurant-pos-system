@@ -11,8 +11,11 @@ interface Employee {
   id: string;
   firstName: string;
   lastName: string;
+  username: string | null;
   status: "ACTIVE" | "SUSPENDED" | "TERMINATED";
   hasPin: boolean;
+  hasEncryptedPin: boolean;
+  pinLoginEnabled: boolean;
   hasLoginCredentials: boolean;
   createdAt: string;
   roles: { role: { name: string } }[];
@@ -339,18 +342,55 @@ function ChangePinModal({ employee, onCancel, onDone }: { employee: Employee; on
   );
 }
 
+function RevealPinModal({ employee, onCancel }: { employee: Employee; onCancel: () => void }) {
+  const [pin, setPin] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch(`/api/admin/employees/${employee.id}/pin`)
+      .then((body: { pin: string }) => setPin(body.pin))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Greška pri otkrivanju PIN-a"))
+      .finally(() => setLoading(false));
+  }, [employee.id]);
+
+  return (
+    <ModalShell title={`PIN — ${employee.firstName} ${employee.lastName}`} onCancel={onCancel}>
+      <div className="space-y-4">
+        <p className="text-sm text-inkSoft">
+          Ova radnja je zabeležena u evidenciji aktivnosti.
+        </p>
+        {loading && <div className="py-4 text-center text-sm text-inkSoft">Učitavanje…</div>}
+        {error && <div className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
+        {pin !== null && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-center">
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-700">PIN</p>
+            <p className="text-3xl font-bold tracking-[0.3em] text-amber-900">{pin}</p>
+          </div>
+        )}
+        <button
+          onClick={onCancel}
+          className="w-full rounded-md border border-line py-3 text-base font-medium text-ink"
+        >
+          Zatvori
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
 function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Employee; onCancel: () => void; onDone: () => void }) {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState(employee.username ?? "");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const usernameValid = username.trim().length >= 1;
   const passwordValid = password.length >= 10;
   const passwordsMatch = password === confirmPassword;
-  const canSubmit = emailValid && passwordValid && passwordsMatch;
+  const canSubmit = usernameValid && passwordValid && passwordsMatch;
 
   async function submit() {
     if (!canSubmit || submitting) return;
@@ -359,7 +399,7 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
     try {
       await apiFetch(`/api/admin/employees/${employee.id}/login-credentials`, {
         method: "POST",
-        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+        body: JSON.stringify({ username: username.trim(), password }),
       });
       onDone();
     } catch (e) {
@@ -378,22 +418,21 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
           </div>
         ) : (
           <p className="text-sm text-inkSoft">
-            Postavi email i lozinku da bi zaposleni mogao da registruje lični uređaj. Admin ne može pregledati postojeće podatke — samo ih podesiti iznova.
+            Postavi korisničko ime i lozinku da bi zaposleni mogao da registruje lični uređaj ili da se prijavi kao admin.
           </p>
         )}
 
         <div>
-          <label className="mb-1 block text-sm font-medium text-inkSoft">Email adresa</label>
+          <label className="mb-1 block text-sm font-medium text-inkSoft">Korisničko ime</label>
           <input
-            type="email"
-            inputMode="email"
+            type="text"
             autoComplete="off"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
             className="w-full rounded-md border border-line px-3 py-2.5 text-base"
-            placeholder="zaposleni@primer.rs"
+            placeholder="npr. marko.petrovic"
           />
-          {email && !emailValid && <p className="mt-1 text-xs text-danger">Neispravna email adresa.</p>}
+          {username && !usernameValid && <p className="mt-1 text-xs text-danger">Korisničko ime je obavezno.</p>}
         </div>
 
         <div>
@@ -461,6 +500,7 @@ export function StaffClient() {
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [changingPin, setChangingPin] = useState<Employee | null>(null);
+  const [revealingPin, setRevealingPin] = useState<Employee | null>(null);
   const [settingCredentials, setSettingCredentials] = useState<Employee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -499,8 +539,24 @@ export function StaffClient() {
     }
   }
 
+  async function togglePinLogin(emp: Employee) {
+    setBusyId(emp.id);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/employees/${emp.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ pinLoginEnabled: !emp.pinLoginEnabled }),
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri promeni PIN prijave");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="mx-auto max-w-5xl">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Osoblje</h1>
@@ -530,9 +586,10 @@ export function StaffClient() {
               <thead>
                 <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                   <th className="px-4 py-3 font-medium">Zaposleni</th>
+                  <th className="px-4 py-3 font-medium">Korisničko ime</th>
                   <th className="px-4 py-3 font-medium">Rola</th>
                   <th className="px-4 py-3 font-medium">Lokacija</th>
-                  <th className="px-4 py-3 font-medium">PIN prijava</th>
+                  <th className="px-4 py-3 font-medium">PIN</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium"></th>
                 </tr>
@@ -543,10 +600,32 @@ export function StaffClient() {
                     <td className="px-4 py-3 font-medium text-ink">
                       {emp.firstName} {emp.lastName}
                     </td>
+                    <td className="px-4 py-3 text-inkSoft">
+                      {emp.username ? (
+                        <span className="font-mono text-xs">{emp.username}</span>
+                      ) : (
+                        <span className="text-inkSoft/50">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-inkSoft">{emp.roles.map((r) => ROLE_LABEL[r.role.name] ?? r.role.name).join(", ")}</td>
                     <td className="px-4 py-3 text-inkSoft">{emp.locations.map((l) => l.location.name).join(", ") || "—"}</td>
                     <td className="px-4 py-3">
-                      <Badge tone={emp.hasPin ? "info" : "neutral"}>{emp.hasPin ? "Da" : "Ne"}</Badge>
+                      {emp.hasPin ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-sm tracking-[0.2em] text-inkSoft">••••</span>
+                          {emp.hasEncryptedPin && (
+                            <button
+                              onClick={() => setRevealingPin(emp)}
+                              title="Otkrij PIN"
+                              className="rounded p-0.5 text-inkSoft hover:text-ink"
+                            >
+                              <EyeIcon />
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <Badge tone="neutral">Nema PIN</Badge>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <Badge tone={STATUS_TONE[emp.status]}>{STATUS_LABEL[emp.status]}</Badge>
@@ -558,6 +637,14 @@ export function StaffClient() {
                         </button>
                         <button onClick={() => setChangingPin(emp)} className="text-gold-dark hover:underline">
                           Promeni PIN
+                        </button>
+                        <button
+                          onClick={() => togglePinLogin(emp)}
+                          disabled={busyId === emp.id}
+                          title={emp.pinLoginEnabled ? "Onemogući PIN prijavu za ovog zaposlenog" : "Omogući PIN prijavu za ovog zaposlenog"}
+                          className={emp.pinLoginEnabled ? "text-inkSoft hover:underline" : "text-success hover:underline"}
+                        >
+                          {emp.pinLoginEnabled ? "Disable PIN" : "Enable PIN"}
                         </button>
                         <button onClick={() => setSettingCredentials(emp)} className="text-gold-dark hover:underline">
                           {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
@@ -609,7 +696,14 @@ export function StaffClient() {
           onDone={() => {
             setChangingPin(null);
             setNotice("PIN je uspešno promenjen.");
+            load();
           }}
+        />
+      )}
+      {revealingPin && (
+        <RevealPinModal
+          employee={revealingPin}
+          onCancel={() => setRevealingPin(null)}
         />
       )}
       {settingCredentials && (
@@ -624,5 +718,14 @@ export function StaffClient() {
         />
       )}
     </div>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
   );
 }

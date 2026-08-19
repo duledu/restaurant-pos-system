@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
@@ -41,7 +41,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("reporting access control: only OWNER/ADMIN/MANAGER reach financial reports", () => {
   it.each(["OWNER", "ADMIN", "MANAGER"])("%s can call getSalesSummary, getDailySummary, and export-backing report functions", async (role) => {

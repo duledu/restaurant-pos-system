@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError, UnauthorizedError, createSessionToken, requireAuth, hashPin } from "@rcs/auth";
@@ -110,7 +110,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("shared POS: lock", () => {
   it("clears the session so a protected route is unavailable after Quick Lock", async () => {

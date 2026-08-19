@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "../../components/ui/Button";
 import { AppLogo } from "../../components/branding/AppLogo";
 import { PinPad } from "../../components/auth/PinPad";
-import { getDeviceId } from "../../lib/shared-pos";
+import { clearDevice, getDeviceId } from "../../lib/shared-pos";
 import { ROLE_LABEL } from "../../components/admin/role-labels";
 
 // Tri stanja prijave:
@@ -41,6 +41,14 @@ export default function LoginPage() {
     setMode("staff");
   }
 
+  function handleDeviceInvalid() {
+    // Server odgovorio 403 — deviceId u localStorage-u više ne postoji u bazi.
+    // Obrišemo zastareli localStorage i prebacimo na admin prijavu.
+    clearDevice();
+    setDeviceId(null);
+    setMode("admin");
+  }
+
   return (
     <main className="flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-graphite px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(2rem,10dvh,5rem)] sm:px-6">
       <div className="w-full max-w-sm animate-slide-up self-start">
@@ -62,7 +70,7 @@ export default function LoginPage() {
         </header>
 
         {/* Registered device — shared POS or personal device (StaffLoginForm handles both) */}
-        {deviceId && mode === "staff" && <StaffLoginForm deviceId={deviceId} />}
+        {deviceId && mode === "staff" && <StaffLoginForm deviceId={deviceId} onDeviceInvalid={handleDeviceInvalid} />}
 
         {/* Admin email login */}
         {mode === "admin" && <PasswordLoginForm />}
@@ -122,7 +130,7 @@ export default function LoginPage() {
   );
 }
 
-function StaffLoginForm({ deviceId }: { deviceId: string }) {
+function StaffLoginForm({ deviceId, onDeviceInvalid }: { deviceId: string; onDeviceInvalid: () => void }) {
   const router = useRouter();
   const [staff, setStaff] = useState<StaffEntry[] | null>(null);
   const [staffError, setStaffError] = useState<string | null>(null);
@@ -136,11 +144,17 @@ function StaffLoginForm({ deviceId }: { deviceId: string }) {
     fetch(`/api/auth/staff-directory?deviceId=${encodeURIComponent(deviceId)}`)
       .then(async (res) => {
         const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? "Greška pri učitavanju osoblja");
-        return body.staff as StaffEntry[];
-      })
-      .then((list) => {
+        if (!res.ok) {
+          // 403 = uređaj nije u bazi (zastareli localStorage) — obriši i prebaci
+          // na admin prijavu umesto prikazivanja greške na stranom ekranu.
+          if (res.status === 403 && !cancelled) {
+            onDeviceInvalid();
+            return;
+          }
+          throw new Error(body.error ?? "Greška pri učitavanju osoblja");
+        }
         if (cancelled) return;
+        const list = body.staff as StaffEntry[];
         setStaff(list);
         if (list.length > 0) setEmployeeId(list[0].id);
       })
@@ -148,7 +162,7 @@ function StaffLoginForm({ deviceId }: { deviceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [deviceId]);
+  }, [deviceId, onDeviceInvalid]);
 
   const selected = staff?.find((s) => s.id === employeeId) ?? null;
 
@@ -243,7 +257,7 @@ function PersonalDeviceRegistrationForm({
   onRegistered: (deviceId: string) => void;
   onCancel: () => void;
 }) {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -257,7 +271,7 @@ function PersonalDeviceRegistrationForm({
       const res = await fetch("/api/device/personal-register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ username, password }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Registracija nije uspela");
@@ -286,18 +300,18 @@ function PersonalDeviceRegistrationForm({
       )}
 
       <div className="mb-4">
-        <label htmlFor="personal-email" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
-          Email
+        <label htmlFor="personal-username" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+          Korisničko ime
         </label>
         <input
-          id="personal-email"
-          type="email"
+          id="personal-username"
+          type="text"
           autoComplete="username"
           required
           suppressHydrationWarning
           className="h-11 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
         />
       </div>
 
@@ -356,7 +370,7 @@ function EyeOffIcon() {
 
 function PasswordLoginForm() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -370,7 +384,7 @@ function PasswordLoginForm() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ username, password }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Prijava nije uspela");
@@ -392,18 +406,18 @@ function PasswordLoginForm() {
       )}
 
       <div className="mb-4">
-        <label htmlFor="email" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
-          Email
+        <label htmlFor="username" className="mb-1.5 block text-sm font-medium leading-5 text-inkSoft">
+          Korisničko ime
         </label>
         <input
-          id="email"
-          type="email"
+          id="username"
+          type="text"
           autoComplete="username"
           required
           suppressHydrationWarning
           className="h-11 w-full rounded-md border border-line px-3 text-base text-ink focus:border-gold focus:outline-none"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
         />
       </div>
 

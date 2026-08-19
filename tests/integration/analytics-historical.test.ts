@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
@@ -41,7 +41,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("analytics: historical snapshot correctness survives later menu/employee changes", () => {
   it("top-selling items keep the historical name/price after the menu item is renamed and repriced", async () => {
@@ -79,7 +78,7 @@ describe("analytics: historical snapshot correctness survives later menu/employe
 
   it("a deactivated (TERMINATED) employee still resolves correctly in employee performance and normalized metrics", async () => {
     const fixture = await createFixture();
-    const user = await prisma.user.create({ data: { email: `waiter-${randomUUID()}@test.local`, passwordHash: "x" } });
+    const user = await prisma.user.create({ data: { username: `waiter-${randomUUID()}@test.local`, passwordHash: "x" } });
     const employee = await prisma.employee.create({
       data: { id: "waiter-1", restaurantId: fixture.restaurantId, userId: user.id, firstName: "Marko", lastName: "Konobar" },
     });

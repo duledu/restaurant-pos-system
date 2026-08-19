@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { createSessionToken } from "@rcs/auth";
@@ -85,7 +85,7 @@ async function createFixture(): Promise<Fixture> {
 }
 
 async function createEmployeeWithRole(fixture: Fixture, role: string, firstName: string) {
-  const user = await prisma.user.create({ data: { email: `${randomUUID()}@test.local`, isActive: true } });
+  const user = await prisma.user.create({ data: { username: `${randomUUID()}@test.local`, isActive: true } });
   const employee = await prisma.employee.create({
     data: { restaurantId: fixture.restaurantId, userId: user.id, firstName, lastName: role },
   });
@@ -128,7 +128,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("GET /api/admin/settings/restaurant requires settings.manage, server-side", () => {
   it.each(["OWNER", "ADMIN", "MANAGER"])("allows %s (200)", async (role) => {

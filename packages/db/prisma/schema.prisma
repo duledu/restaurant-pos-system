@@ -82,6 +82,7 @@ model Restaurant {
   shifts    Shift[]
   orders    Order[]
   settings  RestaurantSettings?
+  inventoryItems InventoryItem[]
 
   @@index([tenantId])
   @@index([status])
@@ -109,6 +110,7 @@ model Location {
   floors            Floor[]
   shifts            Shift[]
   orders            Order[]
+  inventoryItems    InventoryItem[]
 
   @@index([restaurantId])
   @@map("locations")
@@ -120,7 +122,10 @@ model Location {
 
 model User {
   id           String   @id @default(uuid())
-  email        String   @unique
+  // username je primarni identifikator za prijavu (zamenio email u loginSchema).
+  // email ostaje u bazi radi kompatibilnosti; za stare naloge username = email.
+  username     String   @unique
+  email        String?  @unique
   passwordHash String?
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
@@ -152,6 +157,11 @@ model Employee {
   firstName         String
   lastName          String
   pinHash           String?
+  // AES-256-GCM šifrovan PIN za admin otkrivanje (ključ u PIN_ENCRYPTION_KEY env).
+  // Null = PIN nije postavljen ili nije šifrovan (stariji red pre migracije).
+  encryptedPin      String?
+  // Kada false, zaposleni se ne prikazuje u imeniku niti može da se prijavi PIN-om.
+  pinLoginEnabled   Boolean        @default(true)
   failedPinAttempts Int            @default(0)
   pinLockedUntil    DateTime?
   status            EmployeeStatus @default(ACTIVE)
@@ -408,9 +418,10 @@ model MenuItem {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime? // soft-delete: meni artikli se arhiviraju/brišu često, istorijske porudžbine već čuvaju snapshot naziva/cene pa fizičko brisanje ovde ne ugrožava izveštaje
 
-  restaurant Restaurant    @relation(fields: [restaurantId], references: [id])
-  category   MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  orderItems OrderItem[]
+  restaurant     Restaurant      @relation(fields: [restaurantId], references: [id])
+  category       MenuCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  orderItems     OrderItem[]
+  inventoryItems InventoryItem[]
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
@@ -955,4 +966,77 @@ model PrinterConfig {
   @@index([restaurantId])
   @@index([locationId])
   @@map("printer_configs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 7 — INVENTORY (zalihe)
+//
+// InventoryItem: jedan red po (location, menuItem) paru. Čuva tekuće stanje.
+// InventoryMovement: nepromenjiv ledger svake izmene zalihe.
+//
+// Idempotentnost SALE kretanja: @@unique([paymentId, menuItemId]) sprečava
+// dupli odbitak pri ponovljenom pozivu — PostgreSQL dozvoljava više NULL
+// vrednosti u unique indeksu, pa non-SALE kretanja (ADJUSTMENT itd.) koja
+// imaju paymentId=NULL mogu koegzistirati bez konflikta.
+//
+// Konkurentnost: Prisma updateMany sa uvjetom currentStock >= delta daje
+// atomski SQL UPDATE bez ručnog SELECT-FOR-UPDATE.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum MovementType {
+  INITIAL
+  OPENING_STOCK
+  RECEIPT
+  SALE
+  ADJUSTMENT
+  WRITE_OFF
+}
+
+model InventoryItem {
+  id           String  @id @default(uuid())
+  restaurantId String
+  locationId   String
+  menuItemId   String
+  currentStock Decimal @db.Decimal(12, 3) @default(0)
+  unit         String  @default("kom")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant  Restaurant          @relation(fields: [restaurantId], references: [id])
+  location    Location            @relation(fields: [locationId], references: [id])
+  menuItem    MenuItem            @relation(fields: [menuItemId], references: [id])
+  movements   InventoryMovement[]
+
+  @@unique([locationId, menuItemId])
+  @@index([restaurantId])
+  @@index([menuItemId])
+  @@map("inventory_items")
+}
+
+model InventoryMovement {
+  id              String       @id @default(uuid())
+  restaurantId    String
+  locationId      String
+  menuItemId      String
+  inventoryItemId String
+  type            MovementType
+  quantityDelta   Decimal      @db.Decimal(12, 3)
+  quantityBefore  Decimal      @db.Decimal(12, 3)
+  quantityAfter   Decimal      @db.Decimal(12, 3)
+  paymentId       String?
+  orderId         String?
+  employeeId      String?
+  reason          String?
+  createdAt       DateTime     @default(now())
+
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id])
+
+  @@unique([paymentId, menuItemId])
+  @@index([inventoryItemId])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([menuItemId])
+  @@index([paymentId])
+  @@index([createdAt])
+  @@map("inventory_movements")
 }

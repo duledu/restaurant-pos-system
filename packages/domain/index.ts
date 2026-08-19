@@ -12,5 +12,6 @@ export * as reporting from "./reporting/reporting-service";
 export * as printing from "./printing/print-service";
 export * as settings from "./settings/settings-service";
 export * as analytics from "./analytics/analytics-service";
+export * as inventory from "./inventory/inventory-service";
 export * from "./realtime/publisher";
 export { ssePublisher, subscribe } from "./realtime/sse-publisher";

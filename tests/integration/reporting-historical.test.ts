@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
@@ -60,7 +60,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("reporting: historical accuracy survives later menu/employee changes", () => {
   it("keeps the item's historical name and price in item-sales after the menu item is renamed and repriced", async () => {
@@ -87,7 +86,7 @@ describe("reporting: historical accuracy survives later menu/employee changes", 
     // Zaposleni mora postojati u bazi (resolveEmployeeDisplayNames traži
     // Employee.id) da bi test proverio da DEAKTIVACIJA (ne brisanje) ne
     // ruši istorijski izveštaj — vidi Employee.status u schema.prisma.
-    const user = await prisma.user.create({ data: { email: `waiter-${randomUUID()}@test.local`, passwordHash: "x" } });
+    const user = await prisma.user.create({ data: { username: `waiter-${randomUUID()}@test.local`, passwordHash: "x" } });
     const employee = await prisma.employee.create({
       data: { id: "waiter-1", restaurantId: fixture.restaurantId, userId: user.id, firstName: "Marko", lastName: "Konobar" },
     });

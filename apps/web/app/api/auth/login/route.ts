@@ -7,16 +7,12 @@ import { clearLoginThrottle, getActiveLoginThrottle, recordFailedLogin } from ".
 
 /**
  * Namerno vraća istu generičku poruku za "nema naloga" i "pogrešna lozinka"
- * — sprečava enumeraciju validnih email adresa.
+ * — sprečava enumeraciju validnih korisničkih imena.
  */
-const GENERIC_ERROR = "Neispravan email ili lozinka";
+const GENERIC_ERROR = "Neispravno korisničko ime ili lozinka";
 const DUMMY_PASSWORD_HASH = `${"0".repeat(32)}:${"0".repeat(128)}`;
 
 export async function POST(request: Request) {
-  // Ruta radi PRE nego što auth kontekst postoji, pa ne može koristiti
-  // withApiAuth (apps/web/lib/api-helpers.ts) — zato ovde ručno hvatamo SVAKI
-  // neočekivan izuzetak (npr. baza nedostupna) da odgovor klijentu UVEK bude
-  // validan JSON, nikad prazno/ne-JSON telo (isti ugovor kao ostale API rute).
   try {
     const body = await request.json().catch(() => null);
     const parsed = loginSchema.safeParse(body);
@@ -24,8 +20,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Neispravan zahtev" }, { status: 400 });
     }
 
-    const email = normalizeEmail(parsed.data.email);
-    const throttleKey = loginThrottleKey(email);
+    // normalizeEmail radi trim + toLowerCase — identično za korisničko ime
+    const username = normalizeEmail(parsed.data.username);
+    const throttleKey = loginThrottleKey(username);
     const lockedUntil = await getActiveLoginThrottle(throttleKey);
     if (lockedUntil) {
       const retryAfter = Math.max(1, Math.ceil((lockedUntil.getTime() - Date.now()) / 1000));
@@ -36,7 +33,7 @@ export async function POST(request: Request) {
     }
 
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { username },
       include: {
         employee: {
           include: {

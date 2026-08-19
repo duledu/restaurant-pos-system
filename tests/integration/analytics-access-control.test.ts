@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
@@ -42,7 +42,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("analytics access control: only OWNER/ADMIN/MANAGER reach BI endpoints", () => {
   it.each(["OWNER", "ADMIN", "MANAGER"])("%s can call every analytics function", async (role) => {

@@ -4,7 +4,7 @@ import { employees } from "@rcs/domain";
 import { withApiAuth } from "../../../../../../lib/api-helpers";
 
 const schema = z.object({
-  email: z.string().trim().toLowerCase().email("Neispravna email adresa"),
+  username: z.string().trim().min(1, "Korisničko ime je obavezno").max(100, "Korisničko ime je predugačko"),
   password: z.string().min(10, "Lozinka mora imati najmanje 10 karaktera"),
 });
 

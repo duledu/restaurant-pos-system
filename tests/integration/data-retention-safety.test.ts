@@ -5,7 +5,7 @@
  * finansijske podatke (Payment/Receipt/Order/OrderItem), a izveštaji MORAJU
  * i dalje prikazivati tu istoriju posle takvih izmena.
  */
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
@@ -106,7 +106,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("data retention: employee deactivation", () => {
   it("does not delete a suspended employee's historical orders/payments, and reports still show them", async () => {
@@ -152,7 +151,7 @@ describe("data retention: menu item archival/deletion", () => {
     const soldItems = await reporting.getSoldItems(ownerCtx, { locationId: "ALL", preset: "today" });
     const row = soldItems.rows.find((r) => r.name === "Burger");
     expect(row).toBeDefined();
-    expect(row?.quantity).toBe(1);
+    expect(row?.totalQuantity).toBe(1);
   });
 
   it("hard-deleting a menu item leaves the OrderItem snapshot and sales report intact", async () => {
@@ -175,7 +174,7 @@ describe("data retention: menu item archival/deletion", () => {
     const soldItems = await reporting.getSoldItems(ownerCtx, { locationId: "ALL", preset: "today" });
     const row = soldItems.rows.find((r) => r.name === "Burger");
     expect(row).toBeDefined();
-    expect(row?.quantity).toBe(1);
+    expect(row?.totalQuantity).toBe(1);
   });
 });
 

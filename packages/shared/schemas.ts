@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email("Neispravna email adresa"),
+  username: z.string().trim().min(1, "Korisničko ime je obavezno"),
   password: z.string().min(1, "Lozinka je obavezna"),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
@@ -46,6 +46,7 @@ export const updateEmployeeSchema = z.object({
   lastName: z.string().trim().min(1).max(100).optional(),
   roleNames: z.array(z.string().min(1)).min(1, "Bar jedna rola je obavezna").optional(),
   locationIds: z.array(z.string().uuid()).min(1, "Bar jedna lokacija je obavezna").optional(),
+  pinLoginEnabled: z.boolean().optional(),
 });
 export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
 

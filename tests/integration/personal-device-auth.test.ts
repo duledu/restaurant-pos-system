@@ -10,7 +10,7 @@
  * - Kros-restoran pristup je blokiran
  * - Postavljanje login kredencijala od strane admina (setEmployeeLoginPassword)
  */
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { employees, devices } from "@rcs/domain";
@@ -92,7 +92,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, users, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("setEmployeeLoginPassword", () => {
   it("kreira User i vezu Employee→User za zaposlenog koji nema nalog", async () => {
@@ -171,7 +170,7 @@ describe("registerPersonalDevice", () => {
 
     await expect(
       devices.registerPersonalDevice({ email: "ana@test.rs", password: "PogresnaLozinka" })
-    ).rejects.toThrow("Neispravan email ili lozinka");
+    ).rejects.toThrow("Neispravno korisničko ime ili lozinka");
   });
 
   it("deaktivira stari licni uredjaj zaposlenog pri ponovnoj registraciji", async () => {
