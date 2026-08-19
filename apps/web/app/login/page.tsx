@@ -50,23 +50,27 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-graphite px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(2rem,10dvh,5rem)] sm:px-6">
-      <div className="w-full max-w-sm animate-slide-up self-start">
-        <header className="mb-[clamp(1.25rem,4dvh,1.75rem)] flex w-full flex-col items-center gap-3 text-center">
+    <main className="relative flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-[radial-gradient(circle_at_50%_-10%,#1A4A73_0%,#0A1931_38%,#06111E_100%)] px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(1.5rem,7dvh,4rem)] sm:px-6">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cream-300/60 to-transparent" />
+      <div className="w-full max-w-[420px] animate-slide-up self-start">
+        <header className="mb-[clamp(1.25rem,4dvh,2rem)] flex w-full flex-col items-center gap-3 text-center">
           <AppLogo theme="dark" size="lg" variant="mark" />
           <div className="flex flex-col items-center gap-1">
-            <h1 className="whitespace-nowrap text-[clamp(1.5rem,7vw,1.75rem)] font-bold leading-tight tracking-[-0.02em]">
+            <h1 className="text-[clamp(1.5rem,7vw,1.75rem)] font-bold leading-tight tracking-[-0.02em]">
               <span className="text-white">Table</span>
               <span style={{ color: "#B3CFE5" }}>Core</span>
             </h1>
             <p
-              className="whitespace-nowrap text-[clamp(0.5625rem,2.65vw,0.625rem)] font-medium uppercase tracking-[0.1em]"
+              className="text-[clamp(0.5625rem,2.65vw,0.625rem)] font-medium uppercase tracking-[0.08em]"
               style={{ color: "rgba(179,207,229,0.65)" }}
             >
               Restaurant Control System
             </p>
           </div>
-          <p className="w-full text-center text-sm leading-5 text-cream-300/70">Prijava za osoblje restorana</p>
+          <div className="mt-1 flex max-w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
+            <p className="text-center text-[11px] font-medium leading-4 text-cream-300/75">Bezbedan pristup · zajednički POS terminal</p>
+          </div>
         </header>
 
         {/* Registered device — shared POS or personal device (StaffLoginForm handles both) */}
@@ -100,7 +104,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setMode("staff")}
-                  className="block w-full text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+                  className="block w-full px-2 text-xs font-medium leading-5 text-cream-300/60 hover:text-cream-300/90"
                 >
                   ← Prijava za osoblje
                 </button>
@@ -108,7 +112,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setMode("register-personal")}
-                  className="block w-full text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+                  className="block w-full px-2 text-xs font-medium leading-5 text-cream-300/60 hover:text-cream-300/90"
                 >
                   Prijava zaposlenog (lični uređaj) →
                 </button>
@@ -201,7 +205,7 @@ function StaffLoginForm({ deviceId, onDeviceInvalid }: { deviceId: string; onDev
 
   return (
     <div className="flex flex-col items-center">
-      <div className="mb-5 w-full rounded-lg bg-white p-4 shadow-elevated">
+      <div className="mb-5 w-full rounded-lg border border-white/50 bg-white p-5 shadow-[0_20px_60px_rgba(0,0,0,.28)]">
         {isPersonalDevice && selected ? (
           // Lični uređaj: prikaži samo ime, bez imenika
           <div>
@@ -287,7 +291,7 @@ function PersonalDeviceRegistrationForm({
   }
 
   return (
-    <form onSubmit={submit} className="rounded-lg bg-white p-5 shadow-elevated sm:p-6">
+    <form onSubmit={submit} className="rounded-lg border border-white/50 bg-white p-5 shadow-[0_20px_60px_rgba(0,0,0,.28)] sm:p-6">
       <p className="mb-4 text-sm text-inkSoft">
         Unesite vaše korisničke podatke koje je postavio administrator. Ovaj telefon/tablet
         biće registrovan kao vaš lični uređaj za PIN prijavu.
@@ -398,7 +402,7 @@ function PasswordLoginForm() {
   }
 
   return (
-    <form onSubmit={submit} className="rounded-lg bg-white p-5 shadow-elevated sm:p-6">
+    <form onSubmit={submit} className="rounded-lg border border-white/50 bg-white p-5 shadow-[0_20px_60px_rgba(0,0,0,.28)] sm:p-6">
       {error && (
         <div className="mb-4 rounded-sm bg-danger-soft px-3 py-2 text-sm text-danger animate-fade-in">
           {error}

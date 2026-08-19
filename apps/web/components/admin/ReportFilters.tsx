@@ -83,14 +83,14 @@ export function ReportFilters({
   }, []);
 
   return (
-    <div className="no-print flex flex-wrap items-center gap-2">
-      <div className="flex flex-wrap gap-1 rounded-md bg-ink/[0.04] p-1">
+    <div className="no-print flex w-full flex-wrap items-center gap-2 rounded-lg border border-line/80 bg-white p-2 shadow-sm lg:w-auto">
+      <div className="flex max-w-full gap-1 overflow-x-auto rounded-md bg-ink/[0.04] p-1">
         {PRESETS.map((p) => (
           <button
             key={p.value}
             onClick={() => onChange({ ...value, preset: p.value })}
-            className={`rounded-sm px-3 py-1.5 text-sm font-medium transition-colors ${
-              value.preset === p.value ? "bg-white text-ink shadow-sm" : "text-inkSoft hover:text-ink"
+            className={`min-h-9 whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-semibold transition-colors ${
+              value.preset === p.value ? "bg-graphite text-white shadow-sm" : "text-inkSoft hover:bg-white hover:text-ink"
             }`}
           >
             {p.label}
@@ -104,14 +104,14 @@ export function ReportFilters({
             type="date"
             value={value.from ?? ""}
             onChange={(e) => onChange({ ...value, from: e.target.value })}
-            className="rounded-md border border-line px-2 py-1.5 text-sm"
+            className="min-h-10 rounded-md border border-line px-2 py-1.5 text-sm"
           />
           <span className="text-sm text-inkSoft">—</span>
           <input
             type="date"
             value={value.to ?? ""}
             onChange={(e) => onChange({ ...value, to: e.target.value })}
-            className="rounded-md border border-line px-2 py-1.5 text-sm"
+            className="min-h-10 rounded-md border border-line px-2 py-1.5 text-sm"
           />
         </div>
       )}
@@ -120,7 +120,7 @@ export function ReportFilters({
         <select
           value={value.locationId}
           onChange={(e) => onChange({ ...value, locationId: e.target.value })}
-          className="rounded-md border border-line px-3 py-1.5 text-sm text-ink"
+          className="min-h-10 rounded-md border border-line px-3 py-1.5 text-sm font-medium text-ink"
         >
           <option value="ALL">Sve lokacije</option>
           {locations.map((loc) => (
@@ -139,13 +139,13 @@ export function ReportFilters({
               await postAudit(reportType, value);
               window.print();
             }}
-            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-inkSoft hover:text-ink"
+            className="min-h-10 rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
           >
             Štampaj / PDF
           </button>
           <a
             href={`/api/admin/reports/export?reportType=${reportType}&${reportFiltersToQuery(value)}`}
-            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-inkSoft hover:text-ink"
+            className="inline-flex min-h-10 items-center rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
           >
             Export CSV
           </a>

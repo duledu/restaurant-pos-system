@@ -5,8 +5,32 @@
 @tailwind utilities;
 
 body {
-  background: #F6FAFD;
+  background: #F3F7FB;
   color: #0A1931;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: #D4E8F4; color: #0A1931; }
+
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+button { touch-action: manipulation; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@layer components {
+  table thead { background: #F3F7FB; }
+  table thead th { color: #1A4A73; letter-spacing: .07em; }
+  table tbody tr { transition: background-color 120ms ease; }
+  table tbody tr:hover { background: rgba(212, 232, 244, .24); }
+  table td { font-variant-numeric: tabular-nums; }
 }
 
 :focus-visible {

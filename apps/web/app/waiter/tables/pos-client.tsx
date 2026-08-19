@@ -33,10 +33,10 @@ function MoreIcon() {
 }
 
 const STATUS_STYLE: Record<Table["status"], string> = {
-  FREE: "bg-white border-line text-ink hover:border-gold/60",
-  OCCUPIED: "bg-graphite text-white border-gold",
-  AWAITING_BILL: "bg-warn text-white border-warn",
-  NEEDS_CLEANING: "bg-cream-300/30 text-ink/40 border-line",
+  FREE: "bg-white border-line text-ink hover:border-success/50 hover:bg-success-soft/20",
+  OCCUPIED: "bg-graphite text-white border-graphite shadow-[0_8px_22px_rgba(10,25,49,.18)]",
+  AWAITING_BILL: "bg-white text-ink border-warn shadow-[inset_4px_0_0_#B45309]",
+  NEEDS_CLEANING: "bg-slate-100 text-ink/50 border-slate-300",
 };
 
 const STATUS_LABEL: Record<Table["status"], string> = {
@@ -146,20 +146,21 @@ export function PosClient() {
   }
 
   return (
-    <div className="p-3 sm:p-4">
+    <div className="min-h-screen bg-cream-200 p-3 sm:p-5 lg:p-6">
       {/* ── Desktop / tablet header (unchanged) ─────────────────────────── */}
-      <div className="mb-4 hidden items-center justify-between sm:flex">
+      <div className="mb-6 hidden items-center justify-between border-b border-line pb-4 sm:flex">
         <div className="flex items-center gap-3">
           <AppLogo variant="mark" size="sm" />
           <div>
-            <h1 className="text-xl font-semibold text-ink">Stolovi</h1>
+            <p className="text-[10px] font-bold uppercase tracking-[.18em] text-gold">Servis sale</p>
+            <h1 className="text-2xl font-bold tracking-tight text-ink">Stolovi</h1>
             {employeeName && <p className="text-xs text-inkSoft">Radiš kao: {employeeName}</p>}
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => router.push("/waiter/shift")}
-            className="rounded-full bg-gold-soft px-3 py-1 text-xs font-medium text-gold-dark transition-colors hover:bg-gold/30"
+            className="rounded-md border border-success/20 bg-success-soft px-3 py-2 text-xs font-semibold text-success transition-colors hover:border-success/40"
           >
             Smena aktivna — zatvori
           </button>
@@ -182,7 +183,8 @@ export function PosClient() {
             <MoreIcon />
           </button>
         </div>
-        <h1 className="mt-2 text-xl font-semibold text-ink">Stolovi</h1>
+        <p className="mt-3 text-[10px] font-bold uppercase tracking-[.18em] text-gold">Servis sale</p>
+        <h1 className="text-2xl font-bold tracking-tight text-ink">Stolovi</h1>
         {employeeName && <p className="text-sm text-inkSoft">{employeeName}</p>}
         <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-gold-soft px-2.5 py-1 text-xs font-medium text-gold-dark">
           <span className="h-1.5 w-1.5 rounded-full bg-gold-dark" aria-hidden="true" />
@@ -221,21 +223,28 @@ export function PosClient() {
 
       {error && <div className="mb-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
       {floors.map((floor) => (
-        <div key={floor.id} className="mb-6">
-          <h2 className="mb-2 text-sm font-medium text-ink/70">{floor.name}</h2>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+        <section key={floor.id} className="mb-8">
+          <div className="mb-3 flex items-center justify-between border-b border-line/80 pb-2">
+            <h2 className="text-xs font-bold uppercase tracking-[.14em] text-inkSoft">{floor.name}</h2>
+            <span className="text-xs tabular-nums text-inkSoft">{floor.tables.filter((t) => t.status === "FREE").length}/{floor.tables.length} slobodno</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
             {floor.tables.map((table) => (
               <button
                 key={table.id}
                 onClick={() => selectTable(table.id)}
-                className={`flex min-h-[92px] flex-col items-center justify-center gap-1 rounded-lg border-2 p-3 text-center shadow-sm active:scale-95 ${STATUS_STYLE[table.status]}`}
+                className={`group relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${STATUS_STYLE[table.status]}`}
               >
-                <span className="text-lg font-bold">{table.label}</span>
-                <span className="text-xs opacity-80">{STATUS_LABEL[table.status]}</span>
+                <span className={`absolute right-3 top-3 h-2.5 w-2.5 rounded-full ${table.status === "FREE" ? "bg-success" : table.status === "OCCUPIED" ? "bg-gold" : table.status === "AWAITING_BILL" ? "bg-warn" : "bg-slate-400"}`} aria-hidden="true" />
+                <span className="text-2xl font-bold tracking-tight">{table.label}</span>
+                <span>
+                  <span className="block text-xs font-semibold opacity-85">{STATUS_LABEL[table.status]}</span>
+                  <span className="mt-1 block text-[11px] opacity-55">Kapacitet · {table.capacity}</span>
+                </span>
               </button>
             ))}
           </div>
-        </div>
+        </section>
       ))}
     </div>
   );

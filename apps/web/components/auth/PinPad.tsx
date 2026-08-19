@@ -18,9 +18,9 @@ interface PinPadProps {
 
 // Raspon 50-100ms — brzo, opipljivo, bez primetnog kašnjenja pri brzom unosu.
 const PRESS_TRANSITION = "transition-[transform,box-shadow,background-color] duration-75 ease-out";
-const RAISED_SHADOW = "shadow-[0_3px_0_rgba(255,255,255,0.06),0_5px_10px_rgba(0,0,0,0.35)]";
-const KEY_BASE = `relative min-h-20 select-none rounded-xl border border-white/10 bg-white/[0.06] text-3xl font-semibold text-white ${RAISED_SHADOW} ${PRESS_TRANSITION} hover:bg-white/[0.1] active:translate-y-[2px] active:bg-white/[0.14] active:shadow-[0_1px_0_rgba(255,255,255,0.04),0_1px_3px_rgba(0,0,0,0.3)] disabled:opacity-40 disabled:active:translate-y-0 disabled:active:shadow-[0_3px_0_rgba(255,255,255,0.06),0_5px_10px_rgba(0,0,0,0.35)] disabled:active:bg-white/[0.06]`;
-const CONFIRM_BASE = `relative min-h-20 select-none rounded-xl border border-gold-dark/40 bg-gold text-3xl font-semibold text-white shadow-[0_3px_0_rgba(255,255,255,0.14),0_6px_14px_rgba(0,0,0,0.4)] ${PRESS_TRANSITION} hover:bg-gold-dark active:translate-y-[2px] active:bg-gold-dark active:shadow-[0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] disabled:opacity-40 disabled:active:translate-y-0`;
+const RAISED_SHADOW = "shadow-[0_3px_0_rgba(255,255,255,0.05),0_8px_18px_rgba(0,0,0,0.25)]";
+const KEY_BASE = `relative min-h-[72px] select-none rounded-lg border border-white/15 bg-white/[0.07] text-3xl font-semibold tabular-nums text-white ${RAISED_SHADOW} ${PRESS_TRANSITION} hover:border-white/25 hover:bg-white/[0.11] active:translate-y-[2px] active:bg-white/[0.14] active:shadow-[0_1px_0_rgba(255,255,255,0.04),0_1px_3px_rgba(0,0,0,0.3)] disabled:opacity-40 disabled:active:translate-y-0 disabled:active:shadow-[0_3px_0_rgba(255,255,255,0.06),0_5px_10px_rgba(0,0,0,0.35)] disabled:active:bg-white/[0.06]`;
+const CONFIRM_BASE = `relative min-h-[72px] select-none rounded-lg border border-cream-300/30 bg-gold text-3xl font-semibold text-white shadow-[0_3px_0_rgba(255,255,255,0.12),0_8px_18px_rgba(0,0,0,0.3)] ${PRESS_TRANSITION} hover:bg-gold-dark active:translate-y-[2px] active:bg-gold-dark active:shadow-[0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] disabled:opacity-40 disabled:active:translate-y-0`;
 
 // Programsko "utisnuto" stanje za pritisak sa fizičke tastature — :active
 // pseudoklasa ne reaguje na keydown, pa se isti vizuelni efekat primenjuje
@@ -93,8 +93,10 @@ export function PinPad({ value, onChange, onSubmit, disabled }: PinPadProps) {
   }, []);
 
   return (
-    <div className="w-full max-w-xs">
-      <div className="mb-6 flex justify-center gap-3" aria-live="polite" aria-label="Uneti PIN">
+    <div className="w-full max-w-[340px]">
+      <div className="mb-5 rounded-lg border border-white/10 bg-black/10 px-4 py-4">
+      <p className="mb-3 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-cream-300/55">Unesite PIN</p>
+      <div className="flex justify-center gap-3" aria-live="polite" aria-label="Uneti PIN">
         {Array.from({ length: MAX_PIN_LENGTH }).map((_, i) => {
           const filled = i < value.length;
           const isLatest = filled && i === value.length - 1;
@@ -107,6 +109,7 @@ export function PinPad({ value, onChange, onSubmit, disabled }: PinPadProps) {
             />
           );
         })}
+      </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -130,7 +133,7 @@ export function PinPad({ value, onChange, onSubmit, disabled }: PinPadProps) {
           style={pressedKey === "backspace" ? KEYBOARD_PRESS_STYLE : undefined}
           className={`${KEY_BASE} text-2xl text-white/80`}
         >
-          ←
+          <span aria-hidden="true">⌫</span>
         </button>
         <button
           type="button"
@@ -149,7 +152,7 @@ export function PinPad({ value, onChange, onSubmit, disabled }: PinPadProps) {
           style={pressedKey === "submit" ? KEYBOARD_PRESS_STYLE_CONFIRM : undefined}
           className={CONFIRM_BASE}
         >
-          ✓
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>
         </button>
       </div>
     </div>

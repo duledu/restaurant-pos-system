@@ -592,7 +592,7 @@ export function InventoryClient() {
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
         {lowStockCount > 0 && <Badge tone="danger">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
@@ -630,13 +630,13 @@ export function InventoryClient() {
                   const low = isLowStock(item);
                   const min = item.menuItem.minimumStock;
                   return (
-                    <tr key={item.id} className={low ? "bg-danger-soft/40" : "hover:bg-cream-200/60"}>
+                    <tr key={item.id} className={low ? "bg-danger-soft/40 shadow-[inset_3px_0_0_#B91C1C]" : "hover:bg-cream-200/60"}>
                       <td className="px-4 py-3">
-                        <span className="font-medium text-ink">{item.menuItem.name}</span>
+                        <span className="block font-semibold text-ink">{item.menuItem.name}</span>
                         {low && <Badge tone="danger">Niska zaliha</Badge>}
                       </td>
                       <td className="px-4 py-3 text-inkSoft">{item.location.name}</td>
-                      <td className="px-4 py-3 text-right font-mono tabular-nums font-semibold text-ink">
+                      <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${low ? "text-danger" : "text-ink"}`}>
                         {fmtQty(item.currentStock)} {item.unit}
                       </td>
                       <td className="px-4 py-3 text-right font-mono tabular-nums text-inkSoft">
@@ -648,14 +648,14 @@ export function InventoryClient() {
                         </Badge>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex justify-end gap-3 whitespace-nowrap text-xs font-medium">
-                          <button onClick={() => setModal({ type: "receive", item })} className="text-gold-dark hover:underline">
+                        <div className="flex justify-end gap-1.5 whitespace-nowrap text-xs font-semibold">
+                          <button onClick={() => setModal({ type: "receive", item })} className="rounded-md bg-gold-soft px-2.5 py-1.5 text-gold-dark hover:bg-gold/20">
                             Prijem
                           </button>
-                          <button onClick={() => setModal({ type: "adjust", item })} className="text-inkSoft hover:text-ink hover:underline">
+                          <button onClick={() => setModal({ type: "adjust", item })} className="rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
                             Korekcija
                           </button>
-                          <button onClick={() => setModal({ type: "movements", item })} className="text-gold-dark hover:underline">
+                          <button onClick={() => setModal({ type: "movements", item })} className="rounded-md px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">
                             Historija
                           </button>
                         </div>

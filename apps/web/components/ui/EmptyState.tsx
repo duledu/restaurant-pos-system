@@ -14,7 +14,8 @@ export function EmptyState({
 }) {
   return (
     <div className={`flex flex-col items-center justify-center gap-1.5 text-center animate-fade-in ${compact ? "py-8" : "py-16"}`}>
-      <p className={`font-medium text-ink/50 ${compact ? "text-xs" : "text-sm"}`}>{title}</p>
+      <span className="mb-2 flex h-9 w-9 items-center justify-center rounded-full border border-line bg-cream-200 text-gold" aria-hidden="true">—</span>
+      <p className={`font-semibold text-ink/70 ${compact ? "text-xs" : "text-sm"}`}>{title}</p>
       {description && <p className="max-w-sm text-xs text-inkSoft/80">{description}</p>}
       {action && <div className="mt-2">{action}</div>}
     </div>

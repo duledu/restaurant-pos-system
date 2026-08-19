@@ -467,13 +467,13 @@ export function OrderClient({ tableId }: { tableId: string }) {
   }
 
   return (
-    <div className="flex min-h-screen flex-col pb-40">
-      <div className="sticky top-0 z-20 border-b border-line bg-white p-3 shadow-card">
-        <button onClick={() => router.push("/waiter/tables")} className="text-sm font-medium text-gold-dark">
+    <div className="flex min-h-screen flex-col bg-cream-200 pb-52">
+      <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
+        <button onClick={() => router.push("/waiter/tables")} className="mb-1 text-xs font-semibold text-gold-dark">
           ← Stolovi
         </button>
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-lg font-bold tracking-tight text-ink">{order.table.label}</h1>
+          <div><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Aktivna porudžbina</p><h1 className="text-xl font-bold tracking-tight text-ink">{order.table.label}</h1></div>
           <div className="flex items-center gap-1">
             <QuickLockButton />
             <LogoutButton />
@@ -481,24 +481,24 @@ export function OrderClient({ tableId }: { tableId: string }) {
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-3xl">
+      <div className="mx-auto w-full max-w-5xl">
         {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
 
         <input
-          className="m-3 rounded-md border border-line px-4 py-3 text-base focus:border-gold focus:outline-none"
+          className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
           placeholder="Pretraga menija…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
 
         {!search && (
-          <div className="flex gap-2 overflow-x-auto px-3 pb-2">
+          <div className="sticky top-[73px] z-10 flex gap-2 overflow-x-auto border-y border-line/70 bg-cream-200/95 px-3 py-2 backdrop-blur">
             {categories.map((c) => (
               <button
                 key={c.id}
                 onClick={() => setActiveCategoryId(c.id)}
-                className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
-                  activeCategoryId === c.id ? "bg-gold text-white shadow-sm" : "border border-line bg-white text-ink/75 hover:bg-cream-300/40"
+                className={`min-h-10 whitespace-nowrap rounded-md px-4 py-2 text-sm font-semibold transition-all ${
+                  activeCategoryId === c.id ? "bg-graphite text-white shadow-sm" : "border border-line bg-white text-ink/75 hover:border-gold/50"
                 }`}
               >
                 {c.name}
@@ -507,16 +507,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
         </div>
       )}
 
-        <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
           {visibleItems.map((item) => (
             <button
               key={item.id}
               onClick={() => addItem(item.id)}
               disabled={cartBusy}
-              className="rounded-md border border-line bg-white p-4 text-left shadow-sm transition-all active:scale-95 disabled:opacity-60 sm:hover:-translate-y-0.5 sm:hover:border-gold/50 sm:hover:shadow-card"
+              className="flex min-h-[104px] flex-col justify-between rounded-lg border border-line bg-white p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 sm:hover:border-gold/60 sm:hover:shadow-card"
             >
-              <div className="font-medium text-ink">{item.name}</div>
-              <div className="mt-0.5 text-sm tabular-nums text-ink/65">{Number(item.price).toFixed(2)} RSD</div>
+              <div className="font-semibold leading-snug text-ink">{item.name}</div>
+              <div className="mt-3 text-base font-bold tabular-nums text-gold-dark">{Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span></div>
             </button>
           ))}
           {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
@@ -524,11 +524,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
       </div>
 
       {/* Sticky pregled porudžbine */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-elevated">
-        <div className="mx-auto max-h-40 w-full max-w-3xl overflow-y-auto px-3 py-2">
+      <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{order.items.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        <div className="mx-auto max-h-36 w-full max-w-5xl overflow-y-auto px-3 py-2">
           {order.items.length === 0 && <div className="py-2 text-center text-sm text-ink/55">Nema stavki još.</div>}
           {order.items.map((item) => (
-            <div key={item.id} className="flex items-center gap-2 py-1.5 text-sm">
+            <div key={item.id} className="flex items-center gap-2 border-b border-line/50 py-2 text-sm last:border-0">
               <span className="min-w-0 flex-1 truncate text-ink" title={item.name}>
                 {item.name}
               </span>
@@ -538,7 +539,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   onClick={() => changeQuantity(item, item.quantity - 1)}
                   disabled={cartBusy}
                   aria-label={`Umanji količinu — ${item.name}`}
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line text-base font-semibold text-ink disabled:opacity-40"
+                  className="flex h-9 w-9 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                 >
                   −
                 </button>
@@ -548,7 +549,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   onClick={() => changeQuantity(item, item.quantity + 1)}
                   disabled={cartBusy || item.quantity >= 50}
                   aria-label={`Povećaj količinu — ${item.name}`}
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line text-base font-semibold text-ink disabled:opacity-40"
+                  className="flex h-9 w-9 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                 >
                   +
                 </button>
@@ -564,16 +565,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
             </div>
           ))}
         </div>
-        <div className="mx-auto flex w-full max-w-3xl items-center justify-between border-t border-line px-3 py-2">
-          <span className="text-base font-semibold text-ink">
-            Ukupno: <span className="tabular-nums">{total.toFixed(2)} RSD</span>
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-t border-line px-3 py-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
+          <span className="text-xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs text-inkSoft">RSD</span>
           </span>
         </div>
-        <div className="mx-auto w-full max-w-3xl">
+        <div className="mx-auto w-full max-w-5xl px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
           <button
             onClick={submit}
             disabled={submitting || order.items.length === 0}
-            className="w-full bg-gold py-4 text-lg font-semibold text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
+            className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
           >
             {submitting ? "Slanje…" : "Pošalji porudžbinu"}
           </button>

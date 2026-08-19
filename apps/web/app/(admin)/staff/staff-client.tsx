@@ -579,16 +579,17 @@ export function StaffClient() {
           {/* ── Mobile: stacked cards ─────────────────────────────────────── */}
           <div className="space-y-3 md:hidden">
             {staff.map((emp) => (
-              <Card key={emp.id} className="p-4">
+              <Card key={emp.id} className="overflow-hidden border-l-[3px] border-l-gold p-4">
                 <div className="flex items-start justify-between gap-2">
-                  <div>
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-graphite text-sm font-bold text-white">{emp.firstName[0]}{emp.lastName[0]}</span><div>
                     <p className="font-semibold text-ink">
                       {emp.firstName} {emp.lastName}
                     </p>
                     <p className="mt-0.5 text-xs text-inkSoft">
                       {emp.roles.map((r) => ROLE_LABEL[r.role.name] ?? r.role.name).join(", ") || "—"}
                     </p>
-                  </div>
+                  </div></div>
                   <Badge tone={STATUS_TONE[emp.status]}>{STATUS_LABEL[emp.status]}</Badge>
                 </div>
 
@@ -668,7 +669,7 @@ export function StaffClient() {
                 {staff.map((emp) => (
                   <tr key={emp.id} className="border-b border-line last:border-0">
                     <td className="px-4 py-3 font-medium text-ink">
-                      {emp.firstName} {emp.lastName}
+                      <div className="flex items-center gap-2.5"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-graphite text-[10px] font-bold text-white">{emp.firstName[0]}{emp.lastName[0]}</span><span className="font-semibold">{emp.firstName} {emp.lastName}</span></div>
                     </td>
                     <td className="px-4 py-3 text-inkSoft">
                       {emp.username ? (

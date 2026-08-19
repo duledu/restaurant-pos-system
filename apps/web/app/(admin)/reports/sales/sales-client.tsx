@@ -70,9 +70,9 @@ export function SalesClient() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-line pb-5">
         <div>
-          <h1 className="text-2xl font-bold text-ink">Izveštaj o prodaji</h1>
+          <p className="mb-1 text-[10px] font-bold uppercase tracking-[.18em] text-gold">Finansijski pregled</p><h1 className="text-2xl font-bold tracking-tight text-ink sm:text-[28px]">Izveštaj o prodaji</h1>
           <p className="mt-1 text-sm text-inkSoft">Ukupna prodaja, gotovina/kartica i prodaja po zaposlenom</p>
         </div>
         <ReportFilters value={filters} onChange={setFilters} reportType="sales" />
@@ -137,7 +137,7 @@ export function SalesClient() {
                     <tr key={row.employeeId} className="border-b border-line last:border-0">
                       <td className="px-4 py-3 text-ink">{row.employeeName}</td>
                       <td className="px-4 py-3 text-inkSoft">{row.orders}</td>
-                      <td className="px-4 py-3 text-right font-medium text-ink">{formatMoney(row.sales, summary?.currency)}</td>
+                      <td className="px-4 py-3 text-right font-bold tabular-nums text-ink">{formatMoney(row.sales, summary?.currency)}</td>
                     </tr>
                   ))}
                 </tbody>

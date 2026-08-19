@@ -157,14 +157,14 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   }, [pendingPrint]);
 
   return (
-    <div className="min-h-screen p-4">
-      <div className="mb-4 flex items-center justify-between">
+    <div className={`min-h-screen p-3 sm:p-5 ${station === "BAR" ? "bg-[#071b2b]" : "bg-graphite-900"}`}>
+      <div className="mb-5 flex items-center justify-between border-b border-white/10 pb-4">
         <div className="flex items-center gap-3">
           <AppLogo variant="mark" theme="dark" size="sm" />
-          <h1 className="text-2xl font-semibold text-cream-100">{title}</h1>
+          <div><p className={`text-[10px] font-bold uppercase tracking-[.2em] ${station === "BAR" ? "text-sky-300/70" : "text-amber-300/70"}`}>TableCore · produkcija</p><h1 className="text-2xl font-bold tracking-tight text-cream-100">{title}</h1></div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-cream-300/70">{orders.length} aktivnih porudžbina</span>
+          <span className="rounded-md border border-white/10 bg-white/[.05] px-3 py-2 text-xs font-semibold tabular-nums text-cream-300/80">{orders.length} aktivnih</span>
           <LogoutButton theme="dark" />
         </div>
       </div>
@@ -179,24 +179,24 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           <p className="text-sm text-cream-300/70">Nove porudžbine će se automatski pojaviti ovde.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {orders.map((order) => {
             const waitMin = minutesSince(order.submittedAt);
             const isLate = waitMin >= 12;
             return (
               <div
                 key={order.orderId}
-                className={`rounded-lg border-2 bg-graphite-700 p-4 shadow-elevated ${
+                className={`overflow-hidden rounded-lg border bg-graphite-700 shadow-[0_12px_28px_rgba(0,0,0,.22)] ${
                   isLate ? "border-warn" : "border-graphite-700"
                 }`}
               >
-                <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center justify-between border-b border-white/10 bg-black/10 px-4 py-3">
                   <div>
-                    <div className="text-lg font-bold text-cream-100">{order.tableLabel}</div>
-                    <div className="text-xs text-cream-300/70">{order.waiterName}</div>
+                    <div className="text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
+                    <div className="mt-0.5 text-xs font-medium text-cream-300/70">Konobar · {order.waiterName}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/70"}`}>
+                    <span className={`rounded-md px-2.5 py-1 text-xs font-bold tabular-nums ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/80"}`}>
                       {waitMin} min
                     </span>
                     <button
@@ -211,12 +211,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                   </div>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-2 p-3">
                   {order.items.map((item) => (
-                    <div key={item.id} className="rounded-sm bg-graphite-800 p-3">
+                    <div key={item.id} className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="font-medium text-cream-100">
+                          <div className="text-base font-semibold leading-snug text-cream-100">
                             {item.quantity}× {item.name}
                           </div>
                           {item.note && (
@@ -232,7 +232,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                       {STATUS_ACTION_LABEL[item.status] && (
                         <button
                           onClick={() => advance(order.orderId, item.id, item.status)}
-                          className="mt-2 w-full rounded-sm bg-gold py-2 text-sm font-semibold text-white active:scale-95 hover:bg-gold-dark transition-colors"
+                          className="mt-3 min-h-11 w-full rounded-md bg-gold py-2 text-sm font-bold text-white transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
                         >
                           {STATUS_ACTION_LABEL[item.status]}
                         </button>

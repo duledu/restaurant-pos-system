@@ -29,7 +29,7 @@ function CloseIcon() {
 function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onClose?: () => void }) {
   return (
     <>
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-graphite-700 px-4">
+      <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-white/10 px-5">
         <Link href="/dashboard" aria-label={`${APP_NAME} — Kontrolna tabla`} onClick={onNavigate}>
           <AppLogo theme="dark" size="sm" variant="full" />
         </Link>
@@ -45,12 +45,16 @@ function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onCl
         )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto py-4" onClick={onNavigate}>
+      <nav className="flex-1 overflow-y-auto py-5" onClick={onNavigate}>
         <AdminNav />
       </nav>
 
-      <div className="shrink-0 border-t border-graphite-700 px-4 py-3">
-        <div className="flex items-center justify-between gap-2">
+      <div className="shrink-0 border-t border-white/10 bg-graphite-900/30 px-4 py-4">
+        <div className="mb-2 px-1">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cream-300/40">Operativni sistem</p>
+          <p className="mt-0.5 text-xs text-white/65">Bezbedna administratorska sesija</p>
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-2">
           <p className="text-[10px] text-cream-300/30 tracking-wide">{APP_NAME} · v0.1</p>
           <div className="flex items-center gap-1">
             <QuickLockButton theme="dark" />
@@ -75,19 +79,19 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen">
       {/* ── Desktop sidebar (unchanged) ─────────────────────────────────── */}
-      <aside className="no-print fixed inset-y-0 left-0 z-20 hidden w-60 flex-col bg-graphite md:flex">
+      <aside className="no-print fixed inset-y-0 left-0 z-20 hidden w-64 flex-col border-r border-white/10 bg-gradient-to-b from-graphite to-graphite-900 shadow-[4px_0_24px_rgba(6,17,30,.08)] md:flex">
         <SidebarContent />
       </aside>
 
       {/* ── Mobile top bar ───────────────────────────────────────────────── */}
-      <header className="no-print sticky top-0 z-30 flex h-14 w-full shrink-0 items-center justify-between border-b border-line bg-white px-4 md:hidden">
+      <header className="no-print sticky top-0 z-30 flex h-16 w-full shrink-0 items-center justify-between border-b border-line bg-white/95 px-4 shadow-sm backdrop-blur md:hidden">
         <Link href="/dashboard" aria-label={`${APP_NAME} — Kontrolna tabla`}>
           <AppLogo size="sm" variant="full" />
         </Link>
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
-          className="flex h-9 w-9 items-center justify-center rounded-md text-graphite hover:bg-ink/[0.05]"
+          className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-white text-graphite shadow-sm active:translate-y-px"
           aria-label="Otvori meni"
           aria-expanded={drawerOpen}
         >
@@ -104,15 +108,15 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             onClick={() => setDrawerOpen(false)}
             className="no-print fixed inset-0 z-40 bg-graphite-900/50"
           />
-          <div className="no-print fixed left-0 top-0 z-50 flex h-[100dvh] w-[82vw] max-w-72 flex-col bg-graphite shadow-elevated">
+          <div className="no-print fixed left-0 top-0 z-50 flex h-[100dvh] w-[86vw] max-w-80 animate-slide-up flex-col bg-graphite shadow-elevated">
             <SidebarContent onNavigate={() => setDrawerOpen(false)} onClose={() => setDrawerOpen(false)} />
           </div>
         </div>
       )}
 
       {/* ── Main content ─────────────────────────────────────────────────── */}
-      <div className="flex min-w-0 flex-1 flex-col md:pl-60 print:pl-0">
-        <main className="flex-1 overflow-x-hidden p-4 md:p-6 print:p-0">{children}</main>
+      <div className="flex min-w-0 flex-1 flex-col md:pl-64 print:pl-0">
+        <main className="flex-1 overflow-x-hidden p-4 sm:p-5 md:p-7 lg:p-8 print:p-0">{children}</main>
       </div>
     </div>
   );

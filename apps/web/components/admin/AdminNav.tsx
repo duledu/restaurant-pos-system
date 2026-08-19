@@ -76,21 +76,22 @@ export function AdminNav() {
   const pathname = usePathname();
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {NAV_SECTIONS.map((section) => (
         <div key={section.title}>
-          <p className="mb-1 px-4 text-[10px] font-semibold uppercase tracking-widest text-white/40">{section.title}</p>
-          <ul className="space-y-0.5 px-2">
+          <p className="mb-2 px-5 text-[10px] font-bold uppercase tracking-[0.18em] text-cream-300/40">{section.title}</p>
+          <ul className="space-y-1 px-3">
             {section.items.map(({ href, label, icon: itemIcon }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`);
               return (
                 <li key={href}>
                   <Link
                     href={href}
-                    className={`flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                      active ? "bg-gold/20 text-white" : "text-white/70 hover:bg-white/[0.06] hover:text-white"
+                    className={`relative flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all ${
+                      active ? "bg-white/[0.11] text-white shadow-inner" : "text-white/65 hover:bg-white/[0.06] hover:text-white"
                     }`}
                   >
+                    {active && <span className="absolute -left-3 h-6 w-0.5 rounded-r bg-cream-300" aria-hidden="true" />}
                     <span className={active ? "text-gold" : ""}>{itemIcon}</span>
                     {label}
                   </Link>

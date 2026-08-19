@@ -6,8 +6,8 @@ type Variant = "primary" | "secondary" | "ghost" | "danger" | "dangerGhost";
 type Size = "sm" | "md" | "lg";
 
 const VARIANT_STYLES: Record<Variant, string> = {
-  primary: "bg-gold text-white hover:bg-gold-dark active:bg-graphite",
-  secondary: "bg-white text-ink border border-line hover:bg-cream-300/60",
+  primary: "border border-gold bg-gold text-white shadow-sm hover:border-gold-dark hover:bg-gold-dark active:translate-y-px active:bg-graphite",
+  secondary: "bg-white text-ink border border-line shadow-sm hover:border-gold/50 hover:bg-cream-200 active:translate-y-px",
   ghost: "text-inkSoft hover:bg-ink/5 hover:text-ink",
   danger: "bg-danger text-white hover:opacity-90",
   // Nizak-dominantnost tretman za rizične-ali-ne-primarne akcije (npr.
@@ -17,9 +17,9 @@ const VARIANT_STYLES: Record<Variant, string> = {
 };
 
 const SIZE_STYLES: Record<Size, string> = {
-  sm: "px-3 py-1.5 text-xs",
-  md: "px-4 py-2.5 text-sm",
-  lg: "px-6 py-4 text-base",
+  sm: "min-h-9 px-3 py-1.5 text-xs",
+  md: "min-h-10 px-4 py-2 text-sm",
+  lg: "min-h-12 px-6 py-3 text-base",
 };
 
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -34,7 +34,7 @@ export const Button = forwardRef<HTMLButtonElement, Props>(
       <button
         ref={ref}
         disabled={disabled || loading}
-        className={`inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${VARIANT_STYLES[variant]} ${SIZE_STYLES[size]} ${className}`}
+        className={`inline-flex items-center justify-center gap-2 rounded-md font-semibold transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${VARIANT_STYLES[variant]} ${SIZE_STYLES[size]} ${className}`}
         {...rest}
       >
         {loading && (

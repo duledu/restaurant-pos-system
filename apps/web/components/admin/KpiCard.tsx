@@ -20,9 +20,10 @@ export function KpiCard({
   changeLabel?: string;
 }) {
   return (
-    <Card className={`p-5 ${accent ? "border-gold/40 bg-gold/[0.04]" : ""}`}>
+    <Card className={`relative overflow-hidden p-5 ${accent ? "border-gold/50 bg-gradient-to-br from-white to-gold-soft/40" : ""}`}>
+      {accent && <span className="absolute inset-y-0 left-0 w-1 bg-gold" aria-hidden="true" />}
       <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-inkSoft">{label}</p>
-      <p className={`text-2xl font-bold tabular-nums leading-tight ${accent ? "text-gold-dark" : "text-ink"} sm:text-3xl`}>
+      <p className={`text-2xl font-bold tabular-nums leading-tight tracking-[-0.035em] ${accent ? "text-ink" : "text-ink"} sm:text-3xl`}>
         {value}
       </p>
       {sub && <p className="mt-1 text-xs text-inkSoft">{sub}</p>}
