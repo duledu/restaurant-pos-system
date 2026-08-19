@@ -360,6 +360,172 @@ export async function validateAndDecrementInventoryInTx(
   }
 }
 
+// ─── Bulk opening-stock initialization / reset (go-live workflow) ─────────────
+
+export interface OpeningStockLine {
+  menuItemId: string;
+  quantity: number; // target ABSOLUTE stock (not a delta), must be >= 0
+}
+
+export interface OpeningStockResult {
+  itemsAffected: number; // lines whose stock actually changed (movement created)
+  itemsUnchanged: number; // lines already at the requested quantity — no movement
+  results: Array<{ menuItemId: string; menuItemName: string; before: number; after: number; movementId: string | null }>;
+}
+
+/**
+ * Bulk-reconciles current stock to a new target quantity per item, in ONE
+ * atomic transaction — the "Postavi početno stanje zaliha" go-live action.
+ * Gated by 'inventory.opening_stock' (OWNER/ADMIN only — deliberately
+ * stricter than 'inventory.manage', which also covers MANAGER for routine
+ * receive/adjust/write-off) because this can rewrite every tracked item's
+ * stock in a single call.
+ *
+ * This NEVER deletes InventoryMovement history — it records one auditable
+ * OPENING_STOCK movement per changed item (quantityBefore -> quantityAfter,
+ * with the true delta), the same ledger-safe pattern already used by
+ * receiveStock/adjustStock/writeOffStock above. A line already at the
+ * requested quantity produces no movement (no-op noise avoided) but still
+ * ensures trackStock=true, so listing "all tracked items" stays consistent.
+ */
+export async function bulkSetOpeningStock(
+  ctx: AuthContext,
+  input: { locationId: string; lines: OpeningStockLine[]; reason?: string }
+): Promise<OpeningStockResult> {
+  requirePermission(ctx, "inventory.opening_stock");
+
+  if (input.lines.length === 0) throw new Error("Nema stavki za postavljanje početnog stanja");
+  for (const line of input.lines) {
+    if (line.quantity < 0) throw new Error("Količina ne može biti negativna");
+  }
+
+  const location = await prisma.location.findFirst({
+    where: { id: input.locationId, restaurantId: ctx.restaurantId },
+  });
+  if (!location) throw new Error("Lokacija nije pronađena");
+
+  const menuItemIds = input.lines.map((l) => l.menuItemId);
+  const menuItems = await prisma.menuItem.findMany({
+    where: { id: { in: menuItemIds }, restaurantId: ctx.restaurantId },
+    select: { id: true, name: true, unit: true },
+  });
+  const menuItemById = new Map(menuItems.map((m) => [m.id, m]));
+  const missing = menuItemIds.filter((id) => !menuItemById.has(id));
+  if (missing.length > 0) {
+    throw new Error(`Artikli ne pripadaju ovom restoranu ili ne postoje: ${missing.join(", ")}`);
+  }
+
+  const reason = input.reason?.trim() || "Postavljanje početnog stanja zaliha";
+
+  const results = await prisma.$transaction(
+    async (tx) => {
+      const out: OpeningStockResult["results"] = [];
+      for (const line of input.lines) {
+        const menuItem = menuItemById.get(line.menuItemId)!;
+        const existing = await tx.inventoryItem.findUnique({
+          where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: line.menuItemId } },
+        });
+
+        const before = existing ? Number(existing.currentStock) : 0;
+        const after = line.quantity;
+        const delta = after - before;
+
+        let inventoryItemId: string;
+        if (existing) {
+          inventoryItemId = existing.id;
+          if (delta !== 0) {
+            await tx.inventoryItem.update({ where: { id: existing.id }, data: { currentStock: after } });
+          }
+        } else {
+          const created = await tx.inventoryItem.create({
+            data: {
+              restaurantId: ctx.restaurantId,
+              locationId: input.locationId,
+              menuItemId: line.menuItemId,
+              currentStock: after,
+              unit: menuItem.unit ?? "kom",
+            },
+          });
+          inventoryItemId = created.id;
+        }
+
+        let movementId: string | null = null;
+        if (delta !== 0) {
+          const mov = await tx.inventoryMovement.create({
+            data: {
+              restaurantId: ctx.restaurantId,
+              locationId: input.locationId,
+              menuItemId: line.menuItemId,
+              inventoryItemId,
+              type: "OPENING_STOCK",
+              quantityDelta: delta,
+              quantityBefore: before,
+              quantityAfter: after,
+              employeeId: ctx.employeeId,
+              reason,
+            },
+          });
+          movementId = mov.id;
+        }
+
+        await tx.menuItem.update({ where: { id: line.menuItemId }, data: { trackStock: true } });
+
+        out.push({ menuItemId: line.menuItemId, menuItemName: menuItem.name, before, after, movementId });
+      }
+      return out;
+    },
+    { timeout: 30_000, maxWait: 10_000 } // bulk operations can touch 100+ items — default 5s timeout is too tight
+  );
+
+  const changed = results.filter((r) => r.movementId !== null);
+
+  await recordAuditEntry(ctx, {
+    entityType: "InventoryItem",
+    entityId: input.locationId,
+    action: "inventory.opening_stock_set",
+    newValue: {
+      locationId: input.locationId,
+      reason,
+      itemsAffected: changed.length,
+      itemsUnchanged: results.length - changed.length,
+      changes: changed.map((r) => ({ menuItemId: r.menuItemId, menuItemName: r.menuItemName, before: r.before, after: r.after })),
+    },
+  });
+
+  return { itemsAffected: changed.length, itemsUnchanged: results.length - changed.length, results };
+}
+
+/**
+ * Convenience wrapper: reconciles every CURRENTLY TRACKED item at a location
+ * to zero — the "Postavi sve na 0" go-live action. Reuses
+ * bulkSetOpeningStock (same atomicity, same OPENING_STOCK ledger movement,
+ * same audit entry) rather than a separate code path. Never deletes
+ * InventoryItem/InventoryMovement rows — only reconciles currentStock to 0
+ * with an auditable movement, exactly like any other opening-stock change.
+ */
+export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId: string }): Promise<OpeningStockResult> {
+  requirePermission(ctx, "inventory.opening_stock");
+
+  const location = await prisma.location.findFirst({
+    where: { id: input.locationId, restaurantId: ctx.restaurantId },
+  });
+  if (!location) throw new Error("Lokacija nije pronađena");
+
+  const tracked = await prisma.inventoryItem.findMany({
+    where: { restaurantId: ctx.restaurantId, locationId: input.locationId },
+    select: { menuItemId: true },
+  });
+  if (tracked.length === 0) {
+    return { itemsAffected: 0, itemsUnchanged: 0, results: [] };
+  }
+
+  return bulkSetOpeningStock(ctx, {
+    locationId: input.locationId,
+    lines: tracked.map((t) => ({ menuItemId: t.menuItemId, quantity: 0 })),
+    reason: "Resetovanje zaliha na 0 pre unosa stvarnog početnog stanja",
+  });
+}
+
 // ─── Standalone sale decrement (non-billing contexts) ─────────────────────────
 
 /**

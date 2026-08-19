@@ -22,6 +22,16 @@ interface Shift {
   status: string;
 }
 
+function MoreIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 const STATUS_STYLE: Record<Table["status"], string> = {
   FREE: "bg-white border-line text-ink hover:border-gold/60",
   OCCUPIED: "bg-graphite text-white border-gold",
@@ -53,6 +63,7 @@ export function PosClient() {
   const [error, setError] = useState<string | null>(null);
   const [openingCash, setOpeningCash] = useState("");
   const [opening, setOpening] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,8 +146,9 @@ export function PosClient() {
   }
 
   return (
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between">
+    <div className="p-3 sm:p-4">
+      {/* ── Desktop / tablet header (unchanged) ─────────────────────────── */}
+      <div className="mb-4 hidden items-center justify-between sm:flex">
         <div className="flex items-center gap-3">
           <AppLogo variant="mark" size="sm" />
           <div>
@@ -155,16 +167,68 @@ export function PosClient() {
           <LogoutButton />
         </div>
       </div>
+
+      {/* ── Mobile header ────────────────────────────────────────────────── */}
+      <div className="relative mb-4 sm:hidden">
+        <div className="flex items-center justify-between">
+          <AppLogo variant="mark" size="sm" />
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            className="flex h-9 w-9 items-center justify-center rounded-md text-ink/70 hover:bg-ink/[0.05]"
+            aria-label="Više opcija"
+            aria-expanded={menuOpen}
+          >
+            <MoreIcon />
+          </button>
+        </div>
+        <h1 className="mt-2 text-xl font-semibold text-ink">Stolovi</h1>
+        {employeeName && <p className="text-sm text-inkSoft">{employeeName}</p>}
+        <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-gold-soft px-2.5 py-1 text-xs font-medium text-gold-dark">
+          <span className="h-1.5 w-1.5 rounded-full bg-gold-dark" aria-hidden="true" />
+          Smena aktivna
+        </div>
+
+        {menuOpen && (
+          <>
+            <button
+              type="button"
+              aria-label="Zatvori meni"
+              onClick={() => setMenuOpen(false)}
+              className="fixed inset-0 z-40 bg-transparent"
+            />
+            <div className="absolute right-0 top-11 z-50 w-56 overflow-hidden rounded-md border border-line bg-white shadow-elevated">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  router.push("/waiter/shift");
+                }}
+                className="block w-full px-4 py-3 text-left text-sm font-medium text-ink hover:bg-ink/[0.04]"
+              >
+                Zatvori smenu
+              </button>
+              <div className="border-t border-line px-2 py-1">
+                <QuickLockButton />
+              </div>
+              <div className="border-t border-line px-2 py-1">
+                <LogoutButton />
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
       {error && <div className="mb-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
       {floors.map((floor) => (
         <div key={floor.id} className="mb-6">
           <h2 className="mb-2 text-sm font-medium text-ink/70">{floor.name}</h2>
-          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
             {floor.tables.map((table) => (
               <button
                 key={table.id}
                 onClick={() => selectTable(table.id)}
-                className={`flex aspect-square flex-col items-center justify-center rounded-md border-2 text-center shadow-sm active:scale-95 ${STATUS_STYLE[table.status]}`}
+                className={`flex min-h-[92px] flex-col items-center justify-center gap-1 rounded-lg border-2 p-3 text-center shadow-sm active:scale-95 ${STATUS_STYLE[table.status]}`}
               >
                 <span className="text-lg font-bold">{table.label}</span>
                 <span className="text-xs opacity-80">{STATUS_LABEL[table.status]}</span>

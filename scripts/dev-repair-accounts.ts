@@ -102,6 +102,33 @@ async function main() {
     console.log(`✓ Lokacija pronađena: ${location.name}`);
   }
 
+  // 3b. Ensure at least one floor + tables exist for this location — the
+  // original one-shot seed.ts always created "Glavna sala" + 10 tables, but
+  // this repair script previously did not, so a restaurant repaired by this
+  // script alone ended up with zero floors/tables (waiter sees an empty
+  // table grid even though everything else — auth/shift/location — is
+  // correct). Idempotent: only creates when none exist yet, never touches
+  // an existing floor/table (so real dev table edits are never overwritten).
+  let floor = await prisma.floor.findFirst({
+    where: { restaurantId: restaurant.id, locationId: location.id },
+  });
+  if (!floor) {
+    floor = await prisma.floor.create({
+      data: { restaurantId: restaurant.id, locationId: location.id, name: "Glavna sala" },
+    });
+    await prisma.restaurantTable.createMany({
+      data: Array.from({ length: 10 }, (_, i) => ({
+        floorId: floor!.id,
+        label: `Sto ${i + 1}`,
+        capacity: 4,
+      })),
+    });
+    console.log(`✓ Sala kreirana: ${floor.name} (10 stolova)`);
+  } else {
+    const tableCount = await prisma.restaurantTable.count({ where: { floorId: floor.id } });
+    console.log(`✓ Sala pronađena: ${floor.name} (${tableCount} stolova)`);
+  }
+
   // 4. Upsert permissions
   const permMap: Record<string, string> = {};
   for (const p of PERMISSIONS) {

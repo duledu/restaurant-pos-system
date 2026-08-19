@@ -275,6 +275,264 @@ function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   );
 }
 
+// ─── Go-live: bulk opening-stock initialization / reset ───────────────────────
+//
+// OWNER/ADMIN only (server-enforced via 'inventory.opening_stock' — hiding
+// these buttons for other roles is UX only, not the security boundary).
+// Two-step confirmation by design: this can rewrite every tracked item's
+// stock in one call, so a single accidental click must not be enough.
+
+interface OpeningStockResult {
+  itemsAffected: number;
+  itemsUnchanged: number;
+  results: Array<{ menuItemId: string; menuItemName: string; before: number; after: number; movementId: string | null }>;
+}
+
+function OpeningStockModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [menuItems, setMenuItems] = useState<MenuItemOption[]>([]);
+  const [locations, setLocations] = useState<LocationOption[]>([]);
+  const [locationId, setLocationId] = useState("");
+  const [quantities, setQuantities] = useState<Record<string, string>>({});
+  const [fillValue, setFillValue] = useState("30");
+  const [search, setSearch] = useState("");
+  const [step, setStep] = useState<"edit" | "confirm">("edit");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<OpeningStockResult | null>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/menu/items").then(r => r.json()).then(j => setMenuItems(j.items ?? []));
+    fetch("/api/admin/locations").then(r => r.json()).then(j => {
+      const locs: LocationOption[] = j.locations ?? [];
+      setLocations(locs);
+      if (locs.length > 0) setLocationId(locs[0].id);
+    });
+  }, []);
+
+  function fillEmpty() {
+    const v = fillValue.trim();
+    if (v === "" || isNaN(Number(v)) || Number(v) < 0) return;
+    setQuantities(prev => {
+      const next = { ...prev };
+      for (const m of menuItems) {
+        if (next[m.id] === undefined || next[m.id] === "") next[m.id] = v;
+      }
+      return next;
+    });
+  }
+
+  const filteredItems = menuItems.filter(m => m.name.toLowerCase().includes(search.toLowerCase()));
+  const lines = menuItems
+    .filter(m => quantities[m.id] !== undefined && quantities[m.id] !== "" && !isNaN(Number(quantities[m.id])))
+    .map(m => ({ menuItemId: m.id, menuItemName: m.name, quantity: Number(quantities[m.id]) }));
+
+  function reviewStep() {
+    if (!locationId) { setErr("Izaberite lokaciju"); return; }
+    if (lines.length === 0) { setErr("Unesite bar jednu količinu"); return; }
+    if (lines.some(l => l.quantity < 0)) { setErr("Količina ne može biti negativna"); return; }
+    setErr("");
+    setStep("confirm");
+  }
+
+  async function apply() {
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch("/api/admin/inventory/opening-stock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locationId,
+          lines: lines.map(l => ({ menuItemId: l.menuItemId, quantity: l.quantity })),
+          reason: "Postavljanje početnog stanja zaliha (go-live)",
+        }),
+      });
+      const j = await res.json();
+      if (!res.ok) { setErr(j.error ?? "Greška"); return; }
+      setResult(j);
+    } finally { setLoading(false); }
+  }
+
+  if (result) {
+    return (
+      <Modal title="Početno stanje postavljeno" onClose={() => { onClose(); onDone(); }}>
+        <p className="mb-3 text-sm text-gray-700">
+          Izmenjeno: <strong>{result.itemsAffected}</strong> artikala. Nepromenjeno (već na traženoj količini): {result.itemsUnchanged}.
+        </p>
+        <div className="mb-4 max-h-60 overflow-y-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead><tr className="border-b bg-gray-50 text-left text-gray-500"><th className="px-2 py-1">Artikal</th><th className="px-2 py-1 text-right">Pre</th><th className="px-2 py-1 text-right">Posle</th></tr></thead>
+            <tbody>
+              {result.results.filter(r => r.movementId).map(r => (
+                <tr key={r.menuItemId} className="border-b border-gray-50">
+                  <td className="px-2 py-1">{r.menuItemName}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtQty(r.before)}</td>
+                  <td className="px-2 py-1 text-right font-mono font-semibold">{fmtQty(r.after)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <button onClick={() => { onClose(); onDone(); }} className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600">
+          Zatvori
+        </button>
+      </Modal>
+    );
+  }
+
+  if (step === "confirm") {
+    const locationName = locations.find(l => l.id === locationId)?.name ?? "";
+    return (
+      <Modal title="Potvrda — Postavi početno stanje zaliha" onClose={onClose}>
+        <div className="mb-4 rounded-lg bg-amber-50 px-3 py-3 text-sm text-amber-900">
+          Ova akcija je namenjena početnom unosu stvarnog stanja zaliha pre početka rada restorana.
+          Neće obrisati prodaju, porudžbine, račune ili istoriju poslovanja. Svaka promena se beleži
+          kao trajno kretanje zalihe (tip &quot;Početno stanje&quot;) — ništa se tiho ne prepisuje.
+        </div>
+        <p className="mb-2 text-sm text-gray-700">
+          Lokacija: <strong>{locationName}</strong> &middot; Artikala za izmenu: <strong>{lines.length}</strong>
+        </p>
+        <div className="mb-4 max-h-60 overflow-y-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead><tr className="border-b bg-gray-50 text-left text-gray-500"><th className="px-2 py-1">Artikal</th><th className="px-2 py-1 text-right">Nova količina</th></tr></thead>
+            <tbody>
+              {lines.map(l => (
+                <tr key={l.menuItemId} className="border-b border-gray-50">
+                  <td className="px-2 py-1">{l.menuItemName}</td>
+                  <td className="px-2 py-1 text-right font-mono font-semibold">{fmtQty(l.quantity)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {err && <p className="mb-3 text-sm text-red-600">{err}</p>}
+        <div className="flex gap-2">
+          <button onClick={() => setStep("edit")} className="flex-1 rounded-lg border py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+            Nazad
+          </button>
+          <button onClick={apply} disabled={loading} className="flex-1 rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50">
+            {loading ? "Primena..." : "Potvrdi i primeni"}
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Postavi početno stanje zaliha" onClose={onClose}>
+      <p className="mb-3 text-sm text-gray-500">
+        Unesite stvarno stanje za svaki artikal pre nego što restoran počne da radi. Ovo ne briše prodaju ni istoriju.
+      </p>
+      <label className="mb-1 block text-sm font-medium">Lokacija</label>
+      <select value={locationId} onChange={e => setLocationId(e.target.value)}
+        className="mb-3 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
+        {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+      </select>
+
+      <div className="mb-3 flex gap-2">
+        <input type="number" min={0} step="any" value={fillValue} onChange={e => setFillValue(e.target.value)}
+          className="w-24 rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+        <button onClick={fillEmpty} className="rounded-lg border px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+          Popuni prazne količinom
+        </button>
+      </div>
+
+      <input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Pretraga artikala..."
+        className="mb-3 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+
+      <div className="mb-3 max-h-72 overflow-y-auto rounded-lg border">
+        <table className="w-full text-xs">
+          <tbody>
+            {filteredItems.map(m => (
+              <tr key={m.id} className="border-b border-gray-50">
+                <td className="px-2 py-1.5">{m.name}</td>
+                <td className="px-2 py-1.5 text-right">
+                  <input type="number" min={0} step="any"
+                    value={quantities[m.id] ?? ""}
+                    onChange={e => setQuantities(prev => ({ ...prev, [m.id]: e.target.value }))}
+                    className="w-20 rounded border px-2 py-1 text-right text-xs focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {err && <p className="mb-3 text-sm text-red-600">{err}</p>}
+      <button onClick={reviewStep} className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600">
+        Pregled i potvrda ({lines.length} {lines.length === 1 ? "artikal" : "artikala"})
+      </button>
+    </Modal>
+  );
+}
+
+function ZeroAllModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [locations, setLocations] = useState<LocationOption[]>([]);
+  const [locationId, setLocationId] = useState("");
+  const [confirmText, setConfirmText] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<OpeningStockResult | null>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/locations").then(r => r.json()).then(j => {
+      const locs: LocationOption[] = j.locations ?? [];
+      setLocations(locs);
+      if (locs.length > 0) setLocationId(locs[0].id);
+    });
+  }, []);
+
+  async function apply() {
+    if (confirmText.trim().toUpperCase() !== "RESETUJ") { setErr('Ukucajte "RESETUJ" da potvrdite'); return; }
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch("/api/admin/inventory/opening-stock/zero", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locationId }),
+      });
+      const j = await res.json();
+      if (!res.ok) { setErr(j.error ?? "Greška"); return; }
+      setResult(j);
+    } finally { setLoading(false); }
+  }
+
+  if (result) {
+    return (
+      <Modal title="Zalihe resetovane na 0" onClose={() => { onClose(); onDone(); }}>
+        <p className="mb-4 text-sm text-gray-700">
+          Resetovano na 0: <strong>{result.itemsAffected}</strong> artikala. Kretanja zaliha (istorija) su sačuvana — ništa nije obrisano.
+        </p>
+        <button onClick={() => { onClose(); onDone(); }} className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600">
+          Zatvori
+        </button>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Postavi sve zalihe na 0" onClose={onClose}>
+      <div className="mb-4 rounded-lg bg-red-50 px-3 py-3 text-sm text-red-800">
+        Ovo postavlja stanje SVIH trenutno praćenih artikala na ovoj lokaciji na 0 — namenjeno uklanjanju
+        privremenih test-količina pre unosa stvarnog početnog stanja. Ne briše prodaju, porudžbine, račune
+        ni istoriju kretanja zaliha; svaka promena se beleži kao auditabilno kretanje.
+      </div>
+      <label className="mb-1 block text-sm font-medium">Lokacija</label>
+      <select value={locationId} onChange={e => setLocationId(e.target.value)}
+        className="mb-4 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
+        {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+      </select>
+      <label className="mb-1 block text-sm font-medium">Ukucajte &quot;RESETUJ&quot; da potvrdite</label>
+      <input type="text" value={confirmText} onChange={e => setConfirmText(e.target.value)}
+        className="mb-4 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400" />
+      {err && <p className="mb-3 text-sm text-red-600">{err}</p>}
+      <button onClick={apply} disabled={loading}
+        className="w-full rounded-lg bg-red-600 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50">
+        {loading ? "Primena..." : "Resetuj sve na 0"}
+      </button>
+    </Modal>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type ModalState =
@@ -282,13 +540,18 @@ type ModalState =
   | { type: "adjust"; item: InventoryItem }
   | { type: "movements"; item: InventoryItem }
   | { type: "init" }
+  | { type: "opening-stock" }
+  | { type: "zero-all" }
   | null;
+
+const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 
 export function InventoryClient() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
   const [search, setSearch] = useState("");
+  const [roles, setRoles] = useState<string[]>([]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -299,6 +562,13 @@ export function InventoryClient() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    // Read-only — used ONLY to decide whether to show the go-live buttons.
+    // Real authorization is server-side (inventory.opening_stock), enforced
+    // again on every request regardless of what this renders.
+    fetch("/api/pos/me").then(r => r.json()).then(j => setRoles(j.roles ?? [])).catch(() => {});
+  }, []);
+  const canOpeningStock = roles.some(r => OPENING_STOCK_ROLES.has(r));
 
   function closeAndRefresh() { setModal(null); load(); }
 
@@ -315,10 +585,24 @@ export function InventoryClient() {
           <h1 className="text-2xl font-bold">Zalihe</h1>
           <p className="text-sm text-gray-500 mt-0.5">Praćenje stanja zaliha po artiklima i lokacijama</p>
         </div>
-        <button onClick={() => setModal({ type: "init" })}
-          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600">
-          + Inicijalizuj stavku
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {canOpeningStock && (
+            <>
+              <button onClick={() => setModal({ type: "zero-all" })}
+                className="rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50">
+                Postavi sve na 0
+              </button>
+              <button onClick={() => setModal({ type: "opening-stock" })}
+                className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-900">
+                Postavi početno stanje
+              </button>
+            </>
+          )}
+          <button onClick={() => setModal({ type: "init" })}
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600">
+            + Inicijalizuj stavku
+          </button>
+        </div>
       </div>
 
       {/* Search */}
@@ -400,6 +684,8 @@ export function InventoryClient() {
       {modal?.type === "adjust"     && <AdjustModal    item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "movements"  && <MovementsModal item={modal.item} onClose={() => setModal(null)} />}
       {modal?.type === "init"       && <InitModal               onClose={() => setModal(null)} onDone={closeAndRefresh} />}
+      {modal?.type === "opening-stock" && canOpeningStock && <OpeningStockModal onClose={() => setModal(null)} onDone={closeAndRefresh} />}
+      {modal?.type === "zero-all"      && canOpeningStock && <ZeroAllModal      onClose={() => setModal(null)} onDone={closeAndRefresh} />}
     </div>
   );
 }

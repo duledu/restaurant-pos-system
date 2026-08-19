@@ -580,7 +580,82 @@ export function StaffClient() {
           <EmptyState title="Još nema zaposlenih." description="Dodaj prvog zaposlenog dugmetom iznad." />
         </Card>
       ) : (
-        <Card className="overflow-hidden">
+        <>
+          {/* ── Mobile: stacked cards ─────────────────────────────────────── */}
+          <div className="space-y-3 md:hidden">
+            {staff.map((emp) => (
+              <Card key={emp.id} className="p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="font-semibold text-ink">
+                      {emp.firstName} {emp.lastName}
+                    </p>
+                    <p className="mt-0.5 text-xs text-inkSoft">
+                      {emp.roles.map((r) => ROLE_LABEL[r.role.name] ?? r.role.name).join(", ") || "—"}
+                    </p>
+                  </div>
+                  <Badge tone={STATUS_TONE[emp.status]}>{STATUS_LABEL[emp.status]}</Badge>
+                </div>
+
+                <div className="mt-3 space-y-1 text-sm text-inkSoft">
+                  <p>
+                    <span className="text-inkSoft/60">Korisničko ime: </span>
+                    {emp.username ? <span className="font-mono text-xs">{emp.username}</span> : "—"}
+                  </p>
+                  <p>
+                    <span className="text-inkSoft/60">Lokacija: </span>
+                    {emp.locations.map((l) => l.location.name).join(", ") || "—"}
+                  </p>
+                  <p className="flex items-center gap-1.5">
+                    <span className="text-inkSoft/60">PIN prijava: </span>
+                    {emp.hasPin ? (
+                      <>
+                        <span className="font-mono tracking-[0.2em]">••••</span>
+                        {emp.hasEncryptedPin && (
+                          <button onClick={() => setRevealingPin(emp)} title="Otkrij PIN" className="rounded p-0.5 text-inkSoft hover:text-ink">
+                            <EyeIcon />
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <Badge tone="neutral">Nema PIN</Badge>
+                    )}
+                  </p>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-2 text-sm font-medium">
+                  <button onClick={() => setEditing(emp)} className="rounded-md border border-line py-2.5 text-gold-dark">
+                    Izmeni
+                  </button>
+                  <button onClick={() => setChangingPin(emp)} className="rounded-md border border-line py-2.5 text-gold-dark">
+                    Promeni PIN
+                  </button>
+                  <button onClick={() => setSettingCredentials(emp)} className="rounded-md border border-line py-2.5 text-gold-dark">
+                    {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
+                  </button>
+                  <button
+                    onClick={() => togglePinLogin(emp)}
+                    disabled={busyId === emp.id}
+                    className={`rounded-md border border-line py-2.5 ${emp.pinLoginEnabled ? "text-inkSoft" : "text-success"}`}
+                  >
+                    {emp.pinLoginEnabled ? "Disable PIN" : "Enable PIN"}
+                  </button>
+                  <button
+                    onClick={() => toggleStatus(emp)}
+                    disabled={busyId === emp.id}
+                    className={`col-span-2 rounded-md border py-2.5 ${
+                      emp.status === "ACTIVE" ? "border-danger/30 text-danger" : "border-success/30 text-success"
+                    }`}
+                  >
+                    {emp.status === "ACTIVE" ? "Deaktiviraj" : "Aktiviraj"}
+                  </button>
+                </div>
+              </Card>
+            ))}
+          </div>
+
+          {/* ── Desktop/tablet: table (unchanged) ────────────────────────── */}
+          <Card className="hidden overflow-hidden md:block">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -663,7 +738,8 @@ export function StaffClient() {
               </tbody>
             </table>
           </div>
-        </Card>
+          </Card>
+        </>
       )}
 
       {showAdd && (
