@@ -5,6 +5,8 @@ import { Card } from "../../../components/ui/Card";
 import { Badge } from "../../../components/ui/Badge";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Skeleton } from "../../../components/ui/Skeleton";
+import { Button } from "../../../components/ui/Button";
+import { PageHeader } from "../../../components/ui/PageHeader";
 import { ROLE_LABEL, CREATE_ROLE_OPTIONS, EDIT_ROLE_OPTIONS } from "../../../components/admin/role-labels";
 
 interface Employee {
@@ -557,18 +559,11 @@ export function StaffClient() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-ink">Osoblje</h1>
-          <p className="mt-1 text-sm text-inkSoft">Konobari, kuhinja, šank i menadžment — nalozi za prijavu PIN-om</p>
-        </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="rounded-md bg-gold px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gold-dark"
-        >
-          Dodaj zaposlenog
-        </button>
-      </div>
+      <PageHeader
+        title="Osoblje"
+        description="Konobari, kuhinja, šank i menadžment — nalozi za prijavu PIN-om"
+        actions={<Button onClick={() => setShowAdd(true)}>Dodaj zaposlenog</Button>}
+      />
 
       {notice && <div className="mb-4 rounded-md bg-success-soft px-4 py-3 text-sm text-success">{notice}</div>}
       {error && <div className="mb-4 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>}
@@ -638,7 +633,7 @@ export function StaffClient() {
                     disabled={busyId === emp.id}
                     className={`rounded-md border border-line py-2.5 ${emp.pinLoginEnabled ? "text-inkSoft" : "text-success"}`}
                   >
-                    {emp.pinLoginEnabled ? "Disable PIN" : "Enable PIN"}
+                    {emp.pinLoginEnabled ? "Isključi PIN" : "Uključi PIN"}
                   </button>
                   <button
                     onClick={() => toggleStatus(emp)}
@@ -719,7 +714,7 @@ export function StaffClient() {
                           title={emp.pinLoginEnabled ? "Onemogući PIN prijavu za ovog zaposlenog" : "Omogući PIN prijavu za ovog zaposlenog"}
                           className={emp.pinLoginEnabled ? "text-inkSoft hover:underline" : "text-success hover:underline"}
                         >
-                          {emp.pinLoginEnabled ? "Disable PIN" : "Enable PIN"}
+                          {emp.pinLoginEnabled ? "Isključi PIN" : "Uključi PIN"}
                         </button>
                         <button onClick={() => setSettingCredentials(emp)} className="text-gold-dark hover:underline">
                           {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}

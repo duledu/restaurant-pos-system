@@ -2,7 +2,7 @@
 
 import { ButtonHTMLAttributes, forwardRef } from "react";
 
-type Variant = "primary" | "secondary" | "ghost" | "danger";
+type Variant = "primary" | "secondary" | "ghost" | "danger" | "dangerGhost";
 type Size = "sm" | "md" | "lg";
 
 const VARIANT_STYLES: Record<Variant, string> = {
@@ -10,6 +10,10 @@ const VARIANT_STYLES: Record<Variant, string> = {
   secondary: "bg-white text-ink border border-line hover:bg-cream-300/60",
   ghost: "text-inkSoft hover:bg-ink/5 hover:text-ink",
   danger: "bg-danger text-white hover:opacity-90",
+  // Nizak-dominantnost tretman za rizične-ali-ne-primarne akcije (npr.
+  // "Postavi sve na 0") — komunicira opasnost bojom, ne oduzima pažnju
+  // solid crvenom površinom koja bi delovala kao primarno dugme na strani.
+  dangerGhost: "bg-transparent text-danger border border-danger/30 hover:bg-danger/5",
 };
 
 const SIZE_STYLES: Record<Size, string> = {

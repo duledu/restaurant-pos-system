@@ -7,6 +7,7 @@ import { Card } from "../../../components/ui/Card";
 import { Badge } from "../../../components/ui/Badge";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Skeleton } from "../../../components/ui/Skeleton";
+import { PageHeader } from "../../../components/ui/PageHeader";
 import { KpiCard } from "../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../components/admin/ReportFilters";
 import { ReportPrintHeader } from "../../../components/admin/ReportPrintHeader";
@@ -188,13 +189,11 @@ export function DashboardClient() {
 
   return (
     <div className="mx-auto max-w-6xl">
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-ink">Poslovna analitika</h1>
-          <p className="mt-1 text-sm text-inkSoft">Kako posluje restoran — promet, trendovi, gužva, osoblje, stanice, popusti, storna</p>
-        </div>
-        <ReportFilters value={filters} onChange={setFilters} reportType="dashboard" />
-      </div>
+      <PageHeader
+        title="Poslovna analitika"
+        description="Kako posluje restoran — promet, trendovi, gužva, osoblje, stanice, popusti, storna"
+        actions={<ReportFilters value={filters} onChange={setFilters} reportType="dashboard" />}
+      />
 
       <ReportPrintHeader title="Poslovna analitika" periodLabel={periodLabel} />
 
@@ -315,7 +314,7 @@ export function DashboardClient() {
               Trend prodaje ({data.trend.granularity === "hour" ? "po satu" : data.trend.granularity === "day" ? "po danu" : "po mesecu"})
             </h2>
             <Card className="p-5">
-              {trendChartData.length === 0 ? <EmptyState title="Nema prodaje u izabranom periodu." /> : <TrendLineChart data={trendChartData} currency={currency} />}
+              {trendChartData.length === 0 ? <EmptyState title="Nema prodaje u izabranom periodu." compact /> : <TrendLineChart data={trendChartData} currency={currency} />}
             </Card>
           </section>
 
@@ -325,7 +324,7 @@ export function DashboardClient() {
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-inkSoft">Prodaja po satu</h2>
               <Card className="p-5">
                 {hourlyChartData.every((h) => h.value === 0) ? (
-                  <EmptyState title="Nema prodaje u izabranom periodu." />
+                  <EmptyState title="Nema prodaje u izabranom periodu." compact />
                 ) : (
                   <>
                     <SalesBarChart data={hourlyChartData} currency={currency} />
@@ -345,7 +344,7 @@ export function DashboardClient() {
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-inkSoft">Prodaja po danu u nedelji</h2>
               <Card className="p-5">
                 {weekdayChartData.every((w) => w.value === 0) ? (
-                  <EmptyState title="Nema prodaje u izabranom periodu." />
+                  <EmptyState title="Nema prodaje u izabranom periodu." compact />
                 ) : (
                   <>
                     <SalesBarChart data={weekdayChartData} currency={currency} />
@@ -400,7 +399,7 @@ export function DashboardClient() {
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card className="overflow-hidden">
                 {data.items.topItems.length === 0 ? (
-                  <div className="p-5"><EmptyState title="Nema prodatih artikala." /></div>
+                  <div className="p-5"><EmptyState title="Nema prodatih artikala." compact /></div>
                 ) : (
                   <ItemTable rows={data.items.topItems} currency={currency} />
                 )}
@@ -408,7 +407,7 @@ export function DashboardClient() {
               <Card className="overflow-hidden">
                 <div className="border-b border-line px-4 py-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Najslabije prodavani (od artikala koji jesu prodati)</div>
                 {data.items.lowItems.length === 0 ? (
-                  <div className="p-5"><EmptyState title="Nema prodatih artikala." /></div>
+                  <div className="p-5"><EmptyState title="Nema prodatih artikala." compact /></div>
                 ) : (
                   <ItemTable rows={data.items.lowItems} currency={currency} />
                 )}
@@ -420,9 +419,12 @@ export function DashboardClient() {
                   Artikli sa trenutnog menija bez zabeležene prodaje u periodu — zasnovano na TRENUTNOM meniju, ne na istorijskim podacima (artikal preimenovan posle prodaje može se pogrešno pojaviti ovde).
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {data.items.zeroSaleItems.map((z) => (
+                  {data.items.zeroSaleItems.slice(0, 24).map((z) => (
                     <Badge key={z.id} tone="neutral">{z.name}</Badge>
                   ))}
+                  {data.items.zeroSaleItems.length > 24 && (
+                    <Badge tone="neutral">+{data.items.zeroSaleItems.length - 24} još</Badge>
+                  )}
                 </div>
               </div>
             )}
@@ -434,7 +436,7 @@ export function DashboardClient() {
             <p className="mb-2 text-xs text-inkSoft">Naziv kategorije je TRENUTAN (iz aktivnog menija), ne istorijski snapshot — preimenovanje kategorije menja prikaz i za stare periode.</p>
             <Card className="overflow-hidden">
               {data.categories.categories.length === 0 ? (
-                <div className="p-5"><EmptyState title="Nema prodaje u izabranom periodu." /></div>
+                <div className="p-5"><EmptyState title="Nema prodaje u izabranom periodu." compact /></div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -482,7 +484,7 @@ export function DashboardClient() {
             <p className="mb-2 text-xs text-inkSoft">Ovo je rangiranje po prodaji, ne ocena rada — prodaja zavisi od trajanja smene, sekcije i gužve.</p>
             <Card className="overflow-hidden">
               {sortedEmployees.length === 0 ? (
-                <div className="p-5"><EmptyState title="Nema aktivnosti u izabranom periodu." /></div>
+                <div className="p-5"><EmptyState title="Nema aktivnosti u izabranom periodu." compact /></div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -602,7 +604,7 @@ export function DashboardClient() {
             <section>
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-inkSoft">Načini plaćanja</h2>
               <Card className="p-5">
-                {paymentDonutData.length === 0 ? <EmptyState title="Nema plaćanja u periodu." /> : <PaymentDonutChart data={paymentDonutData} currency={currency} />}
+                {paymentDonutData.length === 0 ? <EmptyState title="Nema plaćanja u periodu." compact /> : <PaymentDonutChart data={paymentDonutData} currency={currency} />}
               </Card>
             </section>
 
