@@ -468,12 +468,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
   return (
     <div className="flex min-h-screen flex-col pb-40">
-      <div className="border-b border-line bg-white p-3">
+      <div className="sticky top-0 z-20 border-b border-line bg-white p-3 shadow-card">
         <button onClick={() => router.push("/waiter/tables")} className="text-sm font-medium text-gold-dark">
           ← Stolovi
         </button>
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
+          <h1 className="text-lg font-bold tracking-tight text-ink">{order.table.label}</h1>
           <div className="flex items-center gap-1">
             <QuickLockButton />
             <LogoutButton />
@@ -481,49 +481,51 @@ export function OrderClient({ tableId }: { tableId: string }) {
         </div>
       </div>
 
-      {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
+      <div className="mx-auto w-full max-w-3xl">
+        {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
 
-      <input
-        className="m-3 rounded-md border border-line px-4 py-3 text-base"
-        placeholder="Pretraga menija…"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+        <input
+          className="m-3 rounded-md border border-line px-4 py-3 text-base focus:border-gold focus:outline-none"
+          placeholder="Pretraga menija…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
 
-      {!search && (
-        <div className="flex gap-2 overflow-x-auto px-3 pb-2">
-          {categories.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setActiveCategoryId(c.id)}
-              className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium ${
-                activeCategoryId === c.id ? "bg-gold text-white" : "bg-white text-ink/75 border border-line"
-              }`}
-            >
-              {c.name}
+        {!search && (
+          <div className="flex gap-2 overflow-x-auto px-3 pb-2">
+            {categories.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setActiveCategoryId(c.id)}
+                className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+                  activeCategoryId === c.id ? "bg-gold text-white shadow-sm" : "border border-line bg-white text-ink/75 hover:bg-cream-300/40"
+                }`}
+              >
+                {c.name}
             </button>
           ))}
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3">
-        {visibleItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => addItem(item.id)}
-            disabled={cartBusy}
-            className="rounded-md border border-line bg-white p-4 text-left shadow-sm active:scale-95 disabled:opacity-60"
-          >
-            <div className="font-medium text-ink">{item.name}</div>
-            <div className="text-sm text-ink/65">{Number(item.price).toFixed(2)} RSD</div>
-          </button>
-        ))}
-        {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
+        <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3">
+          {visibleItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => addItem(item.id)}
+              disabled={cartBusy}
+              className="rounded-md border border-line bg-white p-4 text-left shadow-sm transition-all active:scale-95 disabled:opacity-60 sm:hover:-translate-y-0.5 sm:hover:border-gold/50 sm:hover:shadow-card"
+            >
+              <div className="font-medium text-ink">{item.name}</div>
+              <div className="mt-0.5 text-sm tabular-nums text-ink/65">{Number(item.price).toFixed(2)} RSD</div>
+            </button>
+          ))}
+          {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
+        </div>
       </div>
 
       {/* Sticky pregled porudžbine */}
-      <div className="fixed bottom-0 left-0 right-0 border-t border-line bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
-        <div className="max-h-40 overflow-y-auto px-3 py-2">
+      <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-elevated">
+        <div className="mx-auto max-h-40 w-full max-w-3xl overflow-y-auto px-3 py-2">
           {order.items.length === 0 && <div className="py-2 text-center text-sm text-ink/55">Nema stavki još.</div>}
           {order.items.map((item) => (
             <div key={item.id} className="flex items-center gap-2 py-1.5 text-sm">
@@ -551,7 +553,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   +
                 </button>
               </div>
-              <span className="w-20 shrink-0 text-right text-ink/70">{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
+              <span className="w-20 shrink-0 text-right tabular-nums text-ink/70">{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
               <button
                 onClick={() => removeItem(item.id)}
                 disabled={cartBusy}
@@ -562,16 +564,20 @@ export function OrderClient({ tableId }: { tableId: string }) {
             </div>
           ))}
         </div>
-        <div className="flex items-center justify-between border-t border-line px-3 py-2">
-          <span className="text-base font-semibold text-ink">Ukupno: {total.toFixed(2)} RSD</span>
+        <div className="mx-auto flex w-full max-w-3xl items-center justify-between border-t border-line px-3 py-2">
+          <span className="text-base font-semibold text-ink">
+            Ukupno: <span className="tabular-nums">{total.toFixed(2)} RSD</span>
+          </span>
         </div>
-        <button
-          onClick={submit}
-          disabled={submitting || order.items.length === 0}
-          className="w-full bg-graphite py-4 text-lg font-semibold text-cream-100 disabled:opacity-40 transition-colors hover:bg-graphite-700"
-        >
-          {submitting ? "Slanje…" : "Pošalji porudžbinu"}
-        </button>
+        <div className="mx-auto w-full max-w-3xl">
+          <button
+            onClick={submit}
+            disabled={submitting || order.items.length === 0}
+            className="w-full bg-gold py-4 text-lg font-semibold text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
+          >
+            {submitting ? "Slanje…" : "Pošalji porudžbinu"}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -75,7 +75,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen">
       {/* ── Desktop sidebar (unchanged) ─────────────────────────────────── */}
-      <aside className="no-print fixed inset-y-0 left-0 z-20 hidden w-56 flex-col bg-graphite md:flex">
+      <aside className="no-print fixed inset-y-0 left-0 z-20 hidden w-60 flex-col bg-graphite md:flex">
         <SidebarContent />
       </aside>
 
@@ -111,7 +111,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
       )}
 
       {/* ── Main content ─────────────────────────────────────────────────── */}
-      <div className="flex min-w-0 flex-1 flex-col md:pl-56 print:pl-0">
+      <div className="flex min-w-0 flex-1 flex-col md:pl-60 print:pl-0">
         <main className="flex-1 overflow-x-hidden p-4 md:p-6 print:p-0">{children}</main>
       </div>
     </div>
