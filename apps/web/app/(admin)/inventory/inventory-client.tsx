@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { Button } from "../../../components/ui/Button";
 import { Badge } from "../../../components/ui/Badge";
 import { Card } from "../../../components/ui/Card";
@@ -9,6 +9,15 @@ import { Skeleton } from "../../../components/ui/Skeleton";
 import { PageHeader } from "../../../components/ui/PageHeader";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Category {
+  id: string;
+  name: string;
+  slug: string;
+  type: "FOOD" | "DRINK";
+  sortOrder: number;
+  isActive: boolean;
+}
 
 interface InventoryItem {
   id: string;
@@ -21,6 +30,7 @@ interface InventoryItem {
     quantity: number | null;
     minimumStock: number | null;
     trackStock: boolean;
+    categoryId: string | null;
   };
   location: { id: string; name: string };
 }
@@ -34,6 +44,10 @@ interface Movement {
   reason: string | null;
   createdAt: string;
 }
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const UNCAT = "__uncategorized__";
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -57,6 +71,51 @@ function isLowStock(item: InventoryItem) {
 
 const inputClass =
   "w-full rounded-md border border-line px-3 py-2 text-sm text-ink placeholder:text-ink/35";
+
+// ─── TabPill ──────────────────────────────────────────────────────────────────
+
+function TabPill({
+  active,
+  onClick,
+  label,
+  count,
+  dot,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count?: number;
+  dot?: "food" | "drink";
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex shrink-0 items-center gap-1.5 rounded-sm px-3 py-1.5 text-xs font-medium transition-colors ${
+        active
+          ? "bg-graphite text-white"
+          : "border border-line bg-white text-ink/75 hover:bg-ink/[0.04]"
+      }`}
+    >
+      {dot && (
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            dot === "food" ? "bg-success" : "bg-info"
+          } ${active ? "opacity-60" : ""}`}
+        />
+      )}
+      {label}
+      {count !== undefined && count > 0 && (
+        <span
+          className={`rounded-full px-1.5 tabular-nums text-[10px] ${
+            active ? "bg-white/20 text-white" : "bg-ink/[0.07] text-ink/55"
+          }`}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
 
 // ─── Modals ───────────────────────────────────────────────────────────────────
 
@@ -538,9 +597,11 @@ const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 
 export function InventoryClient() {
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
   const [search, setSearch] = useState("");
+  const [activeCategoryTab, setActiveCategoryTab] = useState<string | null>(null);
   const [roles, setRoles] = useState<string[]>([]);
 
   const load = useCallback(() => {
@@ -552,6 +613,14 @@ export function InventoryClient() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    fetch("/api/admin/menu/categories")
+      .then(r => r.json())
+      .then(j => setCategories(j.categories ?? []))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     // Read-only — used ONLY to decide whether to show the go-live buttons.
     // Real authorization is server-side (inventory.opening_stock), enforced
@@ -562,11 +631,48 @@ export function InventoryClient() {
 
   function closeAndRefresh() { setModal(null); load(); }
 
-  const filtered = items.filter(it =>
-    it.menuItem.name.toLowerCase().includes(search.toLowerCase()) ||
-    it.location.name.toLowerCase().includes(search.toLowerCase())
-  );
+  // Per-category item count (before search — counts stay stable while typing)
+  const categoryCount = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const item of items) {
+      const key = item.menuItem.categoryId ?? UNCAT;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return map;
+  }, [items]);
+
+  const uncategorizedCount = categoryCount.get(UNCAT) ?? 0;
+
+  // Combined search + category filter
+  const filtered = useMemo(() => {
+    return items.filter(it => {
+      const matchesSearch =
+        it.menuItem.name.toLowerCase().includes(search.toLowerCase()) ||
+        it.location.name.toLowerCase().includes(search.toLowerCase());
+      const matchesCategory =
+        activeCategoryTab === null ||
+        (activeCategoryTab === UNCAT
+          ? it.menuItem.categoryId === null
+          : it.menuItem.categoryId === activeCategoryTab);
+      return matchesSearch && matchesCategory;
+    });
+  }, [items, search, activeCategoryTab]);
+
   const lowStockCount = items.filter(isLowStock).length;
+
+  function selectTab(id: string | null) {
+    setActiveCategoryTab(prev => (prev === id ? null : id));
+  }
+
+  // ─── Empty state copy ────────────────────────────────────────────────────────
+  let emptyTitle = "Nema rezultata pretrage";
+  let emptyDescription: string | undefined;
+  if (items.length === 0) {
+    emptyTitle = "Nema inicijalizovanih stavki zaliha";
+    emptyDescription = 'Kliknite "+ Inicijalizuj stavku" da počnete praćenje prve stavke.';
+  } else if (!search && activeCategoryTab !== null) {
+    emptyTitle = "U ovoj kategoriji nema artikala sa zalihama.";
+  }
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -592,10 +698,36 @@ export function InventoryClient() {
         }
       />
 
-      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
+      {/* ── Search + low-stock badge ─────────────────────────────────────────── */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
         {lowStockCount > 0 && <Badge tone="danger">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
+      </div>
+
+      {/* ── Category tab strip (same pattern as Menu) ────────────────────────── */}
+      <div className="mb-4 flex gap-1.5 overflow-x-auto pb-0.5">
+        <TabPill
+          active={activeCategoryTab === null}
+          onClick={() => setActiveCategoryTab(null)}
+          label="Sve kategorije"
+        />
+        {categories.map(cat => (
+          <TabPill
+            key={cat.id}
+            active={activeCategoryTab === cat.id}
+            onClick={() => selectTab(cat.id)}
+            label={cat.name}
+            count={categoryCount.get(cat.id)}
+            dot={cat.type === "FOOD" ? "food" : "drink"}
+          />
+        ))}
+        <TabPill
+          active={activeCategoryTab === UNCAT}
+          onClick={() => selectTab(UNCAT)}
+          label="Nekategorisano"
+          count={uncategorizedCount}
+        />
       </div>
 
       {loading ? (
@@ -606,10 +738,7 @@ export function InventoryClient() {
         </Card>
       ) : filtered.length === 0 ? (
         <Card className="p-5">
-          <EmptyState
-            title={items.length === 0 ? "Nema inicijalizovanih stavki zaliha" : "Nema rezultata pretrage"}
-            description={items.length === 0 ? 'Kliknite "+ Inicijalizuj stavku" da počnete praćenje prve stavke.' : undefined}
-          />
+          <EmptyState title={emptyTitle} description={emptyDescription} />
         </Card>
       ) : (
         <Card className="overflow-hidden">

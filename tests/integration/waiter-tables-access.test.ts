@@ -63,7 +63,6 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
-afterAll(async () => prisma.$disconnect());
 
 describe("waiter table visibility — location and restaurant scoping", () => {
   it("WAITER assigned to Location A sees Location A's tables", async () => {

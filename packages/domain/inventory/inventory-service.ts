@@ -29,7 +29,7 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
     where,
     include: {
       menuItem: {
-        select: { id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true },
+        select: { id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true },
       },
       location: { select: { id: true, name: true } },
     },
