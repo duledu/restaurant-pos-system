@@ -20,7 +20,7 @@ interface PinPadProps {
 const PRESS_TRANSITION = "transition-[transform,box-shadow,background-color] duration-75 ease-out";
 const RAISED_SHADOW = "shadow-[0_3px_0_rgba(255,255,255,0.05),0_8px_18px_rgba(0,0,0,0.25)]";
 const KEY_BASE = `relative min-h-[72px] select-none rounded-lg border border-white/15 bg-white/[0.07] text-3xl font-semibold tabular-nums text-white ${RAISED_SHADOW} ${PRESS_TRANSITION} hover:border-white/25 hover:bg-white/[0.11] active:translate-y-[2px] active:bg-white/[0.14] active:shadow-[0_1px_0_rgba(255,255,255,0.04),0_1px_3px_rgba(0,0,0,0.3)] disabled:opacity-40 disabled:active:translate-y-0 disabled:active:shadow-[0_3px_0_rgba(255,255,255,0.06),0_5px_10px_rgba(0,0,0,0.35)] disabled:active:bg-white/[0.06]`;
-const CONFIRM_BASE = `relative min-h-[72px] select-none rounded-lg border border-cream-300/30 bg-gold text-3xl font-semibold text-white shadow-[0_3px_0_rgba(255,255,255,0.12),0_8px_18px_rgba(0,0,0,0.3)] ${PRESS_TRANSITION} hover:bg-gold-dark active:translate-y-[2px] active:bg-gold-dark active:shadow-[0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] disabled:opacity-40 disabled:active:translate-y-0`;
+const CONFIRM_BASE = `relative flex items-center justify-center min-h-[72px] select-none rounded-lg border border-cream-300/30 bg-gold text-3xl font-semibold text-white shadow-[0_3px_0_rgba(255,255,255,0.12),0_8px_18px_rgba(0,0,0,0.3)] ${PRESS_TRANSITION} hover:bg-gold-dark active:translate-y-[2px] active:bg-gold-dark active:shadow-[0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] disabled:opacity-40 disabled:active:translate-y-0`;
 
 // Programsko "utisnuto" stanje za pritisak sa fizičke tastature — :active
 // pseudoklasa ne reaguje na keydown, pa se isti vizuelni efekat primenjuje

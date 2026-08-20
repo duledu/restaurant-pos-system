@@ -13,14 +13,21 @@ import { prisma } from "@rcs/db";
  * rutu bez bočnih efekata.
  */
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const deviceId = searchParams.get("deviceId");
-  if (!deviceId) {
-    return NextResponse.json({ registered: false });
+  try {
+    const { searchParams } = new URL(request.url);
+    const deviceId = searchParams.get("deviceId");
+    if (!deviceId) {
+      return NextResponse.json({ registered: false });
+    }
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      select: { isActive: true },
+    });
+    return NextResponse.json({ registered: Boolean(device?.isActive) });
+  } catch {
+    // Transient DB/server error — return 503 so the client knows this is
+    // a temporary failure, not a confirmed "device not registered" signal.
+    // The client must NOT clear localStorage on a 503.
+    return NextResponse.json({ error: "Privremena nedostupnost" }, { status: 503 });
   }
-  const device = await prisma.device.findUnique({
-    where: { id: deviceId },
-    select: { isActive: true },
-  });
-  return NextResponse.json({ registered: Boolean(device?.isActive) });
 }

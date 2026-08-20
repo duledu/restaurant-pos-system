@@ -51,16 +51,24 @@ export function DeviceSetupClient() {
     const storedId = getDeviceId();
     if (storedId) {
       fetch(`/api/device/check?deviceId=${encodeURIComponent(storedId)}`)
-        .then((r) => r.json())
-        .then((data: { registered: boolean }) => {
-          if (!data.registered) {
-            clearDevice(); // Zastareli ID — obriši localStorage pre prikazivanja statusa
+        .then(async (r) => {
+          if (!r.ok) {
+            // Serverska greška (503 privremena nedostupnost, 5xx, itd.) —
+            // NE brišemo localStorage. Samo potvrđen 200 { registered: false }
+            // znači da server ZOVE uređaj nevažećim. Greška nije to.
+            refreshLocalState();
+            return;
+          }
+          const data: { registered?: boolean } = await r.json().catch(() => ({}));
+          if (data.registered === false) {
+            // Eksplicitna potvrda servera (HTTP 200) da uređaj nije aktivan —
+            // tek tada brišemo zastareli localStorage ID.
+            clearDevice();
           }
           refreshLocalState();
         })
         .catch(() => {
-          // Mrežna greška — ne brišemo ništa, localStorage ostaje; refreshLocalState
-          // će pokazati ID koji server nije uspeo da potvrdi (konzervativno).
+          // Mrežna greška ili parse greška — konzervativno: ne brišemo ništa.
           refreshLocalState();
         });
     } else {
