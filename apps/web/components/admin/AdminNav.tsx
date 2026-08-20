@@ -66,6 +66,7 @@ const NAV_SECTIONS: NavSection[] = [
       { href: "/reports/voids", label: "Poništavanja", icon: <VoidIcon /> },
       { href: "/reports/employees", label: "Zaposleni", icon: <UsersIcon /> },
       { href: "/reports/daily-summary", label: "Dnevni izveštaj", icon: <ClockIcon /> },
+      { href: "/reports/kitchen", label: "Kuhinja", icon: <ChartIcon /> },
     ],
   },
   {

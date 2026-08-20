@@ -910,3 +910,88 @@ export async function getSalesSummaryThermal(ctx: AuthContext, filters: ReportFi
     generatedAt: new Date().toISOString(),
   };
 }
+
+// ── KUHINJSKI IZVEŠTAJ PRODUKCIJE ────────────────────────────────────────
+//
+// IZVOR ISTINE: OrderItemStation (station=KITCHEN, status=SERVED) za
+// "izbačeno" — svaka stavka koja je prošla kroz kuhinjski ekran i stigla
+// do SERVED statusa. Količina je OrderItem.quantity (ne broj redova).
+// OrderItemVoid za "stornirano" — poništavanja stavki kuhinjske stanice.
+// "Vraćeno" (returni) NE POSTOJI kao kanonski koncept u modelu podataka —
+// to se EXPLICITLY navodi u izveštaju, ne implicira se iz drugog polja.
+
+export interface KitchenProductionRow {
+  name: string;
+  producedQty: number;
+  voidedQty: number;
+}
+
+export interface KitchenProductionReport {
+  range: { from: string; to: string };
+  rows: KitchenProductionRow[];
+  summary: {
+    totalProduced: number;
+    totalVoided: number;
+    uniqueItems: number;
+  };
+}
+
+export async function getKitchenProductionReport(
+  ctx: AuthContext,
+  filters: ReportFilters
+): Promise<KitchenProductionReport> {
+  const { locationIds, range } = await resolveContext(ctx, filters);
+
+  const [producedItems, voids] = await Promise.all([
+    prisma.orderItem.findMany({
+      where: {
+        order: {
+          restaurantId: ctx.restaurantId,
+          locationId: { in: locationIds },
+          submittedAt: { gte: range.from, lt: range.to },
+          status: { not: "CANCELLED" },
+        },
+        stationStates: { some: { station: "KITCHEN", status: "SERVED" } },
+      },
+      select: { name: true, quantity: true },
+    }),
+    prisma.orderItemVoid.findMany({
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        voidedAt: { gte: range.from, lt: range.to },
+        orderItem: { preparationStation: { in: ["KITCHEN", "KITCHEN_AND_BAR"] } },
+      },
+      select: { itemName: true, voidedQuantity: true },
+    }),
+  ]);
+
+  const producedByName = new Map<string, number>();
+  for (const item of producedItems) {
+    producedByName.set(item.name, (producedByName.get(item.name) ?? 0) + item.quantity);
+  }
+
+  const voidedByName = new Map<string, number>();
+  for (const v of voids) {
+    voidedByName.set(v.itemName, (voidedByName.get(v.itemName) ?? 0) + v.voidedQuantity);
+  }
+
+  const allNames = new Set([...producedByName.keys(), ...voidedByName.keys()]);
+  const rows: KitchenProductionRow[] = Array.from(allNames)
+    .map((name) => ({
+      name,
+      producedQty: producedByName.get(name) ?? 0,
+      voidedQty: voidedByName.get(name) ?? 0,
+    }))
+    .sort((a, b) => b.producedQty - a.producedQty)
+    .slice(0, LIST_ROW_CAP);
+
+  const totalProduced = rows.reduce((s, r) => s + r.producedQty, 0);
+  const totalVoided = rows.reduce((s, r) => s + r.voidedQty, 0);
+
+  return {
+    range: { from: range.from.toISOString(), to: range.to.toISOString() },
+    rows,
+    summary: { totalProduced, totalVoided, uniqueItems: rows.length },
+  };
+}
