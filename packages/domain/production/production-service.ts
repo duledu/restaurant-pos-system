@@ -75,6 +75,73 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
   }));
 }
 
+/**
+ * Vraća porudžbine tekuće aktivne smene gde su SVE stavke za datu stanicu
+ * u statusu SERVED — tj. kuhinja/šank su završili taj tiket.
+ * Scoped na aktivnu smenu da lista ostane kompaktna.
+ */
+export async function listCompletedStationOrders(ctx: AuthContext, locationId: string, station: Station) {
+  requirePermission(ctx, PRODUCTION_VIEW);
+  requireLocationAccess(ctx, locationId);
+  assertStationAccess(ctx, station);
+
+  const activeShift = await prisma.shift.findFirst({
+    where: { ...scopeToRestaurant(ctx), locationId, status: "OPEN" },
+    select: { id: true },
+  });
+  if (!activeShift) return [];
+
+  const orders = await prisma.order.findMany({
+    where: {
+      ...scopeToRestaurant(ctx),
+      locationId,
+      shiftId: activeShift.id,
+      status: { notIn: ["DRAFT", "CANCELLED"] },
+      items: { some: { stationStates: { some: { station } } } },
+      NOT: {
+        items: {
+          some: {
+            stationStates: {
+              some: { station, status: { in: ACTIVE_ITEM_STATUSES } },
+            },
+          },
+        },
+      },
+    },
+    include: {
+      table: { select: { label: true } },
+      items: {
+        where: { stationStates: { some: { station } } },
+        include: { stationStates: { where: { station }, select: { status: true, updatedAt: true } } },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+    orderBy: { submittedAt: "asc" },
+  });
+
+  const employeeIds = Array.from(new Set(orders.map((o) => o.openedBy)));
+  const employees = await prisma.employee.findMany({
+    where: { id: { in: employeeIds }, ...scopeToRestaurant(ctx) },
+    select: { id: true, firstName: true, lastName: true },
+  });
+  const nameById = new Map(employees.map((e) => [e.id, `${e.firstName} ${e.lastName}`]));
+
+  return orders.map((o) => ({
+    orderId: o.id,
+    tableLabel: o.table.label,
+    waiterName: nameById.get(o.openedBy) ?? "?",
+    submittedAt: o.submittedAt,
+    completedAt: o.items.flatMap((i) => i.stationStates).reduce(
+      (max, s) => (s.updatedAt > max ? s.updatedAt : max),
+      new Date(0)
+    ),
+    items: o.items.map(({ stationStates, ...item }) => ({
+      ...item,
+      status: stationStates[0]?.status ?? "SERVED",
+    })),
+  }));
+}
+
 const NEXT_STATUS: Record<string, string> = {
   SUBMITTED: "ACCEPTED",
   ACCEPTED: "PREPARING",
