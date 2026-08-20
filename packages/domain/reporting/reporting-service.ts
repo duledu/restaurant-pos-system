@@ -942,18 +942,26 @@ export async function getKitchenProductionReport(
 ): Promise<KitchenProductionReport> {
   const { locationIds, range } = await resolveContext(ctx, filters);
 
-  const [producedItems, voids] = await Promise.all([
-    prisma.orderItem.findMany({
+  // TIMING: filter by OrderItemStation.updatedAt (= when status reached SERVED),
+  // NOT order.submittedAt. This correctly answers "what did the kitchen complete
+  // in this period" even for orders that were submitted before the period started.
+  const [servedStations, voids] = await Promise.all([
+    prisma.orderItemStation.findMany({
       where: {
-        order: {
-          restaurantId: ctx.restaurantId,
-          locationId: { in: locationIds },
-          submittedAt: { gte: range.from, lt: range.to },
-          status: { not: "CANCELLED" },
+        station: "KITCHEN",
+        status: "SERVED",
+        updatedAt: { gte: range.from, lt: range.to },
+        orderItem: {
+          order: {
+            restaurantId: ctx.restaurantId,
+            locationId: { in: locationIds },
+            status: { not: "CANCELLED" },
+          },
         },
-        stationStates: { some: { station: "KITCHEN", status: "SERVED" } },
       },
-      select: { name: true, quantity: true },
+      select: {
+        orderItem: { select: { name: true, quantity: true } },
+      },
     }),
     prisma.orderItemVoid.findMany({
       where: {
@@ -967,8 +975,9 @@ export async function getKitchenProductionReport(
   ]);
 
   const producedByName = new Map<string, number>();
-  for (const item of producedItems) {
-    producedByName.set(item.name, (producedByName.get(item.name) ?? 0) + item.quantity);
+  for (const s of servedStations) {
+    const name = s.orderItem.name;
+    producedByName.set(name, (producedByName.get(name) ?? 0) + s.orderItem.quantity);
   }
 
   const voidedByName = new Map<string, number>();

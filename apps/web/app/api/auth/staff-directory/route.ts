@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { devices } from "@rcs/domain";
 
+export const dynamic = "force-dynamic";
+
 /**
  * Javna ruta (bez requireAuth — vidi middleware.ts PUBLIC_API_PATHS i
  * napomenu u device-service.ts listStaffForDevice): poziva se sa /login

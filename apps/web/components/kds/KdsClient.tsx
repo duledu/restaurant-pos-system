@@ -192,7 +192,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         <button
           type="button"
           onClick={() => setTab("active")}
-          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+          className={`flex min-h-11 items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
             tab === "active" ? tabActiveClass : "bg-white/[.07] text-cream-300/70 hover:bg-white/[.11]"
           }`}
         >
@@ -208,7 +208,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         <button
           type="button"
           onClick={() => setTab("completed")}
-          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+          className={`flex min-h-11 items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
             tab === "completed" ? tabCompletedClass : "bg-white/[.07] text-cream-300/70 hover:bg-white/[.11]"
           }`}
         >
@@ -340,8 +340,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                           </div>
                         )}
                       </div>
-                      <span className="shrink-0 rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-semibold text-success">
-                        Gotovo
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                        item.status === "CANCELLED"
+                          ? "bg-danger/15 text-danger"
+                          : "bg-success/15 text-success"
+                      }`}>
+                        {item.status === "CANCELLED" ? "Stornirano" : "Gotovo"}
                       </span>
                     </div>
                   ))}

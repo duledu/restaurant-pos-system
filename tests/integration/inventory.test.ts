@@ -142,6 +142,41 @@ describe("inventory: inicijalizacija i osnove", () => {
   });
 });
 
+describe("inventory: location isolation", () => {
+  it("blocks reads and mutations for an unauthorized location in the same restaurant", async () => {
+    const fixture = await createFixture();
+    const locationB = await prisma.location.create({
+      data: { restaurantId: fixture.restaurantId, name: "Restricted branch" },
+    });
+    const fullAccess = ownerCtx(fixture);
+    fullAccess.locationIds.push(locationB.id);
+    const restricted = ownerCtx(fixture, "restricted-owner");
+    restricted.permissions.add("inventory.opening_stock");
+
+    const itemB = await inventory.initializeTracking(fullAccess, {
+      menuItemId: fixture.menuItemId,
+      locationId: locationB.id,
+      initialStock: 10,
+    });
+
+    await expect(inventory.listInventory(restricted, locationB.id)).rejects.toThrow();
+    await expect(inventory.getInventoryItem(restricted, itemB.id)).rejects.toThrow();
+    await expect(inventory.getMovements(restricted, itemB.id)).rejects.toThrow();
+    await expect(inventory.receiveStock(restricted, itemB.id, { quantity: 1 })).rejects.toThrow();
+    await expect(
+      inventory.bulkSetOpeningStock(restricted, {
+        locationId: locationB.id,
+        lines: [{ menuItemId: fixture.menuItemId, quantity: 20 }],
+      })
+    ).rejects.toThrow();
+
+    const visible = await inventory.listInventory(restricted);
+    expect(visible.some((item) => item.locationId === locationB.id)).toBe(false);
+    const unchanged = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: itemB.id } });
+    expect(Number(unchanged.currentStock)).toBe(10);
+  });
+});
+
 describe("inventory: kretanja zaliha", () => {
   async function setup() {
     const fixture = await createFixture();

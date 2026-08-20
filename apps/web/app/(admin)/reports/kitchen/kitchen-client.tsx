@@ -82,7 +82,16 @@ export function KitchenProductionClient() {
             Stavke koje je kuhinja izbacila (SERVED) i poništene stavke kuhinjske stanice
           </p>
         </div>
-        <ReportFilters value={filters} onChange={setFilters} reportType="items" />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="min-h-11 rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink print:hidden"
+          >
+            Štampaj / PDF
+          </button>
+          <ReportFilters value={filters} onChange={setFilters} />
+        </div>
       </div>
 
       <ReportPrintHeader
@@ -111,7 +120,7 @@ export function KitchenProductionClient() {
         {rows.length > 0 && (
           <button
             onClick={() => downloadCsv(rows)}
-            className="flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs font-medium text-inkSoft hover:bg-ink/[0.04] print:hidden"
+            className="flex min-h-11 items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs font-medium text-inkSoft hover:bg-ink/[0.04] print:hidden"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
             Izvezi CSV
@@ -174,8 +183,8 @@ export function KitchenProductionClient() {
 
       <p className="mt-3 text-xs text-inkSoft">
         Izbačeno = stavke koje su prošle kroz kuhinjski KDS ekran i dostigle status{" "}
-        <span className="font-medium">SERVED</span> tokom izabranog perioda (po datumu slanja
-        porudžbine). Stornirano = poništene stavke kuhinjske stanice. Vraćeno nije evidentirano u
+        <span className="font-medium">SERVED</span> tokom izabranog perioda (po vremenu završetka
+        u kuhinji). Stornirano = poništene stavke kuhinjske stanice. Vraćeno nije evidentirano u
         trenutnoj verziji sistema.
       </p>
     </div>

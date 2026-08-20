@@ -1,5 +1,5 @@
 import { prisma, Prisma } from "@rcs/db";
-import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -21,9 +21,10 @@ export class InsufficientStockError extends Error {
 
 export async function listInventory(ctx: AuthContext, locationId?: string) {
   requirePermission(ctx, "inventory.view");
+  if (locationId) requireLocationAccess(ctx, locationId);
   const where = {
     restaurantId: ctx.restaurantId,
-    ...(locationId ? { locationId } : {}),
+    locationId: locationId ?? { in: ctx.locationIds },
   };
   return prisma.inventoryItem.findMany({
     where,
@@ -47,6 +48,7 @@ export async function getInventoryItem(ctx: AuthContext, id: string) {
     },
   });
   if (!item) throw new Error("Stavka zalihe nije pronađena");
+  requireLocationAccess(ctx, item.locationId);
   return item;
 }
 
@@ -56,6 +58,7 @@ export async function getMovements(ctx: AuthContext, inventoryItemId: string, li
     where: { id: inventoryItemId, restaurantId: ctx.restaurantId },
   });
   if (!item) throw new Error("Stavka zalihe nije pronađena");
+  requireLocationAccess(ctx, item.locationId);
   return prisma.inventoryMovement.findMany({
     where: { inventoryItemId },
     orderBy: { createdAt: "desc" },
@@ -80,6 +83,7 @@ export async function initializeTracking(
     where: { id: input.locationId, restaurantId: ctx.restaurantId },
   });
   if (!location) throw new Error("Lokacija nije pronađena");
+  requireLocationAccess(ctx, location.id);
 
   if (input.initialStock < 0) throw new Error("Početno stanje ne može biti negativno");
 
@@ -403,6 +407,7 @@ export async function bulkSetOpeningStock(
     where: { id: input.locationId, restaurantId: ctx.restaurantId },
   });
   if (!location) throw new Error("Lokacija nije pronađena");
+  requireLocationAccess(ctx, location.id);
 
   const menuItemIds = input.lines.map((l) => l.menuItemId);
   const menuItems = await prisma.menuItem.findMany({
@@ -510,6 +515,7 @@ export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId
     where: { id: input.locationId, restaurantId: ctx.restaurantId },
   });
   if (!location) throw new Error("Lokacija nije pronađena");
+  requireLocationAccess(ctx, location.id);
 
   const tracked = await prisma.inventoryItem.findMany({
     where: { restaurantId: ctx.restaurantId, locationId: input.locationId },
@@ -554,6 +560,16 @@ async function _applyDelta(
   type: "RECEIPT" | "ADJUSTMENT" | "WRITE_OFF",
   meta: { employeeId: string; reason: string }
 ) {
+  const accessibleItem = await prisma.inventoryItem.findFirst({
+    where: {
+      id: inventoryItemId,
+      restaurantId: ctx.restaurantId,
+      locationId: { in: ctx.locationIds },
+    },
+    select: { id: true },
+  });
+  if (!accessibleItem) throw new Error("Stavka zalihe nije pronađena");
+
   return prisma.$transaction(async (tx) => {
     type UpdatedRow = {
       id: string;
