@@ -43,6 +43,7 @@ interface Movement {
   quantityAfter: number;
   reason: string | null;
   createdAt: string;
+  employeeName?: string | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ const UNCAT = "__uncategorized__";
 const TYPE_LABELS: Record<string, string> = {
   INITIAL: "Inicijalizacija",
   OPENING_STOCK: "Početno stanje",
-  RECEIPT: "Primanje robe",
+  RECEIPT: "Prijem robe",
   SALE: "Prodaja",
   ADJUSTMENT: "Korekcija",
   WRITE_OFF: "Otpis",
@@ -64,9 +65,20 @@ function fmtQty(n: number) {
   return n % 1 === 0 ? n.toString() : n.toFixed(3).replace(/\.?0+$/, "");
 }
 
-function isLowStock(item: InventoryItem) {
+function stockStatus(item: InventoryItem): "out" | "low" | "ok" {
+  if (item.currentStock <= 0) return "out";
   const min = item.menuItem.minimumStock;
-  return min != null && item.currentStock <= Number(min);
+  if (min != null && item.currentStock <= Number(min)) return "low";
+  return "ok";
+}
+
+function isLowStock(item: InventoryItem) {
+  return stockStatus(item) === "low";
+}
+
+function fmtDate(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleString("sr-RS", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 const inputClass =
@@ -119,11 +131,11 @@ function TabPill({
 
 // ─── Modals ───────────────────────────────────────────────────────────────────
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-graphite-900/50 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-md animate-slide-up rounded-lg bg-white shadow-elevated"
+        className={`w-full animate-slide-up rounded-lg bg-white shadow-elevated ${wide ? "max-w-3xl" : "max-w-md"}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-line px-6 py-4">
@@ -195,8 +207,9 @@ function AdjustModal({ item, onClose, onDone }: { item: InventoryItem; onClose: 
     } finally { setLoading(false); }
   }
 
+  const adjustTitle = type === "WRITE_OFF" ? `Otpis — ${item.menuItem.name}` : `Korekcija — ${item.menuItem.name}`;
   return (
-    <Modal title={`Korekcija — ${item.menuItem.name}`} onClose={onClose}>
+    <Modal title={adjustTitle} onClose={onClose}>
       <p className="mb-4 text-sm text-inkSoft">Trenutno stanje: <strong className="text-ink">{fmtQty(item.currentStock)} {item.unit}</strong></p>
       <div className="mb-3 flex gap-2">
         {(["ADJUSTMENT", "WRITE_OFF"] as const).map(t => (
@@ -230,7 +243,7 @@ function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () =>
   }, [item.id]);
 
   return (
-    <Modal title={`Historija — ${item.menuItem.name}`} onClose={onClose}>
+    <Modal title={`Historija zaliha — ${item.menuItem.name}`} onClose={onClose} wide>
       {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-5 w-full" />
@@ -240,25 +253,31 @@ function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () =>
       ) : movements.length === 0 ? (
         <EmptyState title="Nema kretanja" description="Ovaj artikal još nema zabeleženu istoriju zaliha." />
       ) : (
-        <div className="max-h-80 overflow-y-auto">
+        <div className="max-h-[480px] overflow-y-auto">
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-white">
               <tr className="border-b border-line text-left text-inkSoft">
-                <th className="pb-1.5 pr-2 font-medium">Tip</th>
+                <th className="pb-1.5 pr-3 font-medium">Datum</th>
+                <th className="pb-1.5 pr-3 font-medium">Tip</th>
                 <th className="pb-1.5 pr-2 text-right font-medium">Δ</th>
-                <th className="pb-1.5 pr-2 text-right font-medium">Posle</th>
+                <th className="pb-1.5 pr-2 text-right font-medium">Pre</th>
+                <th className="pb-1.5 pr-3 text-right font-medium">Posle</th>
+                <th className="pb-1.5 pr-3 font-medium">Zaposleni</th>
                 <th className="pb-1.5 font-medium">Razlog</th>
               </tr>
             </thead>
             <tbody>
               {movements.map(m => (
-                <tr key={m.id} className="border-b border-line/60">
-                  <td className="py-1.5 pr-2 font-medium text-ink">{TYPE_LABELS[m.type] ?? m.type}</td>
+                <tr key={m.id} className="border-b border-line/60 hover:bg-cream-200/40">
+                  <td className="py-1.5 pr-3 text-inkSoft whitespace-nowrap">{fmtDate(m.createdAt)}</td>
+                  <td className="py-1.5 pr-3 font-medium text-ink whitespace-nowrap">{TYPE_LABELS[m.type] ?? m.type}</td>
                   <td className={`py-1.5 pr-2 text-right font-mono tabular-nums ${Number(m.quantityDelta) >= 0 ? "text-success" : "text-danger"}`}>
                     {Number(m.quantityDelta) >= 0 ? "+" : ""}{fmtQty(Number(m.quantityDelta))}
                   </td>
-                  <td className="py-1.5 pr-2 text-right font-mono tabular-nums text-ink">{fmtQty(Number(m.quantityAfter))}</td>
-                  <td className="max-w-[120px] truncate py-1.5 text-inkSoft">{m.reason ?? "—"}</td>
+                  <td className="py-1.5 pr-2 text-right font-mono tabular-nums text-inkSoft">{fmtQty(Number(m.quantityBefore))}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-ink font-semibold">{fmtQty(Number(m.quantityAfter))}</td>
+                  <td className="py-1.5 pr-3 text-inkSoft whitespace-nowrap">{m.employeeName ?? "—"}</td>
+                  <td className="max-w-[180px] truncate py-1.5 text-inkSoft">{m.reason ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -658,7 +677,8 @@ export function InventoryClient() {
     });
   }, [items, search, activeCategoryTab]);
 
-  const lowStockCount = items.filter(isLowStock).length;
+  const outOfStockCount = items.filter(i => stockStatus(i) === "out").length;
+  const lowStockCount = items.filter(i => stockStatus(i) === "low").length;
 
   function selectTab(id: string | null) {
     setActiveCategoryTab(prev => (prev === id ? null : id));
@@ -702,7 +722,8 @@ export function InventoryClient() {
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
-        {lowStockCount > 0 && <Badge tone="danger">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
+        {outOfStockCount > 0 && <Badge tone="danger">{outOfStockCount} {outOfStockCount === 1 ? "artikal nema" : "artikala nema"} zalihe</Badge>}
+        {lowStockCount > 0 && <Badge tone="warn">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
       </div>
 
       {/* ── Category tab strip (same pattern as Menu) ────────────────────────── */}
@@ -756,16 +777,25 @@ export function InventoryClient() {
               </thead>
               <tbody className="divide-y divide-line/60">
                 {filtered.map(item => {
-                  const low = isLowStock(item);
+                  const status = stockStatus(item);
                   const min = item.menuItem.minimumStock;
+                  const rowCls =
+                    status === "out" ? "bg-danger-soft/60 shadow-[inset_3px_0_0_#B91C1C]" :
+                    status === "low" ? "bg-warn-soft/40 shadow-[inset_3px_0_0_#B45309]" :
+                    "hover:bg-cream-200/60";
+                  const stockCls =
+                    status === "out" ? "text-danger" :
+                    status === "low" ? "text-warn" :
+                    "text-ink";
                   return (
-                    <tr key={item.id} className={low ? "bg-danger-soft/40 shadow-[inset_3px_0_0_#B91C1C]" : "hover:bg-cream-200/60"}>
+                    <tr key={item.id} className={rowCls}>
                       <td className="px-4 py-3">
                         <span className="block font-semibold text-ink">{item.menuItem.name}</span>
-                        {low && <Badge tone="danger">Niska zaliha</Badge>}
+                        {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
+                        {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
                       </td>
                       <td className="px-4 py-3 text-inkSoft">{item.location.name}</td>
-                      <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${low ? "text-danger" : "text-ink"}`}>
+                      <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${stockCls}`}>
                         {fmtQty(item.currentStock)} {item.unit}
                       </td>
                       <td className="px-4 py-3 text-right font-mono tabular-nums text-inkSoft">

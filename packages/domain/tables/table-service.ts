@@ -37,6 +37,7 @@ export async function getTable(ctx: AuthContext, tableId: string) {
   });
   if (!table) throw new Error("Sto nije pronađen");
   requireLocationAccess(ctx, table.floor.locationId);
+  if (!table.isActive) throw new Error("Sto nije aktivan i ne može se koristiti za porudžbine");
   return table;
 }
 

@@ -620,7 +620,9 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     const otherLocation = await prisma.location.create({
       data: { restaurantId: fixture.restaurantId, name: "Other" },
     });
-    const otherInventory = await inventory.initializeTracking(ctx, {
+    // initializeTracking requires location access — use a setup ctx that covers both locations
+    const setupCtx = { ...ctx, locationIds: [fixture.locationId, otherLocation.id] };
+    const otherInventory = await inventory.initializeTracking(setupCtx, {
       menuItemId: fixture.menuItemId,
       locationId: otherLocation.id,
       initialStock: 10,

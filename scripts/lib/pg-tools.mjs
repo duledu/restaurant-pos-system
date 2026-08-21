@@ -29,8 +29,7 @@ export function requireTool(bin, installHint) {
     throw new Error(
       `${check.reason}\n\n` +
         `TableCore's backup/restore tooling requires the PostgreSQL client tools ` +
-        `(same major version as the Neon server, currently Postgres 16) to be ` +
-        `installed and on PATH.\n${installHint}\n\n` +
+        `(Postgres 16 or newer) to be installed and on PATH.\n${installHint}\n\n` +
         `This is a known environment limitation in some sandboxes — see ` +
         `docs/database-backup-recovery.md → "Environment limitation."`
     );
@@ -39,9 +38,10 @@ export function requireTool(bin, installHint) {
 }
 
 export const INSTALL_HINT =
-  "  Windows: install \"PostgreSQL 16\" from https://www.postgresql.org/download/windows/ " +
-  "(client tools only is enough) and add its \\bin directory to PATH, or " +
-  "`choco install postgresql16 --params '/Password:unused'`.\n" +
-  "  macOS:   brew install postgresql@16\n" +
-  "  Linux:   apt-get install postgresql-client-16 (or your distro's equivalent)\n" +
+  "  Windows: if a recent PostgreSQL installation is already on this machine, add its " +
+  "\\bin directory to PATH (e.g. C:\\Program Files\\PostgreSQL\\<version>\\bin). " +
+  "Otherwise install from https://www.postgresql.org/download/windows/ " +
+  "(\"Command Line Tools\" is enough — no server needed).\n" +
+  "  macOS:   brew install postgresql@16  (or @17, @18 — any recent version)\n" +
+  "  Linux:   apt-get install postgresql-client  (or postgresql-client-16/17/18)\n" +
   "  Docker:  docker run --rm -v <backups-dir>:/backups postgres:16 pg_dump ...";

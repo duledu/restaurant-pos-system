@@ -300,6 +300,15 @@ describe("table: deaktivacija i aktivacija", () => {
     expect(found?.isActive).toBe(false);
   });
 
+  it("deaktiviran sto nije dostupan konobaru za otvaranje porudzbine", async () => {
+    const { f, ctx, table } = await setup();
+    await tables.deactivateTable(ctx, table.id);
+
+    await expect(
+      tables.getTable(waiterCtx(f), table.id)
+    ).rejects.toThrow("nije aktivan");
+  });
+
   it("WAITER ne moze deaktivirati sto", async () => {
     const { f, table } = await setup();
     await expect(

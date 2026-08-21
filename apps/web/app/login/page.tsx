@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "../../components/ui/Button";
 import { AppLogo } from "../../components/branding/AppLogo";
@@ -41,13 +41,13 @@ export default function LoginPage() {
     setMode("staff");
   }
 
-  function handleDeviceInvalid() {
+  const handleDeviceInvalid = useCallback(() => {
     // Server odgovorio 403 — deviceId u localStorage-u više ne postoji u bazi.
     // Obrišemo zastareli localStorage i prebacimo na admin prijavu.
     clearDevice();
     setDeviceId(null);
     setMode("admin");
-  }
+  }, []);
 
   return (
     <main className="relative flex min-h-screen min-h-[100dvh] w-full justify-center overflow-x-hidden bg-[radial-gradient(circle_at_50%_-10%,#1A4A73_0%,#0A1931_38%,#06111E_100%)] px-4 pb-[clamp(1.5rem,6dvh,4rem)] pt-[clamp(1.5rem,7dvh,4rem)] sm:px-6">

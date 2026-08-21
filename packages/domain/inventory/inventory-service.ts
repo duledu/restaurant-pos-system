@@ -59,11 +59,27 @@ export async function getMovements(ctx: AuthContext, inventoryItemId: string, li
   });
   if (!item) throw new Error("Stavka zalihe nije pronađena");
   requireLocationAccess(ctx, item.locationId);
-  return prisma.inventoryMovement.findMany({
+
+  const movements = await prisma.inventoryMovement.findMany({
     where: { inventoryItemId },
     orderBy: { createdAt: "desc" },
     take: limit,
   });
+
+  const employeeIds = [...new Set(movements.flatMap((m) => (m.employeeId ? [m.employeeId] : [])))];
+  const employees =
+    employeeIds.length > 0
+      ? await prisma.employee.findMany({
+          where: { id: { in: employeeIds } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : [];
+  const nameById = new Map(employees.map((e) => [e.id, `${e.firstName} ${e.lastName}`]));
+
+  return movements.map((m) => ({
+    ...m,
+    employeeName: m.employeeId ? (nameById.get(m.employeeId) ?? null) : null,
+  }));
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
