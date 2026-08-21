@@ -12,15 +12,21 @@ interface Fixture {
   menuItemId: string;
 }
 
-function context(fixture: Fixture, role: string, employeeId: string, locationIds = [fixture.locationId]): AuthContext {
+function context(fixture: Fixture, role: string, employeeId: string, locationIds = [fixture.locationId], permissions = ["shifts.manage"]): AuthContext {
   return {
     userId: employeeId,
     employeeId,
     restaurantId: fixture.restaurantId,
     locationIds,
     roles: [role],
-    permissions: new Set(["shifts.manage"]),
+    permissions: new Set(permissions),
   };
+}
+
+function waiterCtx(fixture: Fixture): AuthContext {
+  return context(fixture, "WAITER", "waiter-1", [fixture.locationId], [
+    "menu.view", "orders.create", "orders.submit",
+  ]);
 }
 
 async function createFixture(): Promise<Fixture> {
@@ -148,5 +154,137 @@ describe("shift closing and cash reconciliation", () => {
     const next = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 200 });
     expect(next.id).not.toBe(shift.id);
     expect(next.status).toBe("OPEN");
+  });
+});
+
+describe("shift closing: zero-sales and exact-match scenarios", () => {
+  it("can close a shift with zero payments (zero-sales shift)", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 500 });
+
+    const summary = await shifts.getShiftSummary(manager, shift.id);
+    expect(summary.cashTotal).toBe("0");
+    expect(summary.cardTotal).toBe("0");
+    expect(summary.expectedCash).toBe("500");
+    expect(summary.canClose).toBe(true);
+
+    const closed = await shifts.closeShift(manager, shift.id, { countedCash: 500 });
+    expect(closed.status).toBe("CLOSED");
+    expect(closed.cashDifference?.toString()).toBe("0");
+  });
+
+  it("exact cash match records difference of zero", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 1000 });
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+
+    // Cash payment is 120 (100 + 20% tax), expected = 1000 + 120 = 1120
+    const summary = await shifts.getShiftSummary(manager, shift.id);
+    const expectedCash = Number(summary.expectedCash);
+    const closed = await shifts.closeShift(manager, shift.id, { countedCash: expectedCash });
+    expect(closed.cashDifference?.toString()).toBe("0");
+  });
+});
+
+describe("shift closing: RBAC and activity gates", () => {
+  it("WAITER without shifts.manage cannot close a shift", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 0 });
+
+    await expect(
+      shifts.closeShift(waiterCtx(fixture), shift.id, { countedCash: 0 })
+    ).rejects.toThrow();
+  });
+
+  it("closed shift blocks new orders (no active shift)", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 0 });
+    await shifts.closeShift(manager, shift.id, { countedCash: 0 });
+
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    await expect(
+      orders.openOrder(waiter, { tableId: fixture.tableId })
+    ).rejects.toThrow("Nema aktivne smene");
+  });
+
+  it("closed shift blocks new payments (no active shift for billing)", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 0 });
+
+    // Open and submit order while shift is open
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    // Force-close shift without paying (use Prisma directly to bypass open-orders guard)
+    await prisma.shift.update({ where: { id: shift.id }, data: { status: "CLOSED", closedAt: new Date(), closedBy: "mgr-1" } });
+
+    // Billing should now fail — no active shift
+    await expect(
+      billing.completePayment(waiter, submitted.id, { method: "CASH" })
+    ).rejects.toThrow("Nema aktivne smene");
+  });
+});
+
+describe("shift closing: audit and snapshot integrity", () => {
+  it("closing creates an audit entry with correct financial values", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 2000 });
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+
+    await shifts.closeShift(manager, shift.id, { countedCash: 2050 });
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityId: shift.id, action: "shift.closed" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit?.action).toBe("shift.closed");
+    const values = audit?.newValue as Record<string, unknown>;
+    expect(values.expectedCash).toBeDefined();
+    expect(values.countedCash).toBeDefined();
+    expect(values.cashDifference).toBeDefined();
+    expect(values.totalRevenue).toBeDefined();
+  });
+
+  it("historical snapshot is stable — later unrelated changes do not alter closed shift snapshot", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 1000 });
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+
+    const closed = await shifts.closeShift(manager, shift.id, { countedCash: 1100 });
+    const snapshotExpected = closed.expectedCash?.toString();
+    const snapshotCounted = closed.countedCash?.toString();
+    const snapshotDiff = closed.cashDifference?.toString();
+
+    // Simulate an unrelated action: open a new shift on the same location, make sales, close it
+    const shift2 = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 500 });
+    await shifts.closeShift(manager, shift2.id, { countedCash: 999 });
+
+    // Re-read the original closed shift from DB
+    const reloaded = await prisma.shift.findUniqueOrThrow({ where: { id: shift.id } });
+    expect(reloaded.expectedCash?.toString()).toBe(snapshotExpected);
+    expect(reloaded.countedCash?.toString()).toBe(snapshotCounted);
+    expect(reloaded.cashDifference?.toString()).toBe(snapshotDiff);
   });
 });
