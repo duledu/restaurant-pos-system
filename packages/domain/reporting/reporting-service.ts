@@ -240,7 +240,14 @@ export interface CurrentStatus {
     employeeName: string;
     role: string;
     openedAt: string;
+    openingCash: string;
   }[];
+  /** P2.3: koliko stavki trenutno čeka na kuhinji/šanku (nije SERVED/CANCELLED) —
+   * PRODUKCIONA metrika (koliko posla čeka), NE finansijska (vidi station
+   * revenue u analytics-service.ts getStationComparison, koji ostaje jedini
+   * izvor za promet po stanici — ova dva broja se namerno ne mešaju). */
+  kitchenPendingItems: number;
+  barPendingItems: number;
 }
 
 /**
@@ -262,7 +269,7 @@ export async function getCurrentStatus(ctx: AuthContext, filters: { locationId: 
   }
   if (locationIds.length === 0) throw new Error("Nalog nema dodeljenu nijednu lokaciju");
 
-  const [openTables, activeOrders, openShifts] = await Promise.all([
+  const [openTables, activeOrders, openShifts, pendingByStation] = await Promise.all([
     prisma.restaurantTable.count({
       where: { status: { in: ["OCCUPIED", "AWAITING_BILL"] }, floor: { restaurantId: ctx.restaurantId, locationId: { in: locationIds } } },
     }),
@@ -273,9 +280,22 @@ export async function getCurrentStatus(ctx: AuthContext, filters: { locationId: 
       where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, status: "OPEN" },
       orderBy: { openedAt: "asc" },
     }),
+    // P2.3: koliko OrderItemStation redova još nije SERVED/CANCELLED —
+    // "koliko posla čeka" kuhinju/šank upravo sada (produkciona, ne finansijska metrika).
+    prisma.orderItemStation.groupBy({
+      by: ["station"],
+      where: {
+        status: { notIn: ["SERVED", "CANCELLED"] },
+        orderItem: {
+          order: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, status: { notIn: ["COMPLETED", "CANCELLED"] } },
+        },
+      },
+      _count: { _all: true },
+    }),
   ]);
 
   const nameById = await resolveEmployeeDisplayNames(ctx.restaurantId, openShifts.map((s) => s.openedBy));
+  const pendingFor = (station: "KITCHEN" | "BAR") => pendingByStation.find((p) => p.station === station)?._count._all ?? 0;
 
   return {
     openTables,
@@ -287,7 +307,10 @@ export async function getCurrentStatus(ctx: AuthContext, filters: { locationId: 
       employeeName: nameById.get(s.openedBy)?.name ?? "?",
       role: nameById.get(s.openedBy)?.role ?? "?",
       openedAt: s.openedAt.toISOString(),
+      openingCash: s.openingCash.toString(),
     })),
+    kitchenPendingItems: pendingFor("KITCHEN"),
+    barPendingItems: pendingFor("BAR"),
   };
 }
 

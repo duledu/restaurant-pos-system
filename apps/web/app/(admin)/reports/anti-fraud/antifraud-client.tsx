@@ -8,8 +8,7 @@ import { Badge } from "../../../../components/ui/Badge";
 import { KpiCard } from "../../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
 import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
-
-type Severity = "INFO" | "WARNING" | "HIGH";
+import { SEVERITY_BADGE_TONE, SEVERITY_LABEL, signalCategoryLabel, type Severity } from "../../../../components/admin/severity";
 
 interface Overview {
   signalsCount: number;
@@ -89,21 +88,6 @@ interface EmployeeAntiFraudRow {
   inventoryWriteOffs: number;
   signalsCount: number;
 }
-
-const CATEGORY_LABELS: Record<string, string> = {
-  FREQUENT_VOIDS: "Povećan broj storna",
-  HIGH_VALUE_VOID: "Storno visoke vrednosti",
-  REPEATED_VOID_REASON: "Ponovljen razlog storna",
-  VOID_AFTER_PRODUCTION: "Storno posle pripreme",
-  CASH_DISCREPANCY: "Razlika u gotovini",
-  UNAUTHORIZED_ATTEMPTS: "Neovlašćeni pokušaji",
-  LARGE_INVENTORY_WRITE_OFF: "Veliki otpis zaliha",
-  FREQUENT_INVENTORY_ADJUSTMENTS: "Česte korekcije zaliha",
-  REPEATED_ITEM_WRITE_OFF: "Ponovljen otpis artikla",
-};
-
-const SEVERITY_TONE: Record<Severity, "danger" | "warn" | "info"> = { HIGH: "danger", WARNING: "warn", INFO: "info" };
-const SEVERITY_LABEL: Record<Severity, string> = { HIGH: "Za proveru", WARNING: "Neuobičajeno", INFO: "Info" };
 
 const TABS = ["pregled", "storna", "gotovina", "zalihe", "zaposleni"] as const;
 type Tab = (typeof TABS)[number];
@@ -282,7 +266,7 @@ function PregledTab({ loading, signals }: { loading: boolean; signals: Signal[] 
             signals.map((s) =>
               [
                 SEVERITY_LABEL[s.severity],
-                CATEGORY_LABELS[s.category] ?? s.category,
+                signalCategoryLabel(s.category),
                 s.employeeName ?? s.itemName ?? "—",
                 s.description,
                 fmtDateTime(s.occurredAt),
@@ -298,8 +282,8 @@ function PregledTab({ loading, signals }: { loading: boolean; signals: Signal[] 
           <Card key={i} className="p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Badge tone={SEVERITY_TONE[s.severity]}>{SEVERITY_LABEL[s.severity]}</Badge>
-                <span className="text-sm font-semibold text-ink">{CATEGORY_LABELS[s.category] ?? s.category}</span>
+                <Badge tone={SEVERITY_BADGE_TONE[s.severity]}>{SEVERITY_LABEL[s.severity]}</Badge>
+                <span className="text-sm font-semibold text-ink">{signalCategoryLabel(s.category)}</span>
               </div>
               <span className="text-xs text-inkSoft">{fmtDateTime(s.occurredAt)}</span>
             </div>

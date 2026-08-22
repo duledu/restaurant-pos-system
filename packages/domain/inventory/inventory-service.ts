@@ -38,6 +38,59 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
   });
 }
 
+export interface StockAttentionItem {
+  id: string;
+  name: string;
+  currentStock: string;
+  minimumStock: number | null;
+  unit: string;
+  status: "out" | "low";
+}
+
+export interface StockAttentionSummary {
+  outOfStockCount: number;
+  lowStockCount: number;
+  worstItems: StockAttentionItem[];
+}
+
+const WORST_ITEMS_LIMIT = 5;
+
+/**
+ * P2.3 Owner Control Center — kompaktan pregled zaliha koje zahtevaju pažnju.
+ * NAMERNO ponovo koristi listInventory (ISTA lista koju vidi Zalihe stranica)
+ * i ISTU stockStatus definiciju kao inventory-client.tsx (P1.1: OUT kad je
+ * currentStock <= 0; LOW kad je currentStock > 0 i <= minimumStock) — ne
+ * izmišlja se druga granica za Dashboard (specifikacija P2.3 #11). Vraća
+ * SAMO brojeve + najgorih 5 stavki, ne kompletnu istoriju zaliha (#10/#26).
+ */
+export async function getStockAttention(ctx: AuthContext, locationId: string): Promise<StockAttentionSummary> {
+  const items = await listInventory(ctx, locationId === "ALL" ? undefined : locationId);
+  const tracked = items.filter((i) => i.menuItem.trackStock);
+
+  const classified = tracked.map((i) => {
+    const current = Number(i.currentStock);
+    const min = i.menuItem.minimumStock != null ? Number(i.menuItem.minimumStock) : null;
+    const status: "out" | "low" | "ok" = current <= 0 ? "out" : min != null && current <= min ? "low" : "ok";
+    return { item: i, status, current, min };
+  });
+
+  const outItems = classified.filter((c) => c.status === "out").sort((a, b) => a.current - b.current);
+  const lowItems = classified
+    .filter((c) => c.status === "low")
+    .sort((a, b) => (b.min! - b.current) - (a.min! - a.current)); // najveći deficit prvo
+
+  const worstItems: StockAttentionItem[] = [...outItems, ...lowItems].slice(0, WORST_ITEMS_LIMIT).map((c) => ({
+    id: c.item.id,
+    name: c.item.menuItem.name,
+    currentStock: c.item.currentStock.toString(),
+    minimumStock: c.min,
+    unit: c.item.unit,
+    status: c.status as "out" | "low",
+  }));
+
+  return { outOfStockCount: outItems.length, lowStockCount: lowItems.length, worstItems };
+}
+
 export async function getInventoryItem(ctx: AuthContext, id: string) {
   requirePermission(ctx, "inventory.view");
   const item = await prisma.inventoryItem.findFirst({
