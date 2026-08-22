@@ -83,6 +83,7 @@ model Restaurant {
   orders    Order[]
   settings  RestaurantSettings?
   inventoryItems InventoryItem[]
+  modifierGroups ModifierGroup[]
 
   @@index([tenantId])
   @@index([status])
@@ -422,6 +423,7 @@ model MenuItem {
   category       MenuCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   orderItems     OrderItem[]
   inventoryItems InventoryItem[]
+  modifierGroups MenuItemModifierGroup[]
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
@@ -429,6 +431,108 @@ model MenuItem {
   @@index([categoryId])
   @@index([preparationStation])
   @@map("menu_items")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA P3.2 — MODIFIKATORI / DODACI
+//
+// Modifikatori se tretiraju kao deo CENE I NAZIVA porudžbinske stavke, ne
+// kao odvojeni "lažni" MenuItem-i (specifikacija #26/#28/#29 — promet
+// dodataka mora pripasti roditeljskom artiklu/kategoriji/stanici bez ijedne
+// izmene u reporting-service.ts/analytics-service.ts). Zato:
+// OrderItem.price OD SADA znači "efektivna jedinična cena" (osnovna cena
+// artikla + zbir izabranih priceDelta vrednosti), snapshot-ovana pri
+// dodavanju u porudžbinu — isto kao što je do sada značila "osnovna cena".
+// computeOrderTotals, void-service, Payment, Receipt.items i
+// reporting-service.aggregateSoldItems zato NASTAVLJAJU DA RADE BEZ IZMENE
+// (već množe price × quantity) — jedina promena je ŠTA se snapshot-uje u
+// tom polju i par dodatnih redova (OrderItemModifier) za čitljiv prikaz.
+// ─────────────────────────────────────────────────────────────────────────
+
+model ModifierGroup {
+  id           String   @id @default(uuid())
+  restaurantId String
+  name         String
+  // required/min/max je JEDAN fleksibilan model umesto posebnih "tipova"
+  // grupa (Veličina/Dodaci/...) — specifikacija #4/#5 eksplicitno traži da
+  // se izbegnu hardkodovani tipovi grupa u korist ova tri broja/zastavice.
+  required   Boolean @default(false)
+  minSelect  Int     @default(0)
+  maxSelect  Int     @default(1)
+  sortOrder  Int     @default(0)
+  // Meka deaktivacija (specifikacija #36) — istorijski OrderItemModifier
+  // snapshot redovi NIKAD ne zavise od ovog polja (imaju sopstveni snapshot
+  // naziva/cene), pa deaktivacija grupe ne menja ništa u prošlim porudžbinama.
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurant Restaurant              @relation(fields: [restaurantId], references: [id])
+  options    ModifierOption[]
+  menuItems  MenuItemModifierGroup[]
+
+  @@index([restaurantId])
+  @@index([restaurantId, isActive])
+  @@map("modifier_groups")
+}
+
+model ModifierOption {
+  id              String  @id @default(uuid())
+  modifierGroupId String
+  name            String
+  priceDelta      Decimal @db.Decimal(12, 2) @default(0)
+  sortOrder       Int     @default(0)
+  isActive        Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  group              ModifierGroup       @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  orderItemModifiers OrderItemModifier[]
+
+  @@index([modifierGroupId])
+  @@map("modifier_options")
+}
+
+// MenuItem <-> ModifierGroup je namerno many-to-many (specifikacija #34 —
+// "Dodaci za pizzu" grupa se može vezati za više artikala) preko obične
+// join tabele — ne dupliramo definiciju grupe po artiklu.
+model MenuItemModifierGroup {
+  id              String   @id @default(uuid())
+  menuItemId      String
+  modifierGroupId String
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  menuItem MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  group    ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([menuItemId, modifierGroupId])
+  @@index([menuItemId])
+  @@index([modifierGroupId])
+  @@map("menu_item_modifier_groups")
+}
+
+// Istorijski snapshot IZABRANE opcije na porudžbinskoj stavci — ISTA
+// filozofija kao OrderItem.name/price (zamrznuto u trenutku dodavanja,
+// nikad se ne preračunava iz trenutnog ModifierOption reda). modifierOptionId
+// je nullable + SetNull (isti obrazac kao MenuItem.categoryId) — brisanje
+// izvorne opcije/grupe kasnije NE SME obrisati istorijski prikaz.
+model OrderItemModifier {
+  id               String   @id @default(uuid())
+  orderItemId      String
+  modifierOptionId String?
+  groupName        String
+  optionName       String
+  priceDelta       Decimal  @db.Decimal(12, 2)
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  orderItem OrderItem       @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  option    ModifierOption? @relation(fields: [modifierOptionId], references: [id], onDelete: SetNull)
+
+  @@index([orderItemId])
+  @@index([modifierOptionId])
+  @@map("order_item_modifiers")
 }
 
 enum PreparationStation {
@@ -623,6 +727,7 @@ model OrderItem {
   menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
   stationStates OrderItemStation[]
   voids         OrderItemVoid[]
+  modifiers     OrderItemModifier[]
 
   @@index([orderId])
   @@index([menuItemId])

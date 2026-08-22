@@ -74,6 +74,40 @@ export const moveToCategorySchema = z.object({
 });
 export type MoveToCategoryInput = z.infer<typeof moveToCategorySchema>;
 
+// ── P3.2: MODIFIKATORI / DODACI ────────────────────────────────────────
+
+export const createModifierGroupSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  required: z.boolean().default(false),
+  minSelect: z.number().int().nonnegative().default(0),
+  maxSelect: z.number().int().positive().default(1),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+export type CreateModifierGroupInput = z.infer<typeof createModifierGroupSchema>;
+
+export const updateModifierGroupSchema = createModifierGroupSchema.partial();
+export type UpdateModifierGroupInput = z.infer<typeof updateModifierGroupSchema>;
+
+const priceDeltaSchema = z
+  .number()
+  // Modifikatori su tipično dodaci (>= 0); dozvoljen mali negativan opseg
+  // radi buduće fleksibilnosti (npr. "manja porcija -50") bez otvaranja
+  // vrata za nerealne popuste kroz "cenu opcije".
+  .min(-100_000, "Vrednost je nerealno velika — proveri unos")
+  .max(1_000_000, "Vrednost je nerealno velika — proveri unos");
+
+export const createModifierOptionSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  priceDelta: priceDeltaSchema.default(0),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+export type CreateModifierOptionInput = z.infer<typeof createModifierOptionSchema>;
+
+export const updateModifierOptionSchema = createModifierOptionSchema.partial();
+export type UpdateModifierOptionInput = z.infer<typeof updateModifierOptionSchema>;
+
 export const menuItemFiltersSchema = z.object({
   search: z.string().trim().max(200).optional(),
   categoryId: z.string().uuid().optional(),

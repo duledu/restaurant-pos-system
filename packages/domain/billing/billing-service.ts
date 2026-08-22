@@ -16,7 +16,10 @@ async function loadOrderForBilling(ctx: AuthContext, orderId: string) {
   requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({
     where: { id: orderId, ...scopeToRestaurant(ctx) },
-    include: { items: { orderBy: { createdAt: "asc" } }, table: true },
+    include: {
+      items: { include: { modifiers: { orderBy: { sortOrder: "asc" } } }, orderBy: { createdAt: "asc" } },
+      table: true,
+    },
   });
   if (!order) throw new Error("Porudžbina nije pronađena");
   requireLocationAccess(ctx, order.locationId);
@@ -205,13 +208,23 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
         total,
         currency: restaurant.currency,
         discountAmount: discount.isZero() ? null : discount,
-        items: payableItems.map((item) => ({
-          name: item.name,
-          price: item.price.toString(),
-          taxRate: item.taxRate.toString(),
-          quantity: item.quantity,
-          lineTotal: new Prisma.Decimal(item.price).mul(item.quantity).toDecimalPlaces(2).toString(),
-        })),
+        // P3.2: `price`/`lineTotal` ostaju NEPROMENJENI po značenju (efektivna
+        // jedinična cena × količina — ista računica kao pre modifikatora).
+        // `basePrice`/`modifiers` su ADITIVNA polja za čitljiv prikaz na
+        // računu (specifikacija #20) — stariji računi (pre P3.2) ih nemaju,
+        // ticket-content/renderer to tretira kao "nema dodataka", ne kao grešku.
+        items: payableItems.map((item) => {
+          const modifierTotal = item.modifiers.reduce((sum, m) => sum.add(m.priceDelta), new Prisma.Decimal(0));
+          return {
+            name: item.name,
+            price: item.price.toString(),
+            basePrice: new Prisma.Decimal(item.price).sub(modifierTotal).toDecimalPlaces(2).toString(),
+            modifiers: item.modifiers.map((m) => ({ name: m.optionName, priceDelta: m.priceDelta.toString() })),
+            taxRate: item.taxRate.toString(),
+            quantity: item.quantity,
+            lineTotal: new Prisma.Decimal(item.price).mul(item.quantity).toDecimalPlaces(2).toString(),
+          };
+        }),
         taxBreakdown: taxBreakdown as never,
       },
     });

@@ -3,6 +3,7 @@ export * as antifraud from "./audit/antifraud-service";
 export * as employees from "./employees/employee-service";
 export * as devices from "./devices/device-service";
 export * as menu from "./menu/menu-service";
+export * as modifiers from "./menu/modifier-service";
 export * as shifts from "./shifts/shift-service";
 export * as tables from "./tables/table-service";
 export * as orders from "./orders/order-service";

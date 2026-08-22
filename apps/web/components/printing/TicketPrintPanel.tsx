@@ -4,6 +4,7 @@ interface TicketItem {
   quantity: number;
   name: string;
   note?: string | null;
+  modifiers?: string[];
 }
 
 interface KitchenBarContent {
@@ -23,7 +24,7 @@ interface StornoContent {
   tableLabel: string;
   orderNumber: string;
   voidedAt: string;
-  items: { quantity: number; name: string }[];
+  items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
 }
 
@@ -41,7 +42,14 @@ interface ReceiptContent {
   tableLabel: string;
   waiterName: string;
   issuedAt: string;
-  items: { quantity: number; name: string; unitPrice: string; lineTotal: string }[];
+  items: {
+    quantity: number;
+    name: string;
+    unitPrice: string;
+    lineTotal: string;
+    basePrice?: string;
+    modifiers?: { name: string; priceDelta: string }[];
+  }[];
   subtotal: string;
   taxTotal: string;
   discountAmount: string | null;
@@ -85,6 +93,9 @@ function KitchenBarTicket({ content }: { content: KitchenBarContent }) {
             <span className="t-item-qty">{item.quantity}x</span>
             <span style={{ flex: 1 }}>{item.name}</span>
           </div>
+          {item.modifiers?.map((m, mi) => (
+            <div className="t-note" key={mi} style={{ fontWeight: 700 }}>{m}</div>
+          ))}
           {item.note && <div className="t-note">* {item.note}</div>}
         </div>
       ))}
@@ -105,9 +116,14 @@ function StornoTicket({ content }: { content: StornoContent }) {
       <hr className="t-sep" />
       <div className="t-meta" style={{ fontWeight: 700 }}>STORNIRATI:</div>
       {content.items.map((item, i) => (
-        <div className="t-item" key={i}>
-          <span className="t-item-qty">{item.quantity}x</span>
-          <span style={{ flex: 1 }}>{item.name}</span>
+        <div key={i}>
+          <div className="t-item">
+            <span className="t-item-qty">{item.quantity}x</span>
+            <span style={{ flex: 1 }}>{item.name}</span>
+          </div>
+          {item.modifiers?.map((m, mi) => (
+            <div className="t-note" key={mi} style={{ fontWeight: 700 }}>{m}</div>
+          ))}
         </div>
       ))}
       <div className="t-note">Razlog: {content.reasonLabel}</div>
@@ -131,12 +147,27 @@ function ReceiptTicket({ content }: { content: ReceiptContent }) {
       <div className="t-meta">Konobar: {content.waiterName}</div>
       <div className="t-meta">{fmtDateTime(content.issuedAt)}</div>
       <hr className="t-sep" />
-      {content.items.map((item, i) => (
-        <div className="t-line" key={i}>
-          <span>{item.quantity}x {item.name}</span>
-          <span>{Number(item.lineTotal).toFixed(2)}</span>
-        </div>
-      ))}
+      {content.items.map((item, i) => {
+        // Osnovna cena × količina na prvoj liniji, svaki dodatak × količina
+        // ispod nje — zbir svih prikazanih linija je TAČNO lineTotal (isti
+        // iznos koji ulazi u Payment/Order ukupno). Stariji računi (bez
+        // basePrice/modifiers) se prikazuju identično kao pre P3.2.
+        const baseLineTotal = item.basePrice != null ? Number(item.basePrice) * item.quantity : Number(item.lineTotal);
+        return (
+          <div key={i}>
+            <div className="t-line">
+              <span>{item.quantity}x {item.name}</span>
+              <span>{baseLineTotal.toFixed(2)}</span>
+            </div>
+            {item.modifiers?.map((m, mi) => (
+              <div className="t-line" key={mi} style={{ paddingLeft: 8, opacity: 0.8 }}>
+                <span>+ {m.name}</span>
+                <span>{(Number(m.priceDelta) * item.quantity).toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
       <hr className="t-sep" />
       <div className="t-line"><span>Osnovica:</span><span>{Number(content.subtotal).toFixed(2)}</span></div>
       <div className="t-line"><span>PDV:</span><span>{Number(content.taxTotal).toFixed(2)}</span></div>

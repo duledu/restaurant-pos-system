@@ -6,12 +6,33 @@ import { AppLogo } from "../branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
 import { fetchPrintJobs, printAndConfirm, type PrintJob } from "../../lib/print-client";
 
+interface StationItemModifier {
+  id: string;
+  optionName: string;
+  priceDelta: string;
+}
 interface StationItem {
   id: string;
   name: string;
   quantity: number;
   note: string | null;
   status: "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
+  modifiers: StationItemModifier[];
+}
+
+/** Dodaci moraju biti odmah uočljivi na KDS-u (specifikacija #16/#52) — "+"
+ * prefiks se određuje po CENI (priceDelta > 0), ne parsiranjem naziva. */
+function ModifierList({ modifiers, tone }: { modifiers: StationItemModifier[]; tone: "active" | "completed" }) {
+  if (modifiers.length === 0) return null;
+  return (
+    <ul className={`mt-1 space-y-0.5 border-l-2 pl-2 ${tone === "active" ? "border-gold/50" : "border-white/10"}`}>
+      {modifiers.map((m) => (
+        <li key={m.id} className={`text-xs font-semibold ${tone === "active" ? "text-gold" : "text-cream-300/60"}`}>
+          {Number(m.priceDelta) > 0 ? `+ ${m.optionName}` : m.optionName}
+        </li>
+      ))}
+    </ul>
+  );
 }
 interface StationOrder {
   orderId: string;
@@ -275,6 +296,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                             <div className="text-base font-semibold leading-snug text-cream-100">
                               {item.quantity}× {item.name}
                             </div>
+                            <ModifierList modifiers={item.modifiers} tone="active" />
                             {item.note && (
                               <div className="mt-0.5 text-xs italic text-cream-300/70">
                                 {item.note}
@@ -334,6 +356,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                         <div className="text-sm font-semibold leading-snug text-cream-100/70">
                           {item.quantity}× {item.name}
                         </div>
+                        <ModifierList modifiers={item.modifiers} tone="completed" />
                         {item.note && (
                           <div className="mt-0.5 text-xs italic text-cream-300/50">
                             {item.note}

@@ -5,17 +5,43 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
 import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, type VoidReasonCode } from "@rcs/shared";
+import { sameModifierSelection } from "../../../../lib/order-cart";
 
 interface Category {
   id: string;
   name: string;
   type: "FOOD" | "DRINK";
 }
+interface ModifierOption {
+  id: string;
+  name: string;
+  priceDelta: string;
+  isActive: boolean;
+}
+interface ModifierGroup {
+  id: string;
+  name: string;
+  required: boolean;
+  minSelect: number;
+  maxSelect: number;
+  isActive: boolean;
+  options: ModifierOption[];
+}
 interface MenuItem {
   id: string;
   name: string;
   price: string;
   categoryId: string | null;
+  // Sirovi Prisma include oblik (MenuItemModifierGroup join) — vidi
+  // menu-service.ts listMenuItems. Prazan niz za artikle bez dodataka.
+  modifierGroups: { group: ModifierGroup }[];
+}
+interface OrderItemModifier {
+  id: string;
+  modifierOptionId: string | null;
+  groupName: string;
+  optionName: string;
+  priceDelta: string;
 }
 interface OrderItem {
   id: string;
@@ -25,7 +51,9 @@ interface OrderItem {
   quantity: number;
   note: string | null;
   status: "DRAFT" | "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
+  modifiers: OrderItemModifier[];
 }
+
 interface OrderData {
   id: string;
   status: string;
@@ -191,6 +219,159 @@ function VoidItemModal({
   );
 }
 
+/**
+ * Brzi izbor dodataka — otvara se SAMO za artikle koji imaju vezane grupe
+ * (specifikacija #10: artikal bez dodataka zadržava postojeći brzi tap-add,
+ * bez modala). Jednostavan single-tap toggle: grupe sa maxSelect<=1 se
+ * ponašaju kao radio (tap zamenjuje prethodni izbor u toj grupi), ostale
+ * kao checkbox do maxSelect granice.
+ */
+function ModifierSelectionModal({
+  item,
+  initialSelectedIds = [],
+  confirmVerb = "Dodaj",
+  onCancel,
+  onConfirm,
+}: {
+  item: MenuItem;
+  initialSelectedIds?: string[];
+  confirmVerb?: string;
+  onCancel: () => void;
+  onConfirm: (optionIds: string[]) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set(initialSelectedIds));
+  const [submitting, setSubmitting] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const groups = useMemo(() => item.modifierGroups.map((g) => g.group).filter((g) => g.isActive), [item]);
+
+  function toggle(group: ModifierGroup, optionId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const groupOptionIds = group.options.map((o) => o.id);
+      const selectedInGroup = groupOptionIds.filter((id) => next.has(id));
+      if (next.has(optionId)) {
+        next.delete(optionId);
+        return next;
+      }
+      if (group.maxSelect <= 1) {
+        for (const id of selectedInGroup) next.delete(id);
+        next.add(optionId);
+        return next;
+      }
+      if (selectedInGroup.length >= group.maxSelect) return prev;
+      next.add(optionId);
+      return next;
+    });
+  }
+
+  const effectivePrice = useMemo(() => {
+    let total = Number(item.price);
+    for (const g of groups) {
+      for (const o of g.options) {
+        if (selected.has(o.id)) total += Number(o.priceDelta);
+      }
+    }
+    return total;
+  }, [selected, groups, item.price]);
+
+  const missingRequired = groups.some((g) => g.required && g.options.filter((o) => selected.has(o.id)).length < Math.max(1, g.minSelect));
+  const canConfirm = !missingRequired;
+
+  async function confirm() {
+    if (!canConfirm || submitting) return;
+    setSubmitting(true);
+    setLocalError(null);
+    try {
+      await onConfirm(Array.from(selected));
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-end justify-center bg-ink/40 sm:items-center" onClick={onCancel}>
+      <div
+        className="flex max-h-[85vh] w-full max-w-md flex-col rounded-t-lg bg-white shadow-elevated sm:rounded-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-line px-4 py-3">
+          <h2 className="text-lg font-semibold text-ink">{item.name}</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {groups.map((group) => {
+            const isSingle = group.maxSelect <= 1;
+            return (
+              <div key={group.id} className="mb-5 last:mb-0">
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-ink">
+                    {group.name} {group.required && <span className="text-danger">*</span>}
+                  </h3>
+                  <span className="text-xs text-inkSoft">
+                    {group.required ? "Obavezno" : "Opciono"}
+                    {group.maxSelect > 1 ? ` · do ${group.maxSelect} izbora` : ""}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {group.options
+                    .filter((o) => o.isActive)
+                    .map((option) => {
+                      const isSelected = selected.has(option.id);
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => toggle(group, option.id)}
+                          className={`flex min-h-12 w-full items-center justify-between rounded-md border px-3 py-2.5 text-left transition-colors ${
+                            isSelected ? "border-gold bg-gold-soft" : "border-line bg-white hover:border-gold/50"
+                          }`}
+                        >
+                          <span className="flex items-center gap-2.5 text-sm text-ink">
+                            <span
+                              className={`flex h-5 w-5 shrink-0 items-center justify-center border text-xs text-white ${
+                                isSingle ? "rounded-full" : "rounded-sm"
+                              } ${isSelected ? "border-gold bg-gold" : "border-line"}`}
+                              aria-hidden="true"
+                            >
+                              {isSelected ? "✓" : ""}
+                            </span>
+                            {option.name}
+                          </span>
+                          {Number(option.priceDelta) > 0 && (
+                            <span className="shrink-0 text-sm font-medium tabular-nums text-inkSoft">
+                              +{Number(option.priceDelta).toFixed(0)} RSD
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {localError && <div className="mx-4 mb-2 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{localError}</div>}
+        <div className="border-t border-line p-4">
+          <div className="flex gap-3">
+            <button type="button" onClick={onCancel} className="flex-1 rounded-md border border-line py-3 text-base font-medium text-ink">
+              Otkaži
+            </button>
+            <button
+              type="button"
+              onClick={confirm}
+              disabled={!canConfirm || submitting}
+              className="flex-[2] rounded-md bg-gold py-3 text-base font-semibold text-white disabled:opacity-40"
+            >
+              {submitting ? "Čuvanje…" : `${confirmVerb} — ${effectivePrice.toFixed(0)} RSD`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function OrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
   const [order, setOrder] = useState<OrderData | null>(null);
@@ -205,6 +386,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [roles, setRoles] = useState<string[]>([]);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
+  // Artikal za koji je otvoren modal izbora dodataka (dodavanje nove stavke).
+  const [modifierPickerItem, setModifierPickerItem] = useState<MenuItem | null>(null);
+  // Postojeća DRAFT stavka čiji se dodaci uređuju (umesto dodavanja nove).
+  const [editingModifiersFor, setEditingModifiersFor] = useState<OrderItem | null>(null);
 
   const canVoid = useMemo(() => roles.some((r) => MANAGEMENT_ROLES.has(r)), [roles]);
 
@@ -299,17 +484,21 @@ export function OrderClient({ tableId }: { tableId: string }) {
     }
   }
 
-  async function addItem(menuItemId: string) {
+  /**
+   * Dodaje stavku sa (opciono praznim) skupom izabranih dodataka. Isti
+   * "poklapanje pa inkrementiraj" obrazac kao ranije, samo sada poklapanje
+   * zahteva I ISTI menuItemId I ISTI skup dodataka (specifikacija #46/#47)
+   * — "Burger + sir" i "Burger + slanina" ostaju odvojeni redovi, ali dva
+   * tapa na "Burger + sir" (bez obzira na redosled biranja) inkrementiraju
+   * ISTI red.
+   */
+  async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
     if (!order) return;
     setError(null);
     await withCartLock(async () => {
-      // Ako artikal već postoji kao DRAFT stavka na ovoj porudžbini, ponovni
-      // tap povećava postojeći red umesto da pravi novi (max 50, isto
-      // ograničenje kao addOrderItemSchema) — koristi VEĆ POSTOJEĆI PATCH
-      // endpoint (updateOrderItemSchema.quantity), bez promene modela
-      // podataka ili logike odbitka zaliha (ta i dalje čita order.items u
-      // trenutku naplate, kakvi god redovi da postoje).
-      const existing = order.items.find((i) => i.menuItemId === menuItemId);
+      const existing = order.items.find(
+        (i) => i.menuItemId === menuItemId && sameModifierSelection(i.modifiers, modifierOptionIds)
+      );
       try {
         if (existing) {
           if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
@@ -320,13 +509,43 @@ export function OrderClient({ tableId }: { tableId: string }) {
         } else {
           await apiFetch(`/api/pos/orders/${order.id}/items`, {
             method: "POST",
-            body: JSON.stringify({ menuItemId, quantity: 1 }),
+            body: JSON.stringify({ menuItemId, quantity: 1, modifierOptionIds }),
           });
         }
         const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
         setOrder(refreshed.order);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
+        throw e; // modal treba da prikaže grešku i ostane otvoren
+      }
+    });
+  }
+
+  /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
+   * dodataka (specifikacija #10), inače otvara ModifierSelectionModal. */
+  function handleTapMenuItem(item: MenuItem) {
+    if (cartBusy) return;
+    if (item.modifierGroups.length === 0) {
+      addItemWithModifiers(item.id, []);
+    } else {
+      setModifierPickerItem(item);
+    }
+  }
+
+  async function saveModifiersForExistingItem(item: OrderItem, modifierOptionIds: string[]) {
+    if (!order) return;
+    setError(null);
+    await withCartLock(async () => {
+      try {
+        await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}/modifiers`, {
+          method: "PATCH",
+          body: JSON.stringify({ modifierOptionIds }),
+        });
+        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+        setOrder(refreshed.order);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Greška pri izmeni dodataka");
+        throw e;
       }
     });
   }
@@ -424,6 +643,9 @@ export function OrderClient({ tableId }: { tableId: string }) {
                 <div className="font-medium text-ink">
                   {item.quantity}× {item.name}
                 </div>
+                {item.modifiers.length > 0 && (
+                  <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                )}
                 {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -511,11 +733,14 @@ export function OrderClient({ tableId }: { tableId: string }) {
           {visibleItems.map((item) => (
             <button
               key={item.id}
-              onClick={() => addItem(item.id)}
+              onClick={() => handleTapMenuItem(item)}
               disabled={cartBusy}
               className="flex min-h-[104px] flex-col justify-between rounded-lg border border-line bg-white p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 sm:hover:border-gold/60 sm:hover:shadow-card"
             >
-              <div className="font-semibold leading-snug text-ink">{item.name}</div>
+              <div className="font-semibold leading-snug text-ink">
+                {item.name}
+                {item.modifierGroups.length > 0 && <span className="ml-1.5 align-middle text-[10px] font-medium text-inkSoft">· dodaci</span>}
+              </div>
               <div className="mt-3 text-base font-bold tabular-nums text-gold-dark">{Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span></div>
             </button>
           ))}
@@ -528,11 +753,30 @@ export function OrderClient({ tableId }: { tableId: string }) {
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{order.items.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
         <div className="mx-auto max-h-36 w-full max-w-5xl overflow-y-auto px-3 py-2">
           {order.items.length === 0 && <div className="py-2 text-center text-sm text-ink/55">Nema stavki još.</div>}
-          {order.items.map((item) => (
+          {order.items.map((item) => {
+            const canEditModifiers = (items.find((mi) => mi.id === item.menuItemId)?.modifierGroups.length ?? 0) > 0;
+            return (
             <div key={item.id} className="flex items-center gap-2 border-b border-line/50 py-2 text-sm last:border-0">
-              <span className="min-w-0 flex-1 truncate text-ink" title={item.name}>
-                {item.name}
-              </span>
+              <div className="min-w-0 flex-1">
+                {canEditModifiers ? (
+                  <button
+                    type="button"
+                    onClick={() => setEditingModifiersFor(item)}
+                    disabled={cartBusy}
+                    className="block w-full truncate text-left text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
+                    title={item.name}
+                  >
+                    {item.name}
+                  </button>
+                ) : (
+                  <span className="block truncate text-ink" title={item.name}>
+                    {item.name}
+                  </span>
+                )}
+                {item.modifiers.length > 0 && (
+                  <div className="truncate text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                )}
+              </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button
                   type="button"
@@ -563,7 +807,8 @@ export function OrderClient({ tableId }: { tableId: string }) {
                 Ukloni
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-t border-line px-3 py-2">
           <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
@@ -580,6 +825,33 @@ export function OrderClient({ tableId }: { tableId: string }) {
           </button>
         </div>
       </div>
+
+      {modifierPickerItem && (
+        <ModifierSelectionModal
+          item={modifierPickerItem}
+          onCancel={() => setModifierPickerItem(null)}
+          onConfirm={async (optionIds) => {
+            await addItemWithModifiers(modifierPickerItem.id, optionIds);
+            setModifierPickerItem(null);
+          }}
+        />
+      )}
+      {editingModifiersFor && (() => {
+        const menuItem = items.find((mi) => mi.id === editingModifiersFor.menuItemId);
+        if (!menuItem) return null;
+        return (
+          <ModifierSelectionModal
+            item={menuItem}
+            initialSelectedIds={editingModifiersFor.modifiers.map((m) => m.modifierOptionId).filter((id): id is string => id !== null)}
+            confirmVerb="Sačuvaj"
+            onCancel={() => setEditingModifiersFor(null)}
+            onConfirm={async (optionIds) => {
+              await saveModifiersForExistingItem(editingModifiersFor, optionIds);
+              setEditingModifiersFor(null);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

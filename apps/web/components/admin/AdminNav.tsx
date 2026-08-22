@@ -52,6 +52,7 @@ const NAV_SECTIONS: NavSection[] = [
     items: [
       { href: "/dashboard", label: "Kontrolna tabla", icon: <GridIcon /> },
       { href: "/menu", label: "Meni", icon: <MenuIcon /> },
+      { href: "/menu/modifiers", label: "Dodaci", icon: <MenuIcon /> },
       { href: "/inventory", label: "Zalihe", icon: <BoxIcon /> },
       { href: "/tables", label: "Sale i stolovi", icon: <TablesIcon /> },
       { href: "/staff", label: "Osoblje", icon: <StaffIcon /> },

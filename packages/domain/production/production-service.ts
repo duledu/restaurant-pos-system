@@ -47,7 +47,12 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
       table: { select: { label: true } },
       items: {
         where: { stationStates: { some: { station, status: { in: ACTIVE_ITEM_STATUSES } } } },
-        include: { stationStates: { where: { station }, select: { status: true } } },
+        include: {
+          stationStates: { where: { station }, select: { status: true } },
+          // P3.2: dodaci moraju biti VIDLJIVI na KDS-u (specifikacija #16) —
+          // isti include obrazac kao stationStates, jedan batch, ne po stavci.
+          modifiers: { orderBy: { sortOrder: "asc" } },
+        },
         orderBy: { createdAt: "asc" },
       },
     },
@@ -112,7 +117,10 @@ export async function listCompletedStationOrders(ctx: AuthContext, locationId: s
       table: { select: { label: true } },
       items: {
         where: { stationStates: { some: { station } } },
-        include: { stationStates: { where: { station }, select: { status: true, updatedAt: true } } },
+        include: {
+          stationStates: { where: { station }, select: { status: true, updatedAt: true } },
+          modifiers: { orderBy: { sortOrder: "asc" } },
+        },
         orderBy: { createdAt: "asc" },
       },
     },

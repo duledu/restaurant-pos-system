@@ -1,4 +1,4 @@
-import { prisma } from "@rcs/db";
+import { prisma, Prisma } from "@rcs/db";
 import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
@@ -7,7 +7,12 @@ import { getTable } from "../tables/table-service";
 import { stationsForPreparation } from "../production/station-state";
 import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
-import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, SubmitOrderInput } from "@rcs/shared";
+import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
+import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
+
+const ORDER_ITEM_INCLUDE = {
+  modifiers: { orderBy: { sortOrder: "asc" as const } },
+};
 
 /**
  * Otvara NOVU draft porudžbinu za sto (ili vraća postojeći DRAFT ako već
@@ -90,7 +95,7 @@ export async function getOrder(ctx: AuthContext, orderId: string) {
   requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({
     where: { id: orderId, ...scopeToRestaurant(ctx) },
-    include: { items: { orderBy: { createdAt: "asc" } }, table: true },
+    include: { items: { include: ORDER_ITEM_INCLUDE, orderBy: { createdAt: "asc" } }, table: true },
   });
   if (!order) throw new Error("Porudžbina nije pronađena");
   requireLocationAccess(ctx, order.locationId);
@@ -109,22 +114,33 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
     throw new Error("Artikal trenutno nije dostupan za prodaju");
   }
 
+  // P3.2: klijent šalje SAMO identitete izabranih opcija — server učitava
+  // grupe STVARNO vezane za ovaj artikal i sam presuđuje cenu (specifikacija
+  // #12/#13). `OrderItem.price` postaje EFEKTIVNA jedinična cena (osnovna +
+  // izabrani dodaci) — vidi napomenu na vrhu schema.prisma modela.
+  const groups = await getModifierGroupsForMenuItem(ctx.restaurantId, menuItem.id);
+  const { priceDelta, snapshotRows } = validateAndPriceModifierSelection(groups, input.modifierOptionIds);
+  const effectivePrice = new Prisma.Decimal(menuItem.price).add(priceDelta).toDecimalPlaces(2);
+
   // Snapshot se pravi OVDE, pri dodavanju u draft — ne pri submit-u — jer
   // konobar treba da vidi tačnu cenu u pregledu porudžbine pre slanja.
   // Cena se PONOVO snapshot-uje (ne menja) pri submitOrder ispod, na
-  // slučaj da je cena promenjena između dodavanja u draft i slanja.
+  // slučaj da je cena (osnovna ili dodataka) promenjena između dodavanja u
+  // draft i slanja.
   return prisma.$transaction(async (tx) => {
     const item = await tx.orderItem.create({
       data: {
         orderId,
         menuItemId: menuItem.id,
         name: menuItem.name,
-        price: menuItem.price,
+        price: effectivePrice,
         taxRate: menuItem.taxRate,
         quantity: input.quantity,
         note: input.note,
         preparationStation: menuItem.preparationStation,
+        modifiers: snapshotRows.length > 0 ? { createMany: { data: snapshotRows } } : undefined,
       },
+      include: ORDER_ITEM_INCLUDE,
     });
 
     await tx.orderEvent.create({
@@ -132,11 +148,67 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
         orderId,
         type: "item_added",
         createdBy: ctx.employeeId,
-        payload: { menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity },
+        payload: {
+          menuItemId: menuItem.id,
+          name: menuItem.name,
+          quantity: input.quantity,
+          modifiers: snapshotRows.map((r) => r.optionName),
+        },
       },
     });
     return item;
   });
+}
+
+/**
+ * Izmena izabranih dodataka na VEĆ POSTOJEĆOJ draft stavci — potpuna zamena
+ * skupa (ne parcijalni patch), ista validacija/cenovanje kao addItem. Samo
+ * za DRAFT stavke (getOwnedDraftOrder već to garantuje) — poslata stavka se
+ * ne menja ovim putem, isto pravilo kao updateItem/removeItem.
+ */
+export async function updateItemModifiers(
+  ctx: AuthContext,
+  orderId: string,
+  itemId: string,
+  input: UpdateOrderItemModifiersInput
+) {
+  await getOwnedDraftOrder(ctx, orderId);
+  const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
+  if (!item) throw new Error("Stavka nije pronađena");
+  if (!item.menuItemId) throw new Error("Stavka nema povezan artikal iz menija");
+
+  const menuItem = await prisma.menuItem.findFirst({ where: { id: item.menuItemId, restaurantId: ctx.restaurantId } });
+  if (!menuItem) throw new Error("Artikal nije pronađen");
+
+  const groups = await getModifierGroupsForMenuItem(ctx.restaurantId, menuItem.id);
+  const { priceDelta, snapshotRows } = validateAndPriceModifierSelection(groups, input.modifierOptionIds);
+  const effectivePrice = new Prisma.Decimal(item.price).sub(await currentModifierTotal(itemId)).add(priceDelta).toDecimalPlaces(2);
+
+  return prisma.$transaction(async (tx) => {
+    await tx.orderItemModifier.deleteMany({ where: { orderItemId: itemId } });
+    if (snapshotRows.length > 0) {
+      await tx.orderItemModifier.createMany({ data: snapshotRows.map((r) => ({ ...r, orderItemId: itemId })) });
+    }
+    const updated = await tx.orderItem.update({
+      where: { id: itemId },
+      data: { price: effectivePrice },
+      include: ORDER_ITEM_INCLUDE,
+    });
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        type: "item_modifiers_updated",
+        createdBy: ctx.employeeId,
+        payload: { itemId, modifiers: snapshotRows.map((r) => r.optionName) },
+      },
+    });
+    return updated;
+  });
+}
+
+async function currentModifierTotal(orderItemId: string): Promise<Prisma.Decimal> {
+  const rows = await prisma.orderItemModifier.findMany({ where: { orderItemId }, select: { priceDelta: true } });
+  return rows.reduce((sum, r) => sum.add(r.priceDelta), new Prisma.Decimal(0));
 }
 
 export async function updateItem(ctx: AuthContext, orderId: string, itemId: string, input: UpdateOrderItemInput) {
@@ -211,15 +283,54 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     }
 
     // Re-snapshot cene/naziva u trenutku SLANJA (ne samo dodavanja u draft)
-    // — ako je cena promenjena u međuvremenu kroz Admin Panel, porudžbina
-    // odlazi kuhinji/šanku sa cenom koja važi SADA, ne sa zastarelom.
+    // — ako je osnovna cena ILI cena nekog dodatka promenjena u međuvremenu
+    // kroz Admin Panel, porudžbina odlazi kuhinji/šanku i na naplatu sa
+    // cenom koja važi SADA, ne sa zastarelom (ista filozofija za oboje —
+    // P3.2 samo proširuje postojeće ponašanje na modifikatore).
+    //
+    // Batch-ovano (JEDAN upit za sve MenuItem-e, JEDAN za sve
+    // OrderItemModifier redove svih stavki) — ne po-stavci/po-modifikatoru,
+    // jer je ovo unutar kritične submit transakcije (specifikacija #63).
+    const menuItemIds = Array.from(new Set(items.map((i) => i.menuItemId).filter((id): id is string => id !== null)));
+    const itemIds = items.map((i) => i.id);
+    const [currentMenuItems, allModifiers] = await Promise.all([
+      menuItemIds.length > 0 ? tx.menuItem.findMany({ where: { id: { in: menuItemIds } } }) : Promise.resolve([]),
+      tx.orderItemModifier.findMany({ where: { orderItemId: { in: itemIds } } }),
+    ]);
+    const menuItemById = new Map(currentMenuItems.map((m) => [m.id, m]));
+    const liveOptionIds = Array.from(new Set(allModifiers.map((m) => m.modifierOptionId).filter((id): id is string => id !== null)));
+    const liveOptions = liveOptionIds.length > 0 ? await tx.modifierOption.findMany({ where: { id: { in: liveOptionIds } } }) : [];
+    const liveOptionById = new Map(liveOptions.map((o) => [o.id, o]));
+    const modifiersByItem = new Map<string, typeof allModifiers>();
+    for (const m of allModifiers) {
+      const list = modifiersByItem.get(m.orderItemId) ?? [];
+      list.push(m);
+      modifiersByItem.set(m.orderItemId, list);
+    }
+
     for (const item of items) {
       if (!item.menuItemId) continue;
-      const currentMenuItem = await tx.menuItem.findUnique({ where: { id: item.menuItemId } });
-      if (currentMenuItem && Number(currentMenuItem.price) !== Number(item.price)) {
+      const currentMenuItem = menuItemById.get(item.menuItemId);
+      if (!currentMenuItem) continue; // artikal u međuvremenu obrisan — zadrži poslednji poznati snapshot
+
+      let modifierTotal = new Prisma.Decimal(0);
+      for (const m of modifiersByItem.get(item.id) ?? []) {
+        // Opcija u međuvremenu deaktivirana/obrisana: nema živog izvora za
+        // osvežavanje, zadržava se poslednja poznata snapshot cena — isto
+        // pravilo kao "artikal obrisan" gore (nikad ne izmišljamo cenu).
+        const live = m.modifierOptionId ? liveOptionById.get(m.modifierOptionId) : undefined;
+        const currentDelta = live ? new Prisma.Decimal(live.priceDelta) : new Prisma.Decimal(m.priceDelta);
+        modifierTotal = modifierTotal.add(currentDelta);
+        if (live && !currentDelta.equals(m.priceDelta)) {
+          await tx.orderItemModifier.update({ where: { id: m.id }, data: { priceDelta: currentDelta } });
+        }
+      }
+
+      const newEffectivePrice = new Prisma.Decimal(currentMenuItem.price).add(modifierTotal).toDecimalPlaces(2);
+      if (!newEffectivePrice.equals(item.price) || Number(currentMenuItem.taxRate) !== Number(item.taxRate)) {
         await tx.orderItem.update({
           where: { id: item.id },
-          data: { price: currentMenuItem.price, taxRate: currentMenuItem.taxRate },
+          data: { price: newEffectivePrice, taxRate: currentMenuItem.taxRate },
         });
       }
     }

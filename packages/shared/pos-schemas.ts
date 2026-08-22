@@ -22,8 +22,16 @@ export const addOrderItemSchema = z.object({
   menuItemId: z.string().uuid(),
   quantity: z.number().int().min(1).max(50).default(1),
   note: z.string().trim().max(300).optional(),
+  // P3.2: SAMO identiteti (option ID-jevi) — NIKAD cena sa klijenta (server
+  // presuđuje trenutnu dozvoljenu cenu i zamrzava je, vidi modifier-service.ts).
+  modifierOptionIds: z.array(z.string().uuid()).max(50).default([]),
 });
 export type AddOrderItemInput = z.infer<typeof addOrderItemSchema>;
+
+export const updateOrderItemModifiersSchema = z.object({
+  modifierOptionIds: z.array(z.string().uuid()).max(50).default([]),
+});
+export type UpdateOrderItemModifiersInput = z.infer<typeof updateOrderItemModifiersSchema>;
 
 export const updateOrderItemSchema = z.object({
   quantity: z.number().int().min(1).max(50).optional(),

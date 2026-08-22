@@ -18,6 +18,13 @@ export interface TicketLineItem {
   quantity: number;
   name: string;
   note: string | null;
+  // P3.2: već-formatiran prikaz svake izabrane opcije ("+ Kačkavalj" kad ima
+  // dodatnu cenu, ili goli naziv opcije kad je cena 0 — npr. "Bez luka").
+  // NAMERNO string[], ne {name,priceDelta}[]: kuhinjski/šank tiket ne sme
+  // sadržati cenu (postojeće pravilo, vidi napomenu na vrhu fajla) — prefiks
+  // "+" se određuje na osnovu CENE pri građenju tiketa (print-service.ts),
+  // ne parsiranjem naziva (specifikacija #52 zabranjuje to).
+  modifiers?: string[];
 }
 
 export interface KitchenBarTicketContent {
@@ -63,7 +70,7 @@ export interface CancellationTicketContent {
   tableLabel: string;
   orderNumber: string;
   voidedAt: string;
-  items: { quantity: number; name: string }[];
+  items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
 }
 
@@ -72,7 +79,7 @@ export function buildCancellationTicketContent(params: {
   tableLabel: string;
   orderNumber: string;
   voidedAt: string;
-  items: { quantity: number; name: string }[];
+  items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
 }): CancellationTicketContent {
   return {
@@ -91,6 +98,11 @@ export interface ReceiptTicketItem {
   name: string;
   unitPrice: string;
   lineTotal: string;
+  // P3.2: aditivna polja za prikaz razlomljene cene (osnovna + dodaci) na
+  // računu (specifikacija #20) — nedostaju na računima izdatim pre P3.2,
+  // renderer to tretira kao "bez dodataka" (basePrice pada nazad na unitPrice).
+  basePrice?: string;
+  modifiers?: { name: string; priceDelta: string }[];
 }
 
 export interface ReceiptTaxBreakdownEntry {

@@ -43,6 +43,16 @@ function toJson(value: unknown): Prisma.InputJsonValue {
   return value as unknown as Prisma.InputJsonValue;
 }
 
+/**
+ * P3.2: formatira dodatke za kuhinjski/šank/storno tiket kao gole stringove
+ * — NIKAD cenu (postojeće pravilo, priprema ne treba da zna cenu). "+"
+ * prefiks se određuje ovde na osnovu CENE (priceDelta > 0), ne parsiranjem
+ * naziva opcije (specifikacija #52).
+ */
+function formatModifiersForTicket(modifiers: { optionName: string; priceDelta: Prisma.Decimal }[]): string[] {
+  return modifiers.map((m) => (m.priceDelta.greaterThan(0) ? `+ ${m.optionName}` : m.optionName));
+}
+
 // ── DISPATCH (interno — pozvano iz order-service/void-service/billing-service
 // POSLE commit-a njihovih transakcija, uvek u try/catch na mestu poziva) ──
 
@@ -61,7 +71,11 @@ export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string
 
   const stationItems = await prisma.orderItemStation.findMany({
     where: { orderItem: { orderId }, status: "SUBMITTED" },
-    include: { orderItem: { select: { name: true, quantity: true, note: true } } },
+    include: {
+      orderItem: {
+        select: { name: true, quantity: true, note: true, modifiers: { orderBy: { sortOrder: "asc" } } },
+      },
+    },
   });
   if (stationItems.length === 0) return;
 
@@ -88,7 +102,12 @@ export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string
       waiterName,
       orderNumber,
       submittedAt,
-      items: rows.map((r) => ({ quantity: r.orderItem.quantity, name: r.orderItem.name, note: r.orderItem.note })),
+      items: rows.map((r) => ({
+        quantity: r.orderItem.quantity,
+        name: r.orderItem.name,
+        note: r.orderItem.note,
+        modifiers: formatModifiersForTicket(r.orderItem.modifiers),
+      })),
     });
     const dispatchKey = `submit:${station}`;
     await prisma.printJob.upsert({
@@ -122,12 +141,19 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
   });
   if (!voidRecord) return;
 
-  const stationRows = await prisma.orderItemStation.findMany({
-    where: { orderItemId: voidRecord.orderItemId, status: "CANCELLED" },
-  });
+  const [stationRows, itemModifiers] = await Promise.all([
+    prisma.orderItemStation.findMany({
+      where: { orderItemId: voidRecord.orderItemId, status: "CANCELLED" },
+    }),
+    // P3.2: OrderItemModifier redovi ostaju vezani za OrderItem i posle void-a
+    // (nikad se ne brišu) — dodaci moraju ostati vidljivi na storno tiketu
+    // (specifikacija #24), bez potrebe za posebnim snapshot poljem na OrderItemVoid.
+    prisma.orderItemModifier.findMany({ where: { orderItemId: voidRecord.orderItemId }, orderBy: { sortOrder: "asc" } }),
+  ]);
   if (stationRows.length === 0) return;
 
   const reasonLabel = VOID_REASON_LABELS[voidRecord.reasonCode as VoidReasonCode] ?? voidRecord.reasonCode;
+  const modifierLines = formatModifiersForTicket(itemModifiers);
 
   for (const row of stationRows) {
     const content = buildCancellationTicketContent({
@@ -135,7 +161,7 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
       tableLabel: voidRecord.tableLabel,
       orderNumber: shortOrderNumber(voidRecord.orderId),
       voidedAt: voidRecord.voidedAt.toISOString(),
-      items: [{ quantity: voidRecord.voidedQuantity, name: voidRecord.itemName }],
+      items: [{ quantity: voidRecord.voidedQuantity, name: voidRecord.itemName, modifiers: modifierLines }],
       reasonLabel,
     });
     const dispatchKey = `void:${voidRecord.id}:${row.station}`;
@@ -175,7 +201,15 @@ export async function dispatchReceiptPrintJob(
   if (!receipt) return;
 
   const settings = await getRestaurantSettings(ctx);
-  const items = receipt.items as unknown as { name: string; price: string; taxRate: string; quantity: number; lineTotal: string }[];
+  const items = receipt.items as unknown as {
+    name: string;
+    price: string;
+    basePrice?: string;
+    modifiers?: { name: string; priceDelta: string }[];
+    taxRate: string;
+    quantity: number;
+    lineTotal: string;
+  }[];
   const taxBreakdown = receipt.taxBreakdown as unknown as { taxRate: string; taxableAmount: string; taxAmount: string }[];
 
   const content = buildReceiptTicketContent({
@@ -191,7 +225,14 @@ export async function dispatchReceiptPrintJob(
     tableLabel: receipt.tableLabel,
     waiterName: receipt.waiterName,
     issuedAt: receipt.issuedAt.toISOString(),
-    items: items.map((i) => ({ quantity: i.quantity, name: i.name, unitPrice: i.price, lineTotal: i.lineTotal })),
+    items: items.map((i) => ({
+      quantity: i.quantity,
+      name: i.name,
+      unitPrice: i.price,
+      lineTotal: i.lineTotal,
+      basePrice: i.basePrice,
+      modifiers: i.modifiers,
+    })),
     subtotal: receipt.subtotal.toString(),
     taxTotal: receipt.taxTotal.toString(),
     taxBreakdown,

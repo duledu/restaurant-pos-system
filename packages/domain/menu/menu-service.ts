@@ -138,7 +138,18 @@ export async function listMenuItems(ctx: AuthContext, filters: MenuItemFilters =
         : {}),
       ...(filters.type ? { category: { type: filters.type } } : {}),
     },
-    include: { category: true },
+    include: {
+      category: true,
+      // P3.2: JEDAN batch-ovan include za sve stavke (ne upit po artiklu) —
+      // waiter ekran ovim saznaje da li artikal ima grupe dodataka bez
+      // dodatnih rundi ka serveru (specifikacija #63). Prazno za artikle
+      // bez vezanih grupa — jeftino po redu.
+      modifierGroups: {
+        where: { group: { isActive: true } },
+        include: { group: { include: { options: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } } } },
+        orderBy: { sortOrder: "asc" },
+      },
+    },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
   });
 }

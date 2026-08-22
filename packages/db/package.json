@@ -10,6 +10,7 @@
     "migrate:deploy": "prisma migrate deploy",
     "seed": "tsx prisma/seed.ts",
     "seed:menu": "tsx prisma/seed-menu.ts",
+    "seed:modifiers": "tsx prisma/seed-modifiers.ts",
     "studio": "prisma studio"
   },
   "dependencies": {

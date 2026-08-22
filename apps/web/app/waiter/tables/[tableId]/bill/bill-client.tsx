@@ -13,6 +13,7 @@ interface BillItem {
   price: string;
   quantity: number;
   status: string;
+  modifiers: { id: string; optionName: string }[];
 }
 interface BillPreview {
   order: { id: string; status: string; table: { label: string }; items: BillItem[] };
@@ -31,7 +32,7 @@ interface Receipt {
   total: string;
   currency: string;
   issuedAt: string;
-  items: { name: string; quantity: number; lineTotal: string }[];
+  items: { name: string; quantity: number; lineTotal: string; modifiers?: { name: string; priceDelta: string }[] }[];
 }
 interface PayResult {
   payment: { method: "CASH" | "CARD"; amount: string; tenderedAmount: string; changeAmount: string };
@@ -187,9 +188,14 @@ export function BillClient({ tableId }: { tableId: string }) {
             </div>
             <div className="mb-3 space-y-1 border-t border-line pt-3">
               {receipt.items.map((item, idx) => (
-                <div key={idx} className="flex justify-between text-sm text-ink">
-                  <span>{item.quantity}× {item.name}</span>
-                  <span>{Number(item.lineTotal).toFixed(2)} {receipt.currency}</span>
+                <div key={idx}>
+                  <div className="flex justify-between text-sm text-ink">
+                    <span>{item.quantity}× {item.name}</span>
+                    <span>{Number(item.lineTotal).toFixed(2)} {receipt.currency}</span>
+                  </div>
+                  {item.modifiers && item.modifiers.length > 0 && (
+                    <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.name).join(", ")}</div>
+                  )}
                 </div>
               ))}
             </div>
@@ -271,9 +277,14 @@ export function BillClient({ tableId }: { tableId: string }) {
           {bill.order.items
             .filter((item) => item.status !== "CANCELLED")
             .map((item) => (
-              <div key={item.id} className="flex justify-between text-sm text-ink">
-                <span>{item.quantity}× {item.name}</span>
-                <span>{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
+              <div key={item.id}>
+                <div className="flex justify-between text-sm text-ink">
+                  <span>{item.quantity}× {item.name}</span>
+                  <span>{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
+                </div>
+                {item.modifiers.length > 0 && (
+                  <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                )}
               </div>
             ))}
         </div>
