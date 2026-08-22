@@ -1,4 +1,5 @@
 export * as audit from "./audit/audit-service";
+export * as antifraud from "./audit/antifraud-service";
 export * as employees from "./employees/employee-service";
 export * as devices from "./devices/device-service";
 export * as menu from "./menu/menu-service";

@@ -98,27 +98,50 @@ const AUDIT_VIEW = "audit.view";
 // Prosti, fiksni pragovi (RSD/broj) — NAMERNO ne "AI"/ML skoring (zahtev
 // specifikacije #14/#26). Lako se kasnije prave konfigurabilnim po
 // restoranu ako se pokaže stvarna potreba — nema smisla to raditi unapred.
+//
+// P2.2: pragovi ispod (ADJUSTMENT/WRITE_OFF grupa) prate ISTI obrazac kao
+// void pragovi iznad — centralizovano ovde, ne rasuto po komponentama
+// (specifikacija #11), sa istom filozofijom "signal, ne presuda".
 const FREQUENT_VOID_COUNT_THRESHOLD = 5;
 const REPEATED_REASON_COUNT_THRESHOLD = 3;
 const HIGH_VALUE_VOID_RSD = 3000;
 const CASH_DISCREPANCY_WARNING_RSD = 500;
 const CASH_DISCREPANCY_HIGH_RSD = 2000;
 const UNAUTHORIZED_ATTEMPT_THRESHOLD = 3;
+// Zalihe nemaju jedinstvenu valutnu jedinicu (kom/kg/l se mešaju) — prag je
+// namerno konzervativan broj JEDINICA, ne RSD vrednost; ako se pokaže
+// potreba za preciznijim pragom po tipu jedinice, uvesti ga tek tada.
+const LARGE_WRITE_OFF_QTY_THRESHOLD = 10;
+const FREQUENT_ADJUSTMENT_COUNT_THRESHOLD = 5;
+const REPEATED_ITEM_WRITE_OFF_COUNT_THRESHOLD = 3;
 
 export interface SuspiciousSignal {
   category:
     | "FREQUENT_VOIDS"
     | "HIGH_VALUE_VOID"
     | "REPEATED_VOID_REASON"
+    | "VOID_AFTER_PRODUCTION"
     | "CASH_DISCREPANCY"
-    | "UNAUTHORIZED_ATTEMPTS";
+    | "UNAUTHORIZED_ATTEMPTS"
+    | "LARGE_INVENTORY_WRITE_OFF"
+    | "FREQUENT_INVENTORY_ADJUSTMENTS"
+    | "REPEATED_ITEM_WRITE_OFF";
   severity: "INFO" | "WARNING" | "HIGH";
-  employeeId: string;
-  employeeName: string;
+  /** Odsutno SAMO za REPEATED_ITEM_WRITE_OFF — taj signal je vezan za
+   * ARTIKAL (vidi itemName), ne za jednog konkretnog zaposlenog; ne
+   * izmišljamo lažnog "krivca" spajanjem sa nasumičnim zaposlenim. */
+  employeeId?: string;
+  employeeName?: string;
+  /** Postavljeno samo za signale vezane za konkretan artikal zaliha. */
+  itemName?: string;
   description: string;
   occurredAt: Date;
   count?: number;
   value?: string;
+  /** P2.2: samo kad se signal odnosi na TAČNO jednu lokaciju (ili je filter
+   * već sužen na jednu) — grupisani signali preko "SVE lokacije" namerno
+   * ostaju bez ovog polja umesto da pogrešno pokažu samo prvu pogođenu. */
+  locationId?: string;
 }
 
 /**
@@ -134,7 +157,13 @@ export interface SuspiciousSignal {
  */
 export async function getSuspiciousActivity(
   ctx: AuthContext,
-  filters: { locationId: string; since?: Date }
+  // P2.2: `until` je dodat ADITIVNO — postojeći pozivaoci (dashboard "Zahteva
+  // pažnju" widget) šalju samo `since` i i dalje dobijaju identično
+  // ponašanje (bez gornje granice, do "sada"). Anti-fraud dashboard koristi
+  // OBA da bi mogao da primeni ISTE polu-otvorene Reports 2.0 periode
+  // (Danas/Juče/Ova nedelja/... — vidi resolveContext u reporting-service.ts)
+  // umesto da izmišlja sopstveni sistem filtera (zahtev specifikacije #12).
+  filters: { locationId: string; since?: Date; until?: Date }
 ): Promise<SuspiciousSignal[]> {
   requirePermission(ctx, AUDIT_VIEW);
   let locationIds: string[];
@@ -147,12 +176,27 @@ export async function getSuspiciousActivity(
   if (locationIds.length === 0) throw new Error("Nalog nema dodeljenu nijednu lokaciju");
 
   const since = filters.since ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const until = filters.until;
+  const dateWhere = until ? { gte: since, lt: until } : { gte: since };
   const signals: SuspiciousSignal[] = [];
+  // Kad je filter već sužen na TAČNO jednu lokaciju, grupisani signali (koji
+  // inače obuhvataju više lokacija odjednom) mogu bezbedno da nose taj ID.
+  const singleLocationId = locationIds.length === 1 ? locationIds[0] : undefined;
 
-  const [voidsByEmployee, highValueVoids, reasonGroups, discrepancyShifts, rejectedAttempts] = await Promise.all([
+  const [
+    voidsByEmployee,
+    highValueVoids,
+    reasonGroups,
+    fullVoidsWithItem,
+    discrepancyShifts,
+    rejectedAttempts,
+    largeWriteOffs,
+    adjustmentsByEmployee,
+    writeOffsByItem,
+  ] = await Promise.all([
     prisma.orderItemVoid.groupBy({
       by: ["voidedBy"],
-      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: { gte: since } },
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: dateWhere },
       _count: { _all: true },
       _sum: { voidedValue: true },
       _max: { voidedAt: true },
@@ -161,24 +205,43 @@ export async function getSuspiciousActivity(
       where: {
         restaurantId: ctx.restaurantId,
         locationId: { in: locationIds },
-        voidedAt: { gte: since },
+        voidedAt: dateWhere,
         voidedValue: { gte: HIGH_VALUE_VOID_RSD },
       },
       orderBy: { voidedAt: "desc" },
     }),
     prisma.orderItemVoid.groupBy({
       by: ["voidedBy", "reasonCode"],
-      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: { gte: since } },
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, voidedAt: dateWhere },
       _count: { _all: true },
       _max: { voidedAt: true },
     }),
+    // P2.2 #4: potpuno poništene stavke (quantityAfter = 0) — kandidati za
+    // "storno posle slanja u proizvodnju". Da li je stavka STVARNO već bila
+    // SERVED se proverava posle, u jednom dodatnom grupnom upitu (ne
+    // po-redu) — vidi napomenu kod stationsServed niže.
+    prisma.orderItemVoid.findMany({
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        voidedAt: dateWhere,
+        quantityAfter: 0,
+      },
+      orderBy: { voidedAt: "desc" },
+    }),
+    // P2.2 #5: RAZLIKA U GOTOVINI — i MANJAK i VIŠAK (raniji kod je hvatao
+    // samo manjak — `lt: -threshold` — što je propust: spec #5 eksplicitno
+    // traži "cashDifference != 0", i manjak i višak su signal vredan pažnje).
     prisma.shift.findMany({
       where: {
         restaurantId: ctx.restaurantId,
         locationId: { in: locationIds },
         status: "CLOSED",
-        closedAt: { gte: since },
-        cashDifference: { lt: -CASH_DISCREPANCY_WARNING_RSD },
+        closedAt: dateWhere,
+        OR: [
+          { cashDifference: { lt: -CASH_DISCREPANCY_WARNING_RSD } },
+          { cashDifference: { gt: CASH_DISCREPANCY_WARNING_RSD } },
+        ],
       },
       orderBy: { closedAt: "desc" },
     }),
@@ -191,18 +254,74 @@ export async function getSuspiciousActivity(
         // ali kad je filter na KONKRETNU lokaciju, moraju se poklapati.
         ...(filters.locationId === "ALL" ? {} : { locationId: { in: locationIds } }),
         category: "UNAUTHORIZED_ATTEMPT",
-        createdAt: { gte: since },
+        createdAt: dateWhere,
+      },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    }),
+    // P2.2 #6/#7: velik pojedinačni otpis (WRITE_OFF) — apsolutna vrednost
+    // delte, jer je WRITE_OFF uvek negativan po konvenciji _applyDelta.
+    prisma.inventoryMovement.findMany({
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        type: "WRITE_OFF",
+        createdAt: dateWhere,
+        quantityDelta: { lte: -LARGE_WRITE_OFF_QTY_THRESHOLD },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.inventoryMovement.groupBy({
+      by: ["employeeId"],
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        type: { in: ["ADJUSTMENT", "WRITE_OFF"] },
+        createdAt: dateWhere,
+        employeeId: { not: null },
+      },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    }),
+    prisma.inventoryMovement.groupBy({
+      by: ["menuItemId"],
+      where: {
+        restaurantId: ctx.restaurantId,
+        locationId: { in: locationIds },
+        type: "WRITE_OFF",
+        createdAt: dateWhere,
       },
       _count: { _all: true },
       _max: { createdAt: true },
     }),
   ]);
 
+  // P2.2 #4: da li je neka od potpuno poništenih stavki gore VEĆ bila
+  // servirana (OrderItemStation.status = "SERVED") kad je stornirana. Za
+  // POTPUN storno (quantityAfter=0), voidOrderItem NIKAD ne prepisuje
+  // SERVED stanice (isključene iz updateMany-a), pa ostatak SERVED ovde
+  // pouzdano znači "stavka je bila gotova PRE storna" — vidi void-service.ts.
+  // Za DELIMIČAN storno se ovo namerno NE proverava (stavka ostaje aktivna
+  // u kuhinji/šanku, pa bi SERVED mogao nastati POSLE storna, ne pre njega
+  // — to bi bila izmišljena preciznost, zabranjena specifikacijom #4/#8).
+  const stationsServed =
+    fullVoidsWithItem.length > 0
+      ? await prisma.orderItemStation.findMany({
+          where: { orderItemId: { in: fullVoidsWithItem.map((v) => v.orderItemId) }, status: "SERVED" },
+          select: { orderItemId: true, station: true },
+        })
+      : [];
+  const servedItemIds = new Set(stationsServed.map((s) => s.orderItemId));
+  const voidAfterProduction = fullVoidsWithItem.filter((v) => servedItemIds.has(v.orderItemId));
+
   const employeeIds = new Set<string>();
   voidsByEmployee.forEach((v) => employeeIds.add(v.voidedBy));
   reasonGroups.forEach((r) => employeeIds.add(r.voidedBy));
+  voidAfterProduction.forEach((v) => employeeIds.add(v.voidedBy));
   discrepancyShifts.forEach((s) => employeeIds.add(s.closedBy ?? s.openedBy));
   rejectedAttempts.forEach((a) => a.userId && employeeIds.add(a.userId));
+  largeWriteOffs.forEach((w) => w.employeeId && employeeIds.add(w.employeeId));
+  adjustmentsByEmployee.forEach((a) => a.employeeId && employeeIds.add(a.employeeId));
 
   // AuditLog.userId je posebna priča — vidi resolveEmployeeDisplayNames.
   const nameById = await resolveEmployeeDisplayNames(ctx.restaurantId, Array.from(employeeIds));
@@ -220,6 +339,7 @@ export async function getSuspiciousActivity(
         occurredAt: group._max.voidedAt ?? since,
         count,
         value: group._sum.voidedValue?.toString(),
+        locationId: singleLocationId,
       });
     }
   }
@@ -233,6 +353,7 @@ export async function getSuspiciousActivity(
       description: `Poništena stavka visoke vrednosti: ${voidRow.itemName} × ${voidRow.voidedQuantity} (${voidRow.voidedValue.toString()} RSD) — razlog: ${voidRow.reasonCode}`,
       occurredAt: voidRow.voidedAt,
       value: voidRow.voidedValue.toString(),
+      locationId: voidRow.locationId,
     });
   }
 
@@ -247,21 +368,39 @@ export async function getSuspiciousActivity(
         description: `Isti razlog poništavanja (${group.reasonCode}) naveden ${count} puta`,
         occurredAt: group._max.voidedAt ?? since,
         count,
+        locationId: singleLocationId,
       });
     }
+  }
+
+  // P2.2 #4: storno NAKON slanja u proizvodnju — hrana/piće je već bilo
+  // GOTOVO (SERVED) kad je stavka u celosti stornirana, pre naplate.
+  for (const voidRow of voidAfterProduction) {
+    signals.push({
+      category: "VOID_AFTER_PRODUCTION",
+      severity: voidRow.voidedValue.greaterThanOrEqualTo(HIGH_VALUE_VOID_RSD) ? "HIGH" : "WARNING",
+      employeeId: voidRow.voidedBy,
+      employeeName: nameFor(voidRow.voidedBy),
+      description: `Storno POSLE što je stavka već poslužena: ${voidRow.itemName} × ${voidRow.voidedQuantity} (${voidRow.voidedValue.toString()} RSD, sto ${voidRow.tableLabel}) — razlog: ${voidRow.reasonCode}`,
+      occurredAt: voidRow.voidedAt,
+      value: voidRow.voidedValue.toString(),
+      locationId: voidRow.locationId,
+    });
   }
 
   for (const shift of discrepancyShifts) {
     const difference = shift.cashDifference ? Number(shift.cashDifference) : 0;
     const employeeId = shift.closedBy ?? shift.openedBy;
+    const kind = difference < 0 ? "manjak" : "višak";
     signals.push({
       category: "CASH_DISCREPANCY",
       severity: Math.abs(difference) >= CASH_DISCREPANCY_HIGH_RSD ? "HIGH" : "WARNING",
       employeeId,
       employeeName: nameFor(employeeId),
-      description: `Razlika u gotovini pri zatvaranju smene: ${difference.toFixed(2)} RSD (očekivano ${shift.expectedCash?.toString()}, prijavljeno ${shift.countedCash?.toString()})`,
+      description: `Razlika u gotovini pri zatvaranju smene — ${kind}: ${difference.toFixed(2)} RSD (očekivano ${shift.expectedCash?.toString()}, prijavljeno ${shift.countedCash?.toString()})`,
       occurredAt: shift.closedAt ?? since,
       value: shift.cashDifference?.toString(),
+      locationId: shift.locationId,
     });
   }
 
@@ -277,6 +416,65 @@ export async function getSuspiciousActivity(
         description: `${count} odbijenih pokušaja neovlašćene operacije u posmatranom periodu`,
         occurredAt: group._max.createdAt ?? since,
         count,
+      });
+    }
+  }
+
+  // P2.2 #6/#7: zalihe — veliki pojedinačni otpis, česte ručne korekcije po
+  // zaposlenom, ponovljeni otpisi istog artikla. Nazivi artikala se
+  // razrešavaju u JEDNOM dodatnom upitu (batch), ne po redu.
+  const menuItemIds = new Set<string>();
+  largeWriteOffs.forEach((w) => menuItemIds.add(w.menuItemId));
+  writeOffsByItem.forEach((g) => menuItemIds.add(g.menuItemId));
+  const menuItemNames =
+    menuItemIds.size > 0
+      ? await prisma.menuItem.findMany({ where: { id: { in: Array.from(menuItemIds) } }, select: { id: true, name: true } })
+      : [];
+  const itemNameById = new Map(menuItemNames.map((m) => [m.id, m.name]));
+
+  for (const w of largeWriteOffs) {
+    if (!w.employeeId) continue;
+    const qty = Math.abs(Number(w.quantityDelta));
+    signals.push({
+      category: "LARGE_INVENTORY_WRITE_OFF",
+      severity: qty >= LARGE_WRITE_OFF_QTY_THRESHOLD * 2 ? "HIGH" : "WARNING",
+      employeeId: w.employeeId,
+      employeeName: nameFor(w.employeeId),
+      description: `Veliki ručni otpis zaliha: ${itemNameById.get(w.menuItemId) ?? "?"} — ${qty} jed. (razlog: ${w.reason ?? "nije naveden"})`,
+      occurredAt: w.createdAt,
+      value: qty.toString(),
+      locationId: w.locationId,
+    });
+  }
+
+  for (const group of adjustmentsByEmployee) {
+    if (!group.employeeId) continue;
+    const count = group._count._all;
+    if (count >= FREQUENT_ADJUSTMENT_COUNT_THRESHOLD) {
+      signals.push({
+        category: "FREQUENT_INVENTORY_ADJUSTMENTS",
+        severity: count >= FREQUENT_ADJUSTMENT_COUNT_THRESHOLD * 2 ? "HIGH" : "WARNING",
+        employeeId: group.employeeId,
+        employeeName: nameFor(group.employeeId),
+        description: `${count} ručnih korekcija/otpisa zaliha u posmatranom periodu`,
+        occurredAt: group._max.createdAt ?? since,
+        count,
+        locationId: singleLocationId,
+      });
+    }
+  }
+
+  for (const group of writeOffsByItem) {
+    const count = group._count._all;
+    if (count >= REPEATED_ITEM_WRITE_OFF_COUNT_THRESHOLD) {
+      signals.push({
+        category: "REPEATED_ITEM_WRITE_OFF",
+        severity: "INFO",
+        itemName: itemNameById.get(group.menuItemId) ?? "?",
+        description: `Artikal "${itemNameById.get(group.menuItemId) ?? "?"}" otpisan ${count} puta u posmatranom periodu`,
+        occurredAt: group._max.createdAt ?? since,
+        count,
+        locationId: singleLocationId,
       });
     }
   }
