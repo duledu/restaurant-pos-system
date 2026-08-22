@@ -936,19 +936,31 @@ export interface KitchenProductionReport {
   };
 }
 
-export async function getKitchenProductionReport(
+/**
+ * Zajednička implementacija za Kuhinja/Bar produkcione izveštaje — ISTA
+ * logika (OrderItemStation.updatedAt kao izvor vremena završetka, void
+ * po stanici preko OrderItem.preparationStation snapshot-a), samo
+ * parametrizovana po stanici, da bi #9 (Kuhinja/Bar tabovi) postojao bez
+ * dupliranja koda. KITCHEN_AND_BAR stavka pravi DVA nezavisna
+ * OrderItemStation reda (vidi stationsForPreparation) — svaka stanica
+ * dovršava svoj rad nezavisno, pa i Kuhinja i Bar izveštaj ispravno broje
+ * "svoju" polovinu bez dupliranja iste RSD vrednosti (ovo je produkciona,
+ * ne finansijska agregacija — nema RSD iznosa ovde uopšte).
+ */
+async function getStationProductionReport(
   ctx: AuthContext,
-  filters: ReportFilters
+  filters: ReportFilters,
+  station: "KITCHEN" | "BAR"
 ): Promise<KitchenProductionReport> {
   const { locationIds, range } = await resolveContext(ctx, filters);
 
   // TIMING: filter by OrderItemStation.updatedAt (= when status reached SERVED),
-  // NOT order.submittedAt. This correctly answers "what did the kitchen complete
+  // NOT order.submittedAt. This correctly answers "what did this station complete
   // in this period" even for orders that were submitted before the period started.
   const [servedStations, voids] = await Promise.all([
     prisma.orderItemStation.findMany({
       where: {
-        station: "KITCHEN",
+        station,
         status: "SERVED",
         updatedAt: { gte: range.from, lt: range.to },
         orderItem: {
@@ -968,7 +980,7 @@ export async function getKitchenProductionReport(
         restaurantId: ctx.restaurantId,
         locationId: { in: locationIds },
         voidedAt: { gte: range.from, lt: range.to },
-        orderItem: { preparationStation: { in: ["KITCHEN", "KITCHEN_AND_BAR"] } },
+        orderItem: { preparationStation: { in: [station, "KITCHEN_AND_BAR"] } },
       },
       select: { itemName: true, voidedQuantity: true },
     }),
@@ -1003,4 +1015,21 @@ export async function getKitchenProductionReport(
     rows,
     summary: { totalProduced, totalVoided, uniqueItems: rows.length },
   };
+}
+
+export async function getKitchenProductionReport(
+  ctx: AuthContext,
+  filters: ReportFilters
+): Promise<KitchenProductionReport> {
+  return getStationProductionReport(ctx, filters, "KITCHEN");
+}
+
+/** #9: simetričan Bar produkcioni izveštaj — ista logika kao Kuhinja,
+ * samo za BAR stanicu. Prethodno nije postojao (samo Kuhinja je imala
+ * svoj izveštaj/rutu/stranicu). */
+export async function getBarProductionReport(
+  ctx: AuthContext,
+  filters: ReportFilters
+): Promise<KitchenProductionReport> {
+  return getStationProductionReport(ctx, filters, "BAR");
 }

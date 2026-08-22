@@ -283,6 +283,136 @@ describe("void and discount percentages", () => {
   });
 });
 
+describe("category performance reconciles with the overall period total", () => {
+  it("sum of per-category revenue matches getSoldItems.summary.allRevenue for the same filters", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    await payOrderFor(fixture, waiter, fixture.kitchenItemId, 3); // sve tri stavke su u istoj "Test" kategoriji
+    await payOrderFor(fixture, waiter, fixture.barItemId, 2);
+    await payOrderFor(fixture, waiter, fixture.bothItemId, 1);
+
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const filters = { locationId: "ALL", preset: "today" } as const;
+    const [categories, soldItems] = await Promise.all([
+      analytics.getCategoryPerformance(manager, filters),
+      reporting.getSoldItems(manager, filters),
+    ]);
+
+    const categorySum = categories.categories.reduce((s, c) => s + Number(c.revenue), 0);
+    expect(categorySum).toBeCloseTo(Number(soldItems.summary.allRevenue), 2);
+    const percentSum = categories.categories.reduce((s, c) => s + c.percentOfTotal, 0);
+    expect(percentSum).toBeGreaterThan(99);
+    expect(percentSum).toBeLessThanOrEqual(100.5);
+  });
+
+  it("groups items with no category under 'Nekategorisano' instead of silently omitting them", async () => {
+    const fixture = await createFixture();
+    const uncategorized = await prisma.menuItem.create({
+      data: { restaurantId: fixture.restaurantId, categoryId: null, name: "Bez kategorije", slug: `bezkat-${randomUUID()}`, price: "300.00", taxRate: "20", preparationStation: "KITCHEN" },
+    });
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    await payOrderFor(fixture, waiter, uncategorized.id, 1);
+
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const categories = await analytics.getCategoryPerformance(manager, { locationId: "ALL", preset: "today" });
+    const row = categories.categories.find((c) => c.categoryName === "Nekategorisano");
+    expect(row).toBeDefined();
+    expect(Number(row!.revenue)).toBeCloseTo(360, 2); // 300 + 20% porez
+  });
+});
+
+describe("top items ranked by quantity, independently from ranking by revenue (#15)", () => {
+  it("topByQuantity diverges from topItems when a cheap, high-volume item isn't the top earner", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    await payOrderFor(fixture, waiter, fixture.bothItemId, 2); // 1500 x 2 = 3000 -> najveći promet, samo 2 komada
+    await payOrderFor(fixture, waiter, fixture.barItemId, 10); // 250 x 10 = 2500 -> najviše komada, ne i najveći promet
+    await payOrderFor(fixture, waiter, fixture.kitchenItemId, 1); // 800
+
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const result = await analytics.getTopAndLowItems(manager, { locationId: "ALL", preset: "today" }, { limit: 5 });
+
+    expect(result.topItems[0].name).toBe("Kombinovani tanjir"); // najveći promet (3000)
+    expect(result.topByQuantity[0].name).toBe("Coca-Cola"); // najveća količina (10 komada)
+    expect(result.topItems[0].name).not.toBe(result.topByQuantity[0].name);
+  });
+});
+
+describe("bar production report — symmetric with kitchen, no double counting for KITCHEN_AND_BAR", () => {
+  async function serve(itemId: string, station: "KITCHEN" | "BAR") {
+    await prisma.orderItemStation.update({
+      where: { orderItemId_station: { orderItemId: itemId, station } },
+      data: { status: "SERVED" },
+    });
+  }
+
+  it("reports SERVED bar items independently of kitchen, mirroring getKitchenProductionReport's shape", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const barOrder = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const barItem = await orders.addItem(waiter, barOrder.id, { menuItemId: fixture.barItemId, quantity: 3 });
+    await orders.submitOrder(waiter, barOrder.id, { idempotencyKey: randomUUID() });
+    const kitchenOrder = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const kitchenItem = await orders.addItem(waiter, kitchenOrder.id, { menuItemId: fixture.kitchenItemId, quantity: 2 });
+    await orders.submitOrder(waiter, kitchenOrder.id, { idempotencyKey: randomUUID() });
+
+    await serve(barItem.id, "BAR");
+    await serve(kitchenItem.id, "KITCHEN");
+
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const filters = { locationId: "ALL", preset: "today" } as const;
+    const [bar, kitchen] = await Promise.all([
+      reporting.getBarProductionReport(manager, filters),
+      reporting.getKitchenProductionReport(manager, filters),
+    ]);
+
+    expect(bar.summary.totalProduced).toBe(3);
+    expect(kitchen.summary.totalProduced).toBe(2);
+  });
+
+  it("a KITCHEN_AND_BAR item produces two independent station rows — bar sees its own completion, unaffected by kitchen's", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.bothItemId, quantity: 1 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await serve(item.id, "BAR"); // samo bar strana je izbačena, kuhinjska nije
+
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const filters = { locationId: "ALL", preset: "today" } as const;
+    const [bar, kitchen] = await Promise.all([
+      reporting.getBarProductionReport(manager, filters),
+      reporting.getKitchenProductionReport(manager, filters),
+    ]);
+
+    expect(bar.summary.totalProduced).toBe(1);
+    expect(kitchen.summary.totalProduced).toBe(0); // kuhinjska strana nije stigla do SERVED
+  });
+
+  it("void count for a KITCHEN_AND_BAR item is visible in both bar and kitchen void reports (station-level snapshot, not double-subtracted from revenue)", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.bothItemId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await voids.voidOrderItem(manager, submitted.id, item.id, {
+      quantity: 1,
+      reasonCode: "OTHER",
+      explanation: "Gost je otkazao pre nego što je stavka poslužena, storniramo je u celosti.",
+    });
+
+    const filters = { locationId: "ALL", preset: "today" } as const;
+    const [bar, kitchen] = await Promise.all([
+      reporting.getBarProductionReport(manager, filters),
+      reporting.getKitchenProductionReport(manager, filters),
+    ]);
+
+    expect(bar.summary.totalVoided).toBe(1);
+    expect(kitchen.summary.totalVoided).toBe(1);
+  });
+});
+
 describe("edge cases: empty restaurant and zero-sales period", () => {
   it("an empty restaurant (no orders ever) returns well-formed, empty results — never throws", async () => {
     const fixture = await createFixture();

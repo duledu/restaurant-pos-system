@@ -36,7 +36,7 @@ interface HourlyResult { currency: string; hours: { hour: number; label: string;
 interface WeekdayRow { isoDay: number; label: string; totalSales: string; totalOrders: number; occurrences: number; averageSalesPerOccurrence: string; averageOrderValue: string; }
 interface StationResult { currency: string; kitchen: { revenue: string; quantity: number; voidValue: string; voidQuantity: number }; bar: { revenue: string; quantity: number; voidValue: string; voidQuantity: number }; }
 interface RankedItem { name: string; categoryName: string | null; totalQuantity: number; totalRevenue: string; percentOfTotal: number; }
-interface ItemsResult { currency: string; topItems: RankedItem[]; lowItems: RankedItem[]; zeroSaleItems: { id: string; name: string; categoryName: string | null }[]; basedOnCurrentMenu: true; }
+interface ItemsResult { currency: string; topItems: RankedItem[]; lowItems: RankedItem[]; topByQuantity: RankedItem[]; zeroSaleItems: { id: string; name: string; categoryName: string | null }[]; basedOnCurrentMenu: true; }
 interface CategoryRow { categoryName: string; quantity: number; revenue: string; percentOfTotal: number; averageItemRevenue: string; }
 interface CategoriesResult { currency: string; categories: CategoryRow[]; isLiveCategoryName: true; }
 interface EmployeeRow { employeeId: string; employeeName: string; role: string; completedOrders: number; sales: string; cashHandled: string; cardHandled: string; averageOrderValue: string; discountTotal: string; voidCount: number; voidValue: string; shiftsClosedCount: number; cashDifference: string | null; }
@@ -396,12 +396,21 @@ export function DashboardClient() {
                 ))}
               </div>
             </div>
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <Card className="overflow-hidden">
+                <div className="border-b border-line px-4 py-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Top po prometu</div>
                 {data.items.topItems.length === 0 ? (
                   <div className="p-5"><EmptyState title="Nema prodatih artikala." compact /></div>
                 ) : (
                   <ItemTable rows={data.items.topItems} currency={currency} />
+                )}
+              </Card>
+              <Card className="overflow-hidden">
+                <div className="border-b border-line px-4 py-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Top po količini</div>
+                {data.items.topByQuantity.length === 0 ? (
+                  <div className="p-5"><EmptyState title="Nema prodatih artikala." compact /></div>
+                ) : (
+                  <ItemTable rows={data.items.topByQuantity} currency={currency} />
                 )}
               </Card>
               <Card className="overflow-hidden">

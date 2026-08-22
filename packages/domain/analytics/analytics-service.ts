@@ -346,6 +346,10 @@ export interface TopAndLowItemsResult {
   currency: string;
   topItems: RankedItem[];
   lowItems: RankedItem[];
+  /** #15: rangiranje po KOLIČINI, ne po prometu — top-artikal po prometu
+   * (npr. skup specijalitet) ne mora biti i top-artikal po broju prodatih
+   * komada (npr. jeftino piće), pa se ne pretpostavlja da su liste iste. */
+  topByQuantity: RankedItem[];
   zeroSaleItems: ZeroSaleMenuItem[];
   /** #7: zero-sale lista dolazi iz TRENUTNOG menija (aktivni, neobrisani
    * MenuItem redovi), NIJE istorijski transakcioni podatak — artikal
@@ -371,6 +375,7 @@ export async function getTopAndLowItems(
   }));
   const topItems = [...ranked].sort((a, b) => decimalToNumber(b.totalRevenue) - decimalToNumber(a.totalRevenue)).slice(0, limit);
   const lowItems = [...ranked].sort((a, b) => decimalToNumber(a.totalRevenue) - decimalToNumber(b.totalRevenue)).slice(0, limit);
+  const topByQuantity = [...ranked].sort((a, b) => b.totalQuantity - a.totalQuantity).slice(0, limit);
 
   const soldNames = new Set(report.rows.map((r) => r.name));
   const menuItems = await prisma.menuItem.findMany({
@@ -381,7 +386,7 @@ export async function getTopAndLowItems(
     .filter((m) => !soldNames.has(m.name))
     .map((m) => ({ id: m.id, name: m.name, categoryName: m.category?.name ?? null }));
 
-  return { currency: report.currency, topItems, lowItems, zeroSaleItems, basedOnCurrentMenu: true };
+  return { currency: report.currency, topItems, lowItems, topByQuantity, zeroSaleItems, basedOnCurrentMenu: true };
 }
 
 // ── PERFORMANSE PO KATEGORIJI (#8) ───────────────────────────────────────
