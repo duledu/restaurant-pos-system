@@ -8,13 +8,97 @@ export class InsufficientStockError extends Error {
   readonly stockItems: Array<{ name: string; available: number; required: number }>;
 
   constructor(items: Array<{ name: string; available: number; required: number }>) {
+    // P3.3: poruka je NAMERNO kontekstualno neutralna ("Nema dovoljno
+    // zaliha za:", ne "...za završetak prodaje") jer se ista klasa sada
+    // baca i pri dodavanju u porudžbinu i pri slanju, ne samo pri naplati
+    // (specifikacija #47 — ponovo koristi POSTOJEĆU grešku, ne izmišljaj novu).
+    const names = items.map((i) => i.name).join(", ");
     const lines = items
-      .map((i) => `${i.name}\n  Dostupno: ${i.available}, Potrebno: ${i.required}`)
+      .map((i) => `${i.name} — dostupno: ${i.available}, traženo: ${i.required}`)
       .join("\n");
-    super(`Nema dovoljno zaliha za završetak prodaje:\n${lines}`);
+    super(`Nema dovoljno zaliha za: ${names}\n${lines}`);
     this.name = "InsufficientStockError";
     this.stockItems = items;
   }
+}
+
+// ─── P3.3: jedinstvena definicija statusa zalihe ──────────────────────────────
+
+export type StockStatus = "OUT" | "LOW" | "OK";
+
+/**
+ * JEDINA autoritativna definicija OUT/LOW/OK — ISTA granica kao P1.1
+ * Inventory UI (inventory-client.tsx stockStatus) i P2.3 Owner Control
+ * Center (getStockAttention ispod, sada refaktorisano da koristi OVU
+ * funkciju umesto sopstvene kopije logike — specifikacija #36). Nijedan
+ * drugi sloj (React, order-service, dashboard) ne sme ponovo definisati
+ * ovu granicu.
+ */
+export function getInventoryStockStatus(currentStock: number, minimumStock: number | null): StockStatus {
+  if (currentStock <= 0) return "OUT";
+  if (minimumStock != null && currentStock <= minimumStock) return "LOW";
+  return "OK";
+}
+
+export interface MenuItemStockInfo {
+  trackingEnabled: boolean;
+  currentStock: string | null;
+  minimumStock: string | null;
+  stockStatus: StockStatus | null; // null kad trackingEnabled=false — status se ne primenjuje
+}
+
+/**
+ * Batch-ovano stanje zaliha za dati skup MenuItem ID-jeva na JEDNOJ lokaciji
+ * — TAČNO JEDAN upit bez obzira na broj artikala (specifikacija #16/#50/#73:
+ * "ne pravi jedan zahtev po artiklu menija"). Interna kompoziciona funkcija
+ * BEZ sopstvene permisione provere — pozivalac (menu-service.ts listMenuItems)
+ * već proverava "menu.view" + requireLocationAccess PRE poziva. Ovo je
+ * NAMERNO: konobar sme da vidi izvedeni status dostupnosti kroz meni bez
+ * pune "inventory.view" permisije (specifikacija #44 — nova, uža
+ * operativna vidljivost, ne puna administracija zaliha).
+ */
+export async function getStockStatusForMenuItems(
+  restaurantId: string,
+  locationId: string,
+  menuItemIds: string[]
+): Promise<Map<string, MenuItemStockInfo>> {
+  const result = new Map<string, MenuItemStockInfo>();
+  if (menuItemIds.length === 0) return result;
+
+  const menuItems = await prisma.menuItem.findMany({
+    where: { id: { in: menuItemIds }, restaurantId },
+    select: { id: true, trackStock: true, minimumStock: true },
+  });
+  const trackedIds = menuItems.filter((m) => m.trackStock).map((m) => m.id);
+
+  const invItems =
+    trackedIds.length > 0
+      ? await prisma.inventoryItem.findMany({
+          where: { restaurantId, locationId, menuItemId: { in: trackedIds } },
+          select: { menuItemId: true, currentStock: true },
+        })
+      : [];
+  const stockByMenuItem = new Map(invItems.map((i) => [i.menuItemId, i.currentStock]));
+
+  for (const mi of menuItems) {
+    if (!mi.trackStock) {
+      result.set(mi.id, { trackingEnabled: false, currentStock: null, minimumStock: null, stockStatus: null });
+      continue;
+    }
+    // Praćenje uključeno ali InventoryItem red ne postoji na OVOJ lokaciji
+    // (npr. inicijalizovano samo za drugu lokaciju) — tretira se kao OUT,
+    // isto kao validateAndDecrementInventoryInTx ("missing" grana ispod).
+    const current = stockByMenuItem.get(mi.id);
+    const currentNum = current != null ? Number(current) : 0;
+    const minNum = mi.minimumStock != null ? Number(mi.minimumStock) : null;
+    result.set(mi.id, {
+      trackingEnabled: true,
+      currentStock: current != null ? current.toString() : "0",
+      minimumStock: mi.minimumStock != null ? mi.minimumStock.toString() : null,
+      stockStatus: getInventoryStockStatus(currentNum, minNum),
+    });
+  }
+  return result;
 }
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
@@ -70,7 +154,7 @@ export async function getStockAttention(ctx: AuthContext, locationId: string): P
   const classified = tracked.map((i) => {
     const current = Number(i.currentStock);
     const min = i.menuItem.minimumStock != null ? Number(i.menuItem.minimumStock) : null;
-    const status: "out" | "low" | "ok" = current <= 0 ? "out" : min != null && current <= min ? "low" : "ok";
+    const status = getInventoryStockStatus(current, min).toLowerCase() as "out" | "low" | "ok";
     return { item: i, status, current, min };
   });
 
@@ -431,6 +515,64 @@ export async function validateAndDecrementInventoryInTx(
       },
     });
   }
+}
+
+// ─── P3.3: read-only fresh-availability validation (add-item/submit) ─────────
+
+export interface StockRequirement {
+  menuItemId: string;
+  name: string;
+  quantity: number;
+}
+
+/**
+ * Read-only "da li je ovo trenutno dostupno" provera — NIKAD ne menja
+ * currentStock (to ostaje isključivo posao validateAndDecrementInventoryInTx
+ * pri Payment-u, koji ostaje krajnji autoritet — specifikacija #12/#22).
+ * Koristi se iz order-service.ts (addItem/updateItem — pojedinačna stavka;
+ * submitOrder — ceo agregirani zahtev porudžbine).
+ *
+ * Agregira po menuItemId PRE provere (specifikacija #51/#63 — kritično: dve
+ * linije istog artikla sa različitim P3.2 modifikatorima moraju se sabrati,
+ * ne proveravati nezavisno, inače bi "Burger+sir ×2" i "Burger+slanina ×2"
+ * sa zalihom 3 obe prošle iako je stvarno potrebno 4). Baca ISTU
+ * InsufficientStockError klasu kao Payment (specifikacija #47), sa SVIM
+ * nedovoljnim artiklima odjednom (specifikacija #48), u DVA upita ukupno
+ * bez obzira na broj linija (specifikacija #50).
+ */
+export async function assertStockAvailable(
+  db: Prisma.TransactionClient | typeof prisma,
+  input: { restaurantId: string; locationId: string; requirements: StockRequirement[] }
+): Promise<void> {
+  const byItem = new Map<string, { name: string; quantity: number }>();
+  for (const r of input.requirements) {
+    const existing = byItem.get(r.menuItemId);
+    byItem.set(r.menuItemId, { name: r.name, quantity: (existing?.quantity ?? 0) + r.quantity });
+  }
+  if (byItem.size === 0) return;
+
+  const menuItemIds = [...byItem.keys()];
+  const trackedMenuItems = await db.menuItem.findMany({
+    where: { id: { in: menuItemIds }, restaurantId: input.restaurantId, trackStock: true },
+    select: { id: true, name: true },
+  });
+  if (trackedMenuItems.length === 0) return;
+
+  const invItems = await db.inventoryItem.findMany({
+    where: { restaurantId: input.restaurantId, locationId: input.locationId, menuItemId: { in: trackedMenuItems.map((i) => i.id) } },
+    select: { menuItemId: true, currentStock: true },
+  });
+  const stockByMenuItem = new Map(invItems.map((i) => [i.menuItemId, Number(i.currentStock)]));
+
+  const insufficient: Array<{ name: string; available: number; required: number }> = [];
+  for (const mi of trackedMenuItems) {
+    const required = byItem.get(mi.id)!.quantity;
+    const available = stockByMenuItem.get(mi.id) ?? 0; // praćeno ali bez InventoryItem reda na ovoj lokaciji = OUT
+    if (available < required) {
+      insufficient.push({ name: mi.name, available, required });
+    }
+  }
+  if (insufficient.length > 0) throw new InsufficientStockError(insufficient);
 }
 
 // ─── Bulk opening-stock initialization / reset (go-live workflow) ─────────────

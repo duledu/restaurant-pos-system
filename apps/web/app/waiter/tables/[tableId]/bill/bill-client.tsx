@@ -270,7 +270,7 @@ export function BillClient({ tableId }: { tableId: string }) {
         </div>
       </div>
 
-      {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
+      {error && <div className="mb-3 whitespace-pre-line rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
 
       <div className="rounded-md border border-line bg-white p-4 shadow-sm">
         <div className="mb-3 space-y-1">

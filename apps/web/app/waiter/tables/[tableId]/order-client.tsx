@@ -6,6 +6,7 @@ import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
 import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, type VoidReasonCode } from "@rcs/shared";
 import { sameModifierSelection } from "../../../../lib/order-cart";
+import { formatStockQty } from "../../../../lib/stock-format";
 
 interface Category {
   id: string;
@@ -27,6 +28,12 @@ interface ModifierGroup {
   isActive: boolean;
   options: ModifierOption[];
 }
+interface MenuItemStock {
+  trackingEnabled: boolean;
+  currentStock: string | null;
+  minimumStock: string | null;
+  stockStatus: "OUT" | "LOW" | "OK" | null;
+}
 interface MenuItem {
   id: string;
   name: string;
@@ -35,6 +42,9 @@ interface MenuItem {
   // Sirovi Prisma include oblik (MenuItemModifierGroup join) — vidi
   // menu-service.ts listMenuItems. Prazan niz za artikle bez dodataka.
   modifierGroups: { group: ModifierGroup }[];
+  // P3.3: prisutno SAMO kad je meni zatražen sa locationId (vidi load()
+  // ispod) — null dok se ne učita, nikad se ne tumači kao OUT.
+  stock: MenuItemStock | null;
 }
 interface OrderItemModifier {
   id: string;
@@ -390,6 +400,9 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [modifierPickerItem, setModifierPickerItem] = useState<MenuItem | null>(null);
   // Postojeća DRAFT stavka čiji se dodaci uređuju (umesto dodavanja nove).
   const [editingModifiersFor, setEditingModifiersFor] = useState<OrderItem | null>(null);
+  // P3.3: lokacija porudžbine — čuva se da bi pozadinsko osvežavanje statusa
+  // zaliha (ispod) moglo da ponovi isti upit bez ponovnog otvaranja porudžbine.
+  const [locationId, setLocationId] = useState<string | null>(null);
 
   const canVoid = useMemo(() => roles.some((r) => MANAGEMENT_ROLES.has(r)), [roles]);
 
@@ -407,11 +420,15 @@ export function OrderClient({ tableId }: { tableId: string }) {
         body: JSON.stringify({ tableId }),
       });
       const orderId = orderRes.order.id;
+      const orderLocationId = orderRes.order.locationId;
+      setLocationId(orderLocationId);
 
+      // P3.3: locationId prosleđen ovde — server dodaje status zalihe (OUT/
+      // LOW/OK) SAMO za OVU lokaciju uz svaki artikal (specifikacija #41/#43).
       const [orderDetail, categoriesRes, itemsRes, meRes] = await Promise.all([
         apiFetch(`/api/pos/orders/${orderId}`),
         apiFetch(`/api/admin/menu/categories`),
-        apiFetch(`/api/admin/menu/items?activeOnly=true`),
+        apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${orderLocationId}`),
         apiFetch(`/api/pos/me`),
       ]);
 
@@ -451,6 +468,23 @@ export function OrderClient({ tableId }: { tableId: string }) {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.id, order?.status]);
+
+  // P3.3: dok konobar bira artikle (pre slanja), status zalihe se osvežava
+  // umereno u pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s).
+  // Ne dira order/cart stanje, samo listu artikala menija.
+  useEffect(() => {
+    if (submitted || !locationId) return;
+    const interval = setInterval(async () => {
+      try {
+        const itemsRes = await apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${locationId}`);
+        setItems(itemsRes.items);
+      } catch {
+        // Tiha greška na pozadinskom osvežavanju — konobar i dalje može da radi
+        // sa poslednjim poznatim stanjem; server ionako presuđuje pri dodavanju.
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [submitted, locationId]);
 
   const visibleItems = useMemo(() => {
     return items.filter((item) => {
@@ -523,8 +557,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
    * dodataka (specifikacija #10), inače otvara ModifierSelectionModal. */
+  /** P3.3: frontend je SAVETODAVNO — server (orders.addItem) je autoritet i
+   * odbija dodavanje OUT artikla bez obzira na ovo (specifikacija #4/#7).
+   * Ovo samo sprečava očigledno beskorisan zahtev i daje trenutnu povratnu
+   * informaciju bez čekanja mrežnog odgovora. */
   function handleTapMenuItem(item: MenuItem) {
     if (cartBusy) return;
+    if (item.stock?.stockStatus === "OUT") {
+      setError(`${item.name} — nema na zalihama.`);
+      return;
+    }
     if (item.modifierGroups.length === 0) {
       addItemWithModifiers(item.id, []);
     } else {
@@ -730,20 +772,41 @@ export function OrderClient({ tableId }: { tableId: string }) {
       )}
 
         <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
-          {visibleItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => handleTapMenuItem(item)}
-              disabled={cartBusy}
-              className="flex min-h-[104px] flex-col justify-between rounded-lg border border-line bg-white p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 sm:hover:border-gold/60 sm:hover:shadow-card"
-            >
-              <div className="font-semibold leading-snug text-ink">
-                {item.name}
-                {item.modifierGroups.length > 0 && <span className="ml-1.5 align-middle text-[10px] font-medium text-inkSoft">· dodaci</span>}
-              </div>
-              <div className="mt-3 text-base font-bold tabular-nums text-gold-dark">{Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span></div>
-            </button>
-          ))}
+          {visibleItems.map((item) => {
+            const isOut = item.stock?.stockStatus === "OUT";
+            const isLow = item.stock?.stockStatus === "LOW";
+            return (
+              <button
+                key={item.id}
+                onClick={() => handleTapMenuItem(item)}
+                disabled={cartBusy || isOut}
+                aria-disabled={isOut}
+                className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
+                  isOut ? "border-line bg-ink/[0.03]" : "border-line bg-white sm:hover:border-gold/60 sm:hover:shadow-card"
+                }`}
+              >
+                <div className="font-semibold leading-snug text-ink">
+                  {item.name}
+                  {item.modifierGroups.length > 0 && <span className="ml-1.5 align-middle text-[10px] font-medium text-inkSoft">· dodaci</span>}
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <span className="text-base font-bold tabular-nums text-gold-dark">
+                    {Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
+                  </span>
+                  {isOut && (
+                    <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-semibold text-danger">
+                      Nema na zalihama
+                    </span>
+                  )}
+                  {isLow && (
+                    <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[10px] font-semibold text-warn">
+                      Još {formatStockQty(item.stock!.currentStock ?? "0")}
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })}
           {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
         </div>
       </div>

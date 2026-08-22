@@ -8,6 +8,7 @@ import { stationsForPreparation } from "../production/station-state";
 import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
+import { assertStockAvailable } from "../inventory/inventory-service";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
 
 const ORDER_ITEM_INCLUDE = {
@@ -114,6 +115,17 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
     throw new Error("Artikal trenutno nije dostupan za prodaju");
   }
 
+  // P3.3: sveža provera dostupnosti u trenutku dodavanja — SAMO validacija,
+  // NIKAD ne menja currentStock (to ostaje isključivo posao Payment-a, vidi
+  // assertStockAvailable). Ne tretira postojeće draft redove (ni ovog ni
+  // drugih konobara) kao "rezervisanu" zalihu (specifikacija #8/#9/#10/#20)
+  // — ovo je samo trenutna provera "da li je OVAJ zahtev razuman SADA".
+  await assertStockAvailable(prisma, {
+    restaurantId: ctx.restaurantId,
+    locationId: order.locationId,
+    requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+  });
+
   // P3.2: klijent šalje SAMO identitete izabranih opcija — server učitava
   // grupe STVARNO vezane za ovaj artikal i sam presuđuje cenu (specifikacija
   // #12/#13). `OrderItem.price` postaje EFEKTIVNA jedinična cena (osnovna +
@@ -212,10 +224,24 @@ async function currentModifierTotal(orderItemId: string): Promise<Prisma.Decimal
 }
 
 export async function updateItem(ctx: AuthContext, orderId: string, itemId: string, input: UpdateOrderItemInput) {
-  await getOwnedDraftOrder(ctx, orderId);
+  const order = await getOwnedDraftOrder(ctx, orderId);
 
   const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
   if (!item) throw new Error("Stavka nije pronađena");
+
+  // P3.3: samo kad se KOLIČINA UVEĆAVA i artikal ima poznat menuItemId —
+  // smanjenje/uklanjanje je uvek dozvoljeno (specifikacija #20), i ne
+  // proverava se ništa kad quantity uopšte nije deo ovog patch-a.
+  if (input.quantity !== undefined && input.quantity > item.quantity && item.menuItemId) {
+    const menuItem = await prisma.menuItem.findUnique({ where: { id: item.menuItemId }, select: { id: true, name: true } });
+    if (menuItem) {
+      await assertStockAvailable(prisma, {
+        restaurantId: ctx.restaurantId,
+        locationId: order.locationId,
+        requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+      });
+    }
+  }
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.orderItem.update({ where: { id: itemId }, data: input });
@@ -334,6 +360,22 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
         });
       }
     }
+
+    // P3.3: sveža agregatna provera dostupnosti PRE slanja kuhinji/šanku —
+    // VALIDACIJA SAMO, nikad ne menja currentStock (specifikacija #21/#22 —
+    // Payment ostaje jedini autoritet za stvarni odbitak). Agregira SVE
+    // linije po menuItemId (specifikacija #51/#63): dve linije istog
+    // artikla sa različitim P3.2 modifikatorima (npr. Burger+sir ×2 i
+    // Burger+slanina ×2) se sabiraju u JEDAN zahtev od 4 komada pre provere
+    // — ne proveravaju se nezavisno, što bi pogrešno dozvolilo obe linije
+    // kad zaliha ima samo 3.
+    const stockRequirements = items
+      .filter((item) => item.menuItemId)
+      .map((item) => {
+        const currentMenuItem = menuItemById.get(item.menuItemId!);
+        return { menuItemId: item.menuItemId!, name: currentMenuItem?.name ?? item.name, quantity: item.quantity };
+      });
+    await assertStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
 
     await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });
     await tx.orderItem.updateMany({

@@ -114,5 +114,9 @@ export const menuItemFiltersSchema = z.object({
   type: categoryTypeSchema.optional(),
   preparationStation: preparationStationSchema.optional(),
   activeOnly: z.boolean().optional(),
+  // P3.3: kad je prosleđeno, listMenuItems dodaje batch-ovan status zaliha
+  // (OUT/LOW/OK) za TU lokaciju uz svaki artikal — vidi menu-service.ts.
+  // Opciono jer Admin Menu pregled (bez konkretne lokacije) ostaje nepromenjen.
+  locationId: z.string().uuid().optional(),
 });
 export type MenuItemFilters = z.infer<typeof menuItemFiltersSchema>;

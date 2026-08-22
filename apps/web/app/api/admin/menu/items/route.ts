@@ -11,6 +11,7 @@ export const GET = withApiAuth(async (ctx, request) => {
     type: url.searchParams.get("type") ?? undefined,
     preparationStation: url.searchParams.get("station") ?? undefined,
     activeOnly: url.searchParams.get("activeOnly") === "true" ? true : undefined,
+    locationId: url.searchParams.get("locationId") ?? undefined,
   });
   const items = await menu.listMenuItems(ctx, filters);
   return NextResponse.json({ items });

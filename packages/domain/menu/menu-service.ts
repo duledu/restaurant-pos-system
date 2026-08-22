@@ -1,6 +1,7 @@
 import { prisma } from "@rcs/db";
-import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
+import { getStockStatusForMenuItems } from "../inventory/inventory-service";
 import type {
   CreateCategoryInput,
   UpdateCategoryInput,
@@ -125,8 +126,14 @@ export async function deleteCategory(ctx: AuthContext, categoryId: string, force
 
 export async function listMenuItems(ctx: AuthContext, filters: MenuItemFilters = {}) {
   requirePermission(ctx, MENU_VIEW);
+  // P3.3: locationId je OPCIONO — kad konobar traži meni za konkretnu
+  // (svoju) lokaciju, server proverava pristup i dodaje status zalihe za
+  // TU lokaciju (specifikacija #41/#43: nikad agregat preko lokacija, nikad
+  // tuđa lokacija). Admin bez locationId dobija identičan odgovor kao pre
+  // P3.3 (bez stock polja) — potpuno aditivno.
+  if (filters.locationId) requireLocationAccess(ctx, filters.locationId);
 
-  return prisma.menuItem.findMany({
+  const items = await prisma.menuItem.findMany({
     where: {
       ...scopeToRestaurant(ctx),
       deletedAt: null,
@@ -152,6 +159,13 @@ export async function listMenuItems(ctx: AuthContext, filters: MenuItemFilters =
     },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
   });
+
+  if (!filters.locationId) return items;
+
+  // JEDAN dodatni batch-ovan upit za SVE artikle odjednom (specifikacija
+  // #16/#50/#73) — ne po artiklu.
+  const stockByItem = await getStockStatusForMenuItems(ctx.restaurantId, filters.locationId, items.map((i) => i.id));
+  return items.map((item) => ({ ...item, stock: stockByItem.get(item.id) ?? null }));
 }
 
 export async function createMenuItem(ctx: AuthContext, input: CreateMenuItemInput) {
