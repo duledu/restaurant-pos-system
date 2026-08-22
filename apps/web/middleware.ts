@@ -52,9 +52,12 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   // Poklapa sve rute OSIM Next.js internih asset-a (_next/static, _next/image),
-  // favicon.ico i public/branding/** (TableCore PROIZVOD branding — logo mora
-  // biti vidljiv i NEautentifikovanom korisniku, npr. na /login ekranu; ovo
-  // nema veze sa restoranskim/poslovnim podacima pa ne otvara ništa osetljivo).
-  // Sve ostalo (stranice i /api/**) i dalje prolazi kroz gornju proveru.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|branding/).*)"],
+  // favicon.ico, public/branding/** i (P3.1) manifest.webmanifest + public/icons/**
+  // — sve ovo mora biti čitljivo NEautentifikovanom browseru (npr. Chrome
+  // proverava manifest/ikone PRE bilo kakve prijave da bi ponudio instalaciju
+  // na /login ekranu). Ovo su isključivo statični PWA/branding asset-i, bez
+  // ikakvog restoranskog/poslovnog podatka — ista logika kao postojeći
+  // branding/ izuzetak iznad. Sve ostalo (stranice i /api/**) i dalje prolazi
+  // kroz gornju proveru.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|branding/|icons/|manifest.webmanifest).*)"],
 };

@@ -7,6 +7,7 @@ import { AppLogo } from "../../components/branding/AppLogo";
 import { PinPad } from "../../components/auth/PinPad";
 import { clearDevice, getDeviceId } from "../../lib/shared-pos";
 import { ROLE_LABEL } from "../../components/admin/role-labels";
+import { InstallAppButton } from "../../components/system/InstallAppButton";
 
 // Tri stanja prijave:
 // "admin"            – email + lozinka (OWNER/ADMIN/MANAGER)
@@ -128,6 +129,7 @@ export default function LoginPage() {
               ← Administratorska prijava
             </button>
           )}
+          <InstallAppButton className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90" />
         </div>
       </div>
     </main>

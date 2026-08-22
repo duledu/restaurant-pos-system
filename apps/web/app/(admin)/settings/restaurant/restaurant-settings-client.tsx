@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card } from "../../../../components/ui/Card";
 import { Skeleton } from "../../../../components/ui/Skeleton";
+import { useInstallPrompt } from "../../../../components/system/InstallAppButton";
 
 interface RestaurantSettings {
   address: string | null;
@@ -29,6 +30,7 @@ const FIELDS: { key: keyof RestaurantSettings; label: string; placeholder: strin
 ];
 
 export function RestaurantSettingsClient() {
+  const { canInstall, promptInstall } = useInstallPrompt();
   const [values, setValues] = useState<RestaurantSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -107,6 +109,22 @@ export function RestaurantSettingsClient() {
           </div>
         )}
       </Card>
+
+      {canInstall && (
+        <Card className="mt-6 p-5">
+          <h2 className="text-sm font-semibold text-ink">Aplikacija</h2>
+          <p className="mt-1 text-sm text-inkSoft">
+            Instalirajte TableCore kao aplikaciju na ovom uređaju za brži pristup i prikaz preko celog ekrana.
+          </p>
+          <button
+            type="button"
+            onClick={promptInstall}
+            className="mt-3 inline-flex min-h-11 items-center rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink hover:border-gold/50"
+          >
+            Instaliraj TableCore aplikaciju
+          </button>
+        </Card>
+      )}
     </div>
   );
 }
