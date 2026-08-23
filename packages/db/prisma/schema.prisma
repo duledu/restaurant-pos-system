@@ -84,6 +84,8 @@ model Restaurant {
   settings  RestaurantSettings?
   inventoryItems InventoryItem[]
   modifierGroups ModifierGroup[]
+  ingredients        Ingredient[]
+  ingredientStocks   IngredientStock[]
 
   @@index([tenantId])
   @@index([status])
@@ -112,6 +114,7 @@ model Location {
   shifts            Shift[]
   orders            Order[]
   inventoryItems    InventoryItem[]
+  ingredientStocks  IngredientStock[]
 
   @@index([restaurantId])
   @@map("locations")
@@ -424,6 +427,7 @@ model MenuItem {
   orderItems     OrderItem[]
   inventoryItems InventoryItem[]
   modifierGroups MenuItemModifierGroup[]
+  recipeLines    MenuItemIngredient[]
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
@@ -1144,4 +1148,140 @@ model InventoryMovement {
   @@index([paymentId])
   @@index([createdAt])
   @@map("inventory_movements")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// P1 — NORMATIVI / RECEPTURE + SIROVINSKI LAGER (foundation)
+//
+// Namerno POTPUNO ODVOJENO od InventoryItem/InventoryMovement iznad, koji
+// prate gotov MenuItem "na stanju" (npr. "koliko flaša Koka-Kole imamo") —
+// jedna prodata jedinica = jedan dekrement. Ingredient/IngredientStock prati
+// SIROVINE (meso, luk, ulje...) čiju potrošnju po prodatom artiklu određuje
+// receptura (MenuItemIngredient), ne 1:1 odnos. Ova faza NAMERNO ne povezuje
+// recepture sa prodajom (nema automatskog raščlanjivanja pri naplati) — to
+// je sledeća, posebno odobrena faza. Do tada: recepture i sirovinski lager
+// postoje, ali se ne diraju automatski.
+//
+// Permisije: namerno se PONOVO KORISTE postojeći 'inventory.view'/
+// 'inventory.manage' (već OWNER/ADMIN/MANAGER, vidi migraciju
+// 20260819140000_inventory) — ista operativna granica važi i za sirovine/
+// recepture, nema potrebe za novim permission kodovima.
+
+enum UnitOfMeasure {
+  KILOGRAM
+  GRAM
+  LITER
+  MILLILITER
+  PIECE
+}
+
+model Ingredient {
+  id           String  @id @default(uuid())
+  restaurantId String
+  name         String
+  unit         UnitOfMeasure
+  category     String? // slobodan tekst u MVP-u (npr. "Meso", "Povrće") — isti obrazac kao MenuItem.unit
+  sku          String?
+  isActive     Boolean @default(true) // deaktivacija umesto brisanja — vidi napomenu ispod
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  stocks     IngredientStock[]
+  movements  IngredientMovement[]
+  recipeLines MenuItemIngredient[]
+
+  // NAMERNO nema @@unique na imenu — isti obrazac kao MenuItem (slug nosi
+  // jedinstvenost tamo; ovde jedinstvenost imena nije poslovni zahtev, dve
+  // sirovine mogu slučajno imati sličan naziv u različitim kategorijama).
+  @@index([restaurantId])
+  @@index([restaurantId, isActive])
+  @@map("ingredients")
+}
+
+model IngredientStock {
+  id                String   @id @default(uuid())
+  restaurantId      String
+  locationId        String
+  ingredientId      String
+  currentStock      Decimal  @db.Decimal(12, 3) @default(0)
+  lowStockThreshold Decimal? @db.Decimal(12, 3)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  location   Location             @relation(fields: [locationId], references: [id])
+  ingredient Ingredient           @relation(fields: [ingredientId], references: [id])
+  movements  IngredientMovement[]
+
+  @@unique([locationId, ingredientId])
+  @@index([restaurantId])
+  @@index([ingredientId])
+  @@map("ingredient_stocks")
+}
+
+enum IngredientMovementType {
+  OPENING_STOCK
+  RECEIPT
+  ADJUSTMENT
+  WRITE_OFF
+  // Rezervisano za buduće faze (nema koda koji ih još piše — vidi napomenu
+  // na vrhu ove sekcije): SALE nastaje kad recepture budu povezane sa
+  // naplatom; INVENTORY_CORRECTION uz buduće fizičko popisivanje;
+  // RETURN_TO_SUPPLIER uz buduće upravljanje dobavljačima.
+  SALE
+  INVENTORY_CORRECTION
+  RETURN_TO_SUPPLIER
+}
+
+model IngredientMovement {
+  id                String                 @id @default(uuid())
+  restaurantId      String
+  locationId        String
+  ingredientId      String
+  ingredientStockId String
+  type              IngredientMovementType
+  quantityDelta     Decimal                @db.Decimal(12, 3)
+  quantityBefore    Decimal                @db.Decimal(12, 3)
+  quantityAfter     Decimal                @db.Decimal(12, 3)
+  employeeId        String?
+  reason            String?
+  // Generička referenca (namerno NE paymentId/orderId kao InventoryMovement
+  // — sirovinski SALE tip iz buduće faze može poticati iz drugog konteksta
+  // od gotovog-proizvoda prodaje) — neiskorišćeno do te faze.
+  referenceType String?
+  referenceId   String?
+  createdAt     DateTime @default(now())
+
+  ingredient      Ingredient      @relation(fields: [ingredientId], references: [id])
+  ingredientStock IngredientStock @relation(fields: [ingredientStockId], references: [id])
+
+  @@index([ingredientStockId])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([ingredientId])
+  @@index([createdAt])
+  @@map("ingredient_movements")
+}
+
+// Receptura (Normativ) — koliko koje sirovine ide u JEDAN prodat MenuItem.
+// Količina je izražena u jedinici SIROVINE (Ingredient.unit) — namerno bez
+// posebnog "unit override" polja po liniji recepture, da ne bi trebalo
+// konverzije jedinica u ovoj fazi (vidi packages/domain/inventory/
+// unit-of-measure.ts za konverzionu tabelu pripremljenu za kasniju fazu).
+model MenuItemIngredient {
+  id           String   @id @default(uuid())
+  menuItemId   String
+  ingredientId String
+  quantity     Decimal  @db.Decimal(12, 3)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  menuItem   MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@unique([menuItemId, ingredientId])
+  @@index([menuItemId])
+  @@index([ingredientId])
+  @@map("menu_item_ingredients")
 }

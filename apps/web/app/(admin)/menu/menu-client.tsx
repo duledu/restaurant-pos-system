@@ -529,6 +529,179 @@ function CategorySection({
 
 // ── ItemRow ───────────────────────────────────────────────────────────────────
 
+// ── Normativ (recipe) ─────────────────────────────────────────────────────────
+
+const UNIT_LABELS_SR: Record<string, string> = { KILOGRAM: "kg", GRAM: "g", LITER: "l", MILLILITER: "ml", PIECE: "kom" };
+
+interface IngredientOption {
+  id: string;
+  name: string;
+  unit: string;
+  isActive: boolean;
+}
+
+interface RecipeLine {
+  id: string;
+  ingredientId: string;
+  quantity: string;
+  ingredient: IngredientOption;
+}
+
+async function recipeApiFetch(url: string, options?: RequestInit) {
+  const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? "Greška");
+  return body;
+}
+
+function RecipeModal({ item, onClose }: { item: MenuItem; onClose: () => void }) {
+  const [lines, setLines] = useState<RecipeLine[]>([]);
+  const [ingredients, setIngredients] = useState<IngredientOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [ingredientId, setIngredientId] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [recipeRes, ingRes] = await Promise.all([
+        recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe`),
+        recipeApiFetch(`/api/admin/ingredients?activeOnly=true`),
+      ]);
+      setLines(recipeRes.lines ?? []);
+      setIngredients(ingRes.ingredients ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, [item.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function addLine() {
+    setErr("");
+    const qty = Number(quantity);
+    if (!ingredientId) { setErr("Izaberite sirovinu"); return; }
+    if (!Number.isFinite(qty) || qty <= 0) { setErr("Unesite pozitivnu količinu"); return; }
+    try {
+      await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe`, {
+        method: "POST",
+        body: JSON.stringify({ ingredientId, quantity: qty }),
+      });
+      setIngredientId(""); setQuantity("");
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Greška");
+    }
+  }
+
+  async function updateLine(lineId: string, newQty: string) {
+    const qty = Number(newQty);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+    await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ quantity: qty }),
+    });
+    load();
+  }
+
+  async function removeLine(lineId: string) {
+    await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, { method: "DELETE" });
+    load();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-lg bg-white p-5 shadow-elevated"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-bold text-ink">Normativ — {item.name}</h2>
+          <button onClick={onClose} className="text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        </div>
+
+        {loading ? (
+          <p className="text-sm text-inkSoft">Učitavanje…</p>
+        ) : lines.length === 0 ? (
+          <p className="mb-3 text-sm text-inkSoft">Normativ nije definisan.</p>
+        ) : (
+          <table className="mb-3 w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-ink/50">
+                <th className="pb-1">Sirovina</th>
+                <th className="pb-1">Količina</th>
+                <th className="pb-1">Jedinica</th>
+                <th className="pb-1" />
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((line) => (
+                <tr key={line.id} className="border-t border-line/60">
+                  <td className="py-1.5 pr-2">{line.ingredient.name}</td>
+                  <td className="py-1.5 pr-2">
+                    <input
+                      type="number"
+                      step="0.001"
+                      defaultValue={line.quantity}
+                      onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
+                      className="w-20 rounded-sm border border-line px-1.5 py-1 text-sm"
+                    />
+                  </td>
+                  <td className="py-1.5 pr-2 text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</td>
+                  <td className="py-1.5 text-right">
+                    <button onClick={() => removeLine(line.id)} className="text-xs text-danger/70 hover:text-danger">Ukloni</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="rounded-md border border-line bg-cream-100 p-3">
+          <p className="mb-2 text-xs font-semibold text-ink">Dodaj sirovinu</p>
+          <div className="flex flex-wrap gap-2">
+            <select
+              className="min-w-[10rem] flex-1 rounded-sm border border-line px-2 py-1.5 text-sm"
+              value={ingredientId}
+              onChange={(e) => setIngredientId(e.target.value)}
+            >
+              <option value="">Sirovina…</option>
+              {ingredients.map((i) => (
+                <option key={i.id} value={i.id}>{i.name} ({UNIT_LABELS_SR[i.unit] ?? i.unit})</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              step="0.001"
+              placeholder="Količina"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              className="w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
+            />
+            <button onClick={addLine} className="rounded-sm bg-gold px-3 py-1.5 text-sm font-medium text-white hover:bg-gold-dark">
+              Sačuvaj
+            </button>
+          </div>
+          {err && <p className="mt-1.5 text-xs text-danger">{err}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecipeButton({ item }: { item: MenuItem }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="text-ink/65 transition-colors hover:text-ink" title="Normativ (receptura)">
+        Normativ
+      </button>
+      {open && <RecipeModal item={item} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
 function ItemRow({
   item,
   categories,
@@ -649,6 +822,7 @@ function ItemRow({
       {/* Actions */}
       <td className="px-4 py-2.5">
         <div className="flex gap-2 text-xs">
+          <RecipeButton item={item} />
           <button
             onClick={() => duplicateItem(item.id)}
             className="text-ink/65 transition-colors hover:text-ink"
