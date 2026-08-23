@@ -363,6 +363,74 @@ time someone pushes. The two check-only tools above are the safeguard
 instead — they make a forgotten migration loud and blocking at development
 time, not silent until Production breaks.
 
+## Correction: pushing `main` triggers a Production deployment
+
+An earlier version of this document (and earlier session reporting) stated
+that the `tablecore` Vercel project had "no Git integration" — based on
+`vercel project inspect` showing no "Git Repository" section, and on
+`VERCEL_GIT_*` build environment variables pulling as empty strings. That
+absence is **not sufficient proof that Git-triggered deployment is
+disabled**. Empirically: a `git push origin main` was immediately followed
+by a new Production deployment, with a build log showing a fresh
+`prisma generate` + `next build` run. The deployment's own metadata still
+contains no git commit SHA/ref (so the exact triggering mechanism — a
+GitHub App integration vs. some other push-triggered hook — was not
+positively confirmed), but the practical, safety-relevant conclusion is
+unambiguous either way:
+
+**Treat `git push origin main` as a Production deployment action.** Never
+describe a push to `main` as "Git only" / "no deployment impact" without
+first positively verifying (a fresh, empty-handed check is not enough —
+watch for an actual new deployment after a real push, as was done here).
+
+## Git branching workflow
+
+Two long-lived branches, with a clear meaning each:
+
+### `develop`
+- Default branch for all new/ongoing development work.
+- Local work against this branch uses the Neon **DEVELOPMENT** branch
+  (`br-bitter-frost-b1ut6nja`, endpoint `ep-solitary-leaf-b1q2002q`) via
+  local `.env`.
+- Integration tests always use the Neon **TEST** branch
+  (`br-cool-frost-b1zy55f5`, endpoint `ep-steep-math-b1mu6kyv`, database
+  `rcs_test`) via `TEST_DATABASE_URL` — unaffected by which Git branch is
+  checked out.
+- May trigger a Vercel Preview deployment on push (acceptable) — confirmed
+  empirically to **not** trigger a Production deployment.
+
+### `main`
+- Production-ready code only.
+- Merge/push here only after full local validation (typecheck, lint, unit
+  tests, integration tests against TEST, build).
+- **Pushing `main` must be treated as a Production deployment action** —
+  see the correction above.
+- Do not commit directly to `main` for routine work.
+
+### Recommended flow
+```
+feature work → develop → tests → review → merge develop into main → push main → Production
+```
+
+### Feature branches (optional, for larger tasks)
+`feature/<short-name>`, created from `develop`, merged back into `develop`
+only after validation. Small, well-scoped fixes may be committed directly
+to `develop`.
+
+### Database mapping (Git branch is UX convenience, never a safety boundary)
+| Git branch | Local `.env` target | Integration tests |
+|---|---|---|
+| `develop` | Neon DEVELOPMENT (`br-bitter-frost-b1ut6nja`) | Neon TEST (`br-cool-frost-b1zy55f5`) via `TEST_DATABASE_URL` |
+| `main` | (not used for local dev) | Neon TEST (`br-cool-frost-b1zy55f5`) — same, branch-independent |
+| Production (deployed) | Neon PRODUCTION (`br-silent-paper-b1k1n4zg`) via Vercel's own env vars | — |
+
+Git branch names are **never** the database safety boundary — that
+authority remains exclusively the `_rcs_database_environment` marker and
+the `assertDevelopmentDatabaseIsSafe`/`assertProductionDatabaseIsSafe`/
+`assertTestDatabaseIsSafe` guards (see above). Checking out `main` locally
+does not, by itself, change which database `.env` points to; the guards
+verify the actual target every time, independent of Git state.
+
 ## Known environment limitation (this session)
 
 The full live "run the whole suite against the isolated TEST database, diff
