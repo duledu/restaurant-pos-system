@@ -568,14 +568,17 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     const waiter = ownerCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
     await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 2 });
-    await orders.addItem(waiter, order.id, { menuItemId: menuItem2.id, quantity: 1 });
-    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
 
+    // P3.3: addItem sam radi svežu proveru dostupnosti (assertStockAvailable)
+    // u trenutku dodavanja u draft — ne čeka se više do naplate da bi se
+    // nedovoljna zaliha otkrila. Item2 (Pivo, 0 zaliha) se zato odbija ODMAH
+    // ovde, fail-fast, ne tek na completePayment.
     await expect(
-      billing.completePayment(waiter, submitted.id, { method: "CASH" })
+      orders.addItem(waiter, order.id, { menuItemId: menuItem2.id, quantity: 1 })
     ).rejects.toBeInstanceOf(inventory.InsufficientStockError);
 
-    // Item 1 ostaje na 10 (rollback)
+    // Item 1 ostaje na 10 (addItem nikad ne menja currentStock — to je
+    // isključivo posao Payment-a)
     const inv1 = await prisma.inventoryItem.findFirst({ where: { menuItemId: fixture.menuItemId } });
     expect(Number(inv1?.currentStock)).toBe(10);
 

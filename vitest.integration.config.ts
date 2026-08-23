@@ -24,12 +24,27 @@ export default defineConfig({
     // login (pin-login/route.ts) skenira SVE aktivne zaposlene restorana i
     // za svakog radi scrypt verifyPin, pa testovi sa više zaposlenih/više
     // login ciklusa (tests/integration/shared-pos-lock.test.ts) mogu
-    // premašiti 5s čisto na trošku hashiranja, bez ikakvog bug-a.
-    testTimeout: 15000,
+    // premašiti 5s čisto na trošku hashiranja, bez ikakvog bug-a. Dalje
+    // podignuto na 30000ms kada TEST_DATABASE_URL cilja pravu Neon granu
+    // (a ne lokalni embedded Postgres) — svaki upit nosi stvarno mrežno
+    // kašnjenje, a testovi koji rade više uzastopnih porudžbina (npr. 5
+    // punih submit+void ciklusa) inače mogu isteći na samoj mrežnoj ceni,
+    // bez ikakvog bug-a u kodu.
+    testTimeout: process.env.TEST_DATABASE_URL?.includes("localhost") ? 15000 : 30000,
     // tests/integration/* deli JEDNU Postgres bazu i svaki fajl radi
     // TRUNCATE ... CASCADE u beforeEach — paralelno izvršavanje fajlova
     // dovodi do deadlock-a među njima. Sekvencijalno izvršavanje fajlova
     // ne staje ozbiljno na performanse (testovi su brzi).
     fileParallelism: false,
+    // NAPOMENA (isprobano i odbačeno): isolate:false je isprobano da bi se
+    // smanjio broj Prisma connection-pool ciklusa ka Neon-u kroz ~34 fajla,
+    // ali je pokvario samu TEST_DATABASE_URL bezbednosnu proveru
+    // (tests/setup/assert-test-database.ts) — sa deljenim modul-registry-jem
+    // između fajlova, provera je od DRUGOG fajla nadalje netačno detektovala
+    // "TEST_DATABASE_URL == DATABASE_URL" i ispravno (bezbedno) prekidala
+    // run. Provera je uradila svoj posao — nijedan nebezbedan pristup se
+    // nije desio — ali je vitest-ova podrazumevana izolacija po fajlu
+    // (isolate: true, default) neophodna da bi ta provera ostala tačna.
+    // Ne dirati ovo bez ponovnog rešavanja tog sukoba.
   },
 });

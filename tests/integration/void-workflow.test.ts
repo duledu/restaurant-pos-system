@@ -581,11 +581,13 @@ describe("cancelAbandonedOrder: core behavior", () => {
     const { order, item } = await submitOrderWithQuantity(fixture, waiter, 1);
 
     const { production } = await import("@rcs/domain");
+    // advanceItemStatus's 5th argument is the CURRENT expected status — 4
+    // calls (SUBMITTED->ACCEPTED->PREPARING->READY->SERVED) reach SERVED;
+    // a 5th call attempting to advance FROM SERVED (terminal) would fail.
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SUBMITTED");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "ACCEPTED");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "PREPARING");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "READY");
-    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SERVED");
 
     await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
 

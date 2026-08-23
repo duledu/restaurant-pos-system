@@ -27,6 +27,83 @@ A single silent fallback, three compounding gaps:
    database — "DEV" and "the thing tests run against" were the same Neon
    branch by default.
 
+## The second incident (August 2026 — Development and Production shared a Neon branch)
+
+Independently of the TEST/DEV incident above, an audit triggered by a
+Production "table does not exist" error (a migration had been authored and
+committed, but never actually applied to whatever database Vercel Production
+used) surfaced a deeper problem while investigating: **Development's local
+`.env` and Vercel Production's `DATABASE_URL` pointed at the exact same Neon
+branch** (`br-silent-paper-b1k1n4zg`, the project's only branch at the time).
+There was no second Neon branch at all — "Development" was never actually
+isolated from "Production," it was the same physical database the whole
+time. The only reason this hadn't already caused a *second* data-loss
+incident is luck: nothing run against "Development" during that period
+happened to be destructive enough to be noticed.
+
+Root cause, same shape as the first incident: **environment identity was
+inferred, never verified.** A restaurant literally named `"Restoran (Dev)"`
+and `NODE_ENV=development` were the only signals available — both are
+*application data or convention*, not a database-level safety boundary. A
+real restaurant could coincidentally be named the same way; `NODE_ENV` is
+set by whoever runs the process, not by the database itself.
+
+**Fix**: two new isolated Neon branches were created (`development` and
+`test`, both branched from the confirmed-Production branch or its
+descendants, never the other way around — see the table below), and an
+explicit, database-level identity marker (`_rcs_database_environment`,
+modeled directly on the existing TEST marker mechanism below) was added so
+environment identity is a live, queryable fact about the database itself,
+never inferred from data, naming convention, or env var names alone.
+
+## Explicit environment identity (Neon branches + marker table)
+
+Concrete identity, current as of the isolation fix (August 2026):
+
+| Environment | Neon branch | Endpoint ID | Database | Marker |
+|---|---|---|---|---|
+| PRODUCTION | `br-silent-paper-b1k1n4zg` | `ep-tiny-base-b1rj6246` | `neondb` | `_rcs_database_environment = PRODUCTION` |
+| DEVELOPMENT | `br-bitter-frost-b1ut6nja` | `ep-solitary-leaf-b1q2002q` | `neondb` | `_rcs_database_environment = DEVELOPMENT` |
+| TEST | `br-cool-frost-b1zy55f5` | `ep-steep-math-b1mu6kyv` | `rcs_test` | `_rcs_database_environment = TEST` + `_rcs_test_database_marker` |
+
+All three live in the same Neon project (`restaurant-pos-system`,
+`holy-breeze-46854733`) as separate branches — each branch is its own
+independent Postgres compute/storage (Neon copy-on-write), not a shared
+instance with different databases. Development was branched from Production
+(a one-time clone, at the moment the isolation fix ran); Test was branched
+from Development, never from Production directly, to keep Production's
+branch tree shallow and to guarantee Test never even transiently shares
+Production's exact data snapshot.
+
+**The marker mechanism** (`scripts/lib/db-environment.mjs`):
+- A singleton table, `_rcs_database_environment(id boolean primary key,
+  environment text check (...), labeled_at timestamptz)` — same shape as
+  the pre-existing `_rcs_test_database_marker`.
+- Written only via the guarded CLI `npm run db:mark-environment --
+  --environment=<PRODUCTION|DEVELOPMENT|TEST> --confirm-target=<db-name>`
+  (`scripts/mark-database-environment.mjs`) — requires typed confirmation,
+  and cross-checks the connection's Neon endpoint ID against hardcoded
+  `KNOWN_PRODUCTION_ENDPOINT_IDS` / `KNOWN_DEVELOPMENT_ENDPOINT_IDS` /
+  `KNOWN_TEST_ENDPOINT_IDS` lists so a database can't be mislabeled the
+  wrong direction (e.g. marking the Production endpoint as anything but
+  PRODUCTION is refused outright).
+- Read live by `assertDevelopmentDatabaseIsSafe()` / `assertProductionDatabaseIsSafe()`
+  (same file) — multi-signal guards for scripts that mutate Development or
+  operate on Production respectively. Neither trusts a single signal: NODE_ENV,
+  the known-endpoint-ID lists, and the live marker must all agree, or the
+  guard throws and the script aborts before touching anything.
+- `assertProductionDatabaseIsSafe()` is wired into `db-premigration-check.mjs`
+  (the gate that must run before any `prisma migrate deploy` against
+  Production) — that gate now refuses to run at all unless it's positively
+  talking to the known Production endpoint with a live `PRODUCTION` marker.
+
+This is deliberately the same philosophy as the TEST marker below applied
+one level up: **never rely on one signal**, and **never infer environment
+from application data** (restaurant names, seeded demo content) or from
+something as weak as a database's own display name (Neon defaults every
+branch's database to `neondb` — that name carries zero information about
+which branch it's on).
+
 ## Architecture: three environments
 
 | Environment | Purpose | Env var | Who connects |
@@ -222,6 +299,69 @@ a recommendation to adopt, not an action taken.
    storage as a second, Neon-independent backup — Neon's own retention
    protects against accidental deletion, but not against a Neon-account-level
    incident.
+
+## Standing schema-change workflow: EXPAND → TEST → DEVELOPMENT → PRECHECK → MIGRATE → VERIFY → DEPLOY → SMOKE TEST → CONTRACT
+
+This is the rule that would have prevented the modifier-table production
+incident. Application code must never be deployed depending on a database
+structure the target database does not yet have.
+
+1. **EXPAND** — author an additive, backward-compatible migration (new
+   tables/columns/indexes only; never a destructive change in the same
+   release as the code that depends on it).
+2. **TEST** — apply the migration to the TEST branch
+   (`ep-steep-math-b1mu6kyv`) and run the full integration suite against it.
+3. **DEVELOPMENT** — apply and manually verify in Development
+   (`ep-solitary-leaf-b1q2002q`) — the environment a developer actually
+   clicks through.
+4. **PRODUCTION PRECHECK** — `npm run db:premigration-check --
+   --confirm-target=<db-name>` against Production. This now runs
+   `assertProductionDatabaseIsSafe()` first (known endpoint + live
+   `PRODUCTION` marker), then inspects migration status, then takes/verifies
+   a backup and a pre-migration row-count snapshot. Any failure aborts —
+   there is no bypass flag.
+5. **MIGRATE PRODUCTION** — `npm run db:migrate:deploy` against Production,
+   only after step 4 passed, only with explicit human authorization for that
+   specific migration.
+6. **VERIFY** — `npm run db:postmigration-check -- --since=<snapshot>`
+   confirms row counts are unchanged (or changed only as expected) and the
+   migration applied cleanly.
+7. **DEPLOY APPLICATION** — only now does application code that queries the
+   new structure get deployed. Never before step 6 passes.
+8. **SMOKE TEST** — verify the critical flows the change touches directly
+   against the live Production app (not just the database).
+9. **CONTRACT (later, separate release)** — destructive/removal schema
+   changes (dropping an old column, etc.) happen in their own independently
+   reviewed release, well after the code that stopped using the old
+   structure has been live and stable — never bundled with the EXPAND step.
+
+## Pre-deploy safety checks (check-only, never auto-fix)
+
+Two complementary check-only tools exist. Neither ever applies a migration,
+runs `db push`, resets anything, or writes application data — both only
+ever detect and abort.
+
+- **`npm run db:migrate:status`** (`scripts/db-migrate-status-check.mjs`) —
+  wraps Prisma's own read-only `prisma migrate status` against whatever
+  `DATABASE_URL` currently resolves to. Exits non-zero if anything is
+  pending or failed. This is the tool that would have caught the original
+  incident immediately if run before that deploy.
+- **`npm run deploy:check`** (`scripts/deploy-check.mjs`) — the full local
+  readiness gate: typecheck, lint, unit tests, `prisma validate`, build,
+  then reports (informationally, never blocking) which environment the
+  current `DATABASE_URL` is marked as. Run this before pushing/deploying.
+  It is deliberately NOT a Production-migration gate — that's
+  `db-premigration-check.mjs`, described above, which does require and
+  verify Production identity specifically.
+
+Vercel's build command (`npx prisma generate ... && next build`) still only
+regenerates the Prisma Client against the current schema — it has never
+applied migrations, and this remains intentional. Automatically running
+`prisma migrate deploy` on every Vercel build was considered and rejected:
+an unreviewed migration must never automatically modify Production every
+time someone pushes. The two check-only tools above are the safeguard
+instead — they make a forgotten migration loud and blocking at development
+time, not silent until Production breaks.
 
 ## Known environment limitation (this session)
 

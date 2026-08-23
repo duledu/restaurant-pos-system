@@ -40,7 +40,7 @@ function ctx(fixture: Fixture, role: string, employeeId: string, permissions: st
   };
 }
 function managerCtx(fixture: Fixture, employeeId = "mgr-1", locationIds?: string[]): AuthContext {
-  return ctx(fixture, "MANAGER", employeeId, ["menu.view", "menu.manage", "shifts.manage", "orders.print", "inventory.view", "inventory.manage"], locationIds);
+  return ctx(fixture, "MANAGER", employeeId, ["menu.view", "menu.manage", "shifts.manage", "orders.print", "inventory.view", "inventory.manage", "audit.view"], locationIds);
 }
 function waiterCtx(fixture: Fixture, employeeId = "waiter-1", locationIds?: string[]): AuthContext {
   return ctx(fixture, "WAITER", employeeId, ["menu.view", "shifts.manage", "orders.print"], locationIds);

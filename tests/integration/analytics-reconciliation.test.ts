@@ -317,7 +317,11 @@ describe("category performance reconciles with the overall period total", () => 
     const categories = await analytics.getCategoryPerformance(manager, { locationId: "ALL", preset: "today" });
     const row = categories.categories.find((c) => c.categoryName === "Nekategorisano");
     expect(row).toBeDefined();
-    expect(Number(row!.revenue)).toBeCloseTo(360, 2); // 300 + 20% porez
+    // revenue je NETO (item.price * quantity, bez poreza) — ista konvencija
+    // kao getSoldItems.summary.allRevenue (reporting-service.ts), vidi
+    // sibling test iznad koji se rekoncilira direktno protiv allRevenue bez
+    // ručnog dodavanja poreza.
+    expect(Number(row!.revenue)).toBeCloseTo(300, 2);
   });
 });
 
@@ -349,10 +353,16 @@ describe("bar production report — symmetric with kitchen, no double counting f
   it("reports SERVED bar items independently of kitchen, mirroring getKitchenProductionReport's shape", async () => {
     const fixture = await createFixture();
     const waiter = context(fixture, "WAITER", "waiter-1");
+    // Zaseban sto za drugu porudžbinu — openOrder na već zauzetom stolu
+    // (poslata, još nenaplaćena porudžbina) vraća POSTOJEĆU porudžbinu
+    // umesto nove (dedup pravilo), pa bi obe porudžbine na fixture.tableId
+    // zapravo bile ISTA porudžbina.
+    const floor = await prisma.floor.findFirstOrThrow({ where: { restaurantId: fixture.restaurantId } });
+    const secondTable = await prisma.restaurantTable.create({ data: { floorId: floor.id, label: "T2" } });
     const barOrder = await orders.openOrder(waiter, { tableId: fixture.tableId });
     const barItem = await orders.addItem(waiter, barOrder.id, { menuItemId: fixture.barItemId, quantity: 3 });
     await orders.submitOrder(waiter, barOrder.id, { idempotencyKey: randomUUID() });
-    const kitchenOrder = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const kitchenOrder = await orders.openOrder(waiter, { tableId: secondTable.id });
     const kitchenItem = await orders.addItem(waiter, kitchenOrder.id, { menuItemId: fixture.kitchenItemId, quantity: 2 });
     await orders.submitOrder(waiter, kitchenOrder.id, { idempotencyKey: randomUUID() });
 

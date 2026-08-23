@@ -86,10 +86,16 @@ describe("cancellation ticket (STORNO): only for items that actually reached a s
     });
     expect(stornoJobs).toHaveLength(1);
     expect(stornoJobs[0].type).toBe("KITCHEN");
-    const content = stornoJobs[0].content as { kind: string; items: { name: string; quantity: number }[]; tableLabel: string };
+    const content = stornoJobs[0].content as {
+      kind: string;
+      items: { name: string; quantity: number; modifiers: unknown[] }[];
+      tableLabel: string;
+    };
     expect(content.kind).toBe("STORNO");
     expect(content.tableLabel).toBe("T12");
-    expect(content.items).toEqual([{ quantity: 1, name: "Pljeskavica" }]);
+    // P3.2: storno tiket uvek nosi modifiers polje (prazan niz kad stavka
+    // nema izabranih dodataka) — vidi dispatchCancellationPrintJob.
+    expect(content.items).toEqual([{ quantity: 1, name: "Pljeskavica", modifiers: [] }]);
   });
 
   it("does not create a STORNO ticket for a partial void — the item is still being prepared in reduced quantity", async () => {

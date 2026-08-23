@@ -166,6 +166,13 @@ describe("cash discrepancy", () => {
   it("surfaces a closed shift with a meaningful cash difference, and getAntiFraudOverview counts it", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
+    // createFixture already opens a shift on this location (openingCash: 0,
+    // needed by other describe blocks in this file) — close it with a
+    // matching countedCash (no discrepancy) before opening the shift this
+    // test actually exercises, or openShift correctly refuses a second
+    // concurrent shift on the same location.
+    const preExisting = await shifts.getActiveShift(manager, fixture.locationId);
+    await shifts.closeShift(manager, preExisting!.id, { countedCash: 0 });
     const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 5000 });
     await shifts.closeShift(manager, shift.id, { countedCash: 5000 - 1500 }); // manjak 1500
 
@@ -186,6 +193,13 @@ describe("cash discrepancy", () => {
   it("detects an overage (višak) as well, not only a shortage", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
+    // createFixture already opens a shift on this location (openingCash: 0,
+    // needed by other describe blocks in this file) — close it with a
+    // matching countedCash (no discrepancy) before opening the shift this
+    // test actually exercises, or openShift correctly refuses a second
+    // concurrent shift on the same location.
+    const preExisting = await shifts.getActiveShift(manager, fixture.locationId);
+    await shifts.closeShift(manager, preExisting!.id, { countedCash: 0 });
     const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 5000 });
     await shifts.closeShift(manager, shift.id, { countedCash: 5000 + 3000 }); // višak 3000
 
@@ -197,6 +211,13 @@ describe("cash discrepancy", () => {
   it("an exactly-matching shift close produces no cash discrepancy row or signal", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
+    // createFixture already opens a shift on this location (openingCash: 0,
+    // needed by other describe blocks in this file) — close it with a
+    // matching countedCash (no discrepancy) before opening the shift this
+    // test actually exercises, or openShift correctly refuses a second
+    // concurrent shift on the same location.
+    const preExisting = await shifts.getActiveShift(manager, fixture.locationId);
+    await shifts.closeShift(manager, preExisting!.id, { countedCash: 0 });
     const shift = await shifts.openShift(manager, { locationId: fixture.locationId, openingCash: 5000 });
     await shifts.closeShift(manager, shift.id, { countedCash: 5000 });
 
