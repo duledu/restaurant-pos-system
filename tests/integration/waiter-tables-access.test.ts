@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
-import { tables } from "@rcs/domain";
+import { tables, orders } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 /**
@@ -141,5 +141,130 @@ describe("waiter table visibility — location and restaurant scoping", () => {
       const floors = await tables.listTables(ctx, fixture.locationAId);
       expect(floors[0]?.tables).toHaveLength(1);
     }
+  });
+});
+
+/**
+ * Regression coverage for the "Waiter B taps Waiter A's table and lands on
+ * an almost-empty rejected-access screen" UX bug. The fix exposes
+ * activeOrderOwnerId (raw employeeId only, never a name) on listTables so
+ * the frontend can block navigation BEFORE it happens
+ * (lib/table-ownership.ts's isTableHeldByAnotherWaiter). These tests prove:
+ * (1) the new field is populated correctly, and (2) the pre-existing
+ * server-side authorization (requireDraftOwnership / getOrder) is completely
+ * unchanged — a waiter can never gain access to another waiter's order by
+ * hitting the API directly, regardless of what the UI does.
+ */
+describe("waiter table visibility — active order ownership exposure (pre-navigation UX fix)", () => {
+  it("a free table (no active order) has activeOrderOwnerId: null", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, [fixture.locationAId]);
+
+    const floors = await tables.listTables(waiter, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerId).toBeNull();
+  });
+
+  it("a table with an active DRAFT order exposes the owning waiter's employeeId", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-owner" },
+    });
+    await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-owner",
+        status: "DRAFT",
+      },
+    });
+
+    const otherWaiter = context(fixture, [fixture.locationAId]); // employeeId: "waiter-1"
+    const floors = await tables.listTables(otherWaiter, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerId).toBe("waiter-owner");
+  });
+
+  it("a table whose active order belongs to the CURRENT waiter exposes their own employeeId (not held-by-another)", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-1" },
+    });
+    await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-1",
+        status: "DRAFT",
+      },
+    });
+
+    const owner = context(fixture, [fixture.locationAId]); // employeeId: "waiter-1"
+    const floors = await tables.listTables(owner, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerId).toBe("waiter-1");
+  });
+
+  it("a COMPLETED/CANCELLED order does not count as an active owner (table shows as free again)", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-owner" },
+    });
+    await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-owner",
+        status: "COMPLETED",
+      },
+    });
+
+    const waiter = context(fixture, [fixture.locationAId]);
+    const floors = await tables.listTables(waiter, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerId).toBeNull();
+  });
+
+  it("SERVER-SIDE: a different waiter directly opening another waiter's DRAFT order via getOrder is still REJECTED (frontend popup is UX only, not the security boundary)", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-owner" },
+    });
+    const order = await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-owner",
+        status: "DRAFT",
+      },
+    });
+
+    const intrudingWaiter = context(fixture, [fixture.locationAId]); // employeeId: "waiter-1"
+    await expect(orders.getOrder(intrudingWaiter, order.id)).rejects.toThrow("Ovu porudžbinu je otvorio drugi konobar");
+  });
+
+  it("SERVER-SIDE: OWNER/ADMIN/MANAGER can still open any waiter's DRAFT order directly (management override unchanged)", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-owner" },
+    });
+    const order = await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-owner",
+        status: "DRAFT",
+      },
+    });
+
+    const manager = context(fixture, [fixture.locationAId], "MANAGER");
+    const fetched = await orders.getOrder(manager, order.id);
+    expect(fetched.id).toBe(order.id);
   });
 });

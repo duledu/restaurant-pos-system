@@ -1,5 +1,5 @@
 import { prisma, Prisma } from "@rcs/db";
-import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requireLocationAccess, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
 import { dispatchCancellationPrintJob } from "../printing/print-service";
@@ -203,4 +203,126 @@ export async function voidOrderItem(
   }
 
   return voidRecord;
+}
+
+/**
+ * Otkazivanje CELE napuštene porudžbine (npr. razvojni/testni sto zaboravljen
+ * otvoren) — namerno ODVOJENO od voidOrderItem (koja poništava POJEDINAČNU
+ * već poslatu stavku). Menadžment-only, kao i void. NIKAD ne sme raditi nad
+ * porudžbinom koja već ima Payment — plaćena porudžbina se ne otkazuje ovim
+ * putem (specifikacija: nema lažnih/izmenjenih plaćanja, istorija prodaje se
+ * ne dira). Ne briše Order/OrderItem redove — samo menja status na CANCELLED
+ * (audit trag ostaje čitav) i oslobađa sto.
+ */
+export async function cancelAbandonedOrder(
+  ctx: AuthContext,
+  orderId: string,
+  input: { reason: string }
+) {
+  requireOrderOperator(ctx);
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, ...scopeToRestaurant(ctx) },
+  });
+  if (!order) throw new Error("Porudžbina nije pronađena");
+  requireLocationAccess(ctx, order.locationId);
+
+  if (!isOrderManager(ctx)) {
+    // Isti obrazac kao voidOrderItem — zabeleži pokušaj PRE odbijanja
+    // (specifikacija #11), zatim odbij sa jasnom porukom.
+    await recordAuditEntry(ctx, {
+      entityType: "Order",
+      entityId: orderId,
+      action: "order.cancel_attempt_rejected",
+      newValue: { orderStatus: order.status },
+      locationId: order.locationId,
+      category: "UNAUTHORIZED_ATTEMPT",
+      severity: "WARNING",
+      isSuspicious: true,
+    });
+    throw new ForbiddenError("Samo menadžer ili vlasnik može otkazati napuštenu porudžbinu");
+  }
+
+  if (order.status === "COMPLETED" || order.status === "CANCELLED") {
+    throw new Error("Porudžbina je već zatvorena");
+  }
+
+  const reason = input.reason.trim();
+  if (reason.length < 5) {
+    throw new Error("Razlog otkazivanja je obavezan i mora biti smislen");
+  }
+
+  // Poslednja linija odbrane: NIKAD ne otkazuj porudžbinu koja već ima
+  // Payment red, bez obzira na Order.status (isti duh kao Payment.orderId
+  // @unique u billing-service.ts — ne oslanjamo se samo na status guard).
+  const existingPayment = await prisma.payment.findFirst({ where: { orderId }, select: { id: true } });
+  if (existingPayment) {
+    throw new Error("Porudžbina je već naplaćena — ne može se otkazati ovim putem");
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const guard = await tx.order.updateMany({
+      where: { id: orderId, status: { notIn: ["COMPLETED", "CANCELLED"] } },
+      data: { status: "CANCELLED" },
+    });
+    if (guard.count !== 1) {
+      throw new Error("Porudžbina je u međuvremenu zatvorena — otkazivanje nije moguće");
+    }
+
+    // Sveža lista stavki UNUTAR transakcije (ne iz prvobitnog čitanja) —
+    // zatvara vremenski prozor u kom bi konobar mogao paralelno dodati
+    // stavku na DRAFT porudžbinu tačno između gornje provere i ovog trenutka;
+    // bez ovoga bi takva stavka ostala ne-otkazana na već otkazanoj porudžbini.
+    const freshItems = await tx.orderItem.findMany({ where: { orderId }, select: { id: true } });
+    const itemIds = freshItems.map((item) => item.id);
+
+    await tx.orderItem.updateMany({
+      where: { id: { in: itemIds }, status: { not: "CANCELLED" } },
+      data: { status: "CANCELLED" },
+    });
+
+    // Ista KDS-otkazivanje semantika kao voidOrderItem — kuhinja/šank ne sme
+    // tiho nastaviti pripremu za porudžbinu koja je upravo otkazana.
+    if (itemIds.length > 0) {
+      await tx.orderItemStation.updateMany({
+        where: { orderItemId: { in: itemIds }, status: { notIn: ["CANCELLED", "SERVED"] } },
+        data: { status: "CANCELLED" },
+      });
+    }
+
+    await tx.restaurantTable.updateMany({
+      where: { id: order.tableId },
+      data: { status: "FREE" },
+    });
+
+    await tx.orderEvent.create({
+      data: { orderId, type: "order_cancelled", createdBy: ctx.employeeId, payload: { reason } },
+    });
+
+    await recordAuditEntry(
+      ctx,
+      {
+        entityType: "Order",
+        entityId: orderId,
+        action: "order.cancelled",
+        previousValue: { status: order.status },
+        newValue: { status: "CANCELLED" },
+        reason,
+        locationId: order.locationId,
+        category: "ADMIN_ACTION",
+        severity: "INFO",
+      },
+      tx
+    );
+  });
+
+  await ssePublisher.publish({
+    type: "order.cancelled",
+    restaurantId: ctx.restaurantId,
+    locationId: order.locationId,
+    payload: { orderId, tableId: order.tableId },
+    occurredAt: new Date().toISOString(),
+  });
+
+  return { orderId, status: "CANCELLED" as const };
 }

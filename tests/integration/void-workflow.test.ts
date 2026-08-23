@@ -454,3 +454,252 @@ describe("void: kitchen/bar production history", () => {
     expect(visibleItem?.quantity).toBe(1); // kuhinja vidi ažuriranu (umanjenu) količinu
   });
 });
+
+/**
+ * cancelAbandonedOrder — otkazivanje CELE napuštene porudžbine (razvojni/
+ * testni "zaboravljen otvoren sto" ili budući admin "oslobodi sto" tok).
+ * Namerno odvojeno od voidOrderItem (poništava jednu poslatu stavku); ovde
+ * se cela porudžbina zatvara bez naplate. Nijedan Payment/Receipt se ne sme
+ * kreirati, Order/OrderItem redovi se ne brišu, i sto se oslobađa.
+ */
+describe("cancelAbandonedOrder: permissions", () => {
+  it("rejects a waiter and records the rejected attempt", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    await expect(
+      voids.cancelAbandonedOrder(waiter, order.id, { reason: "Development cleanup — release stuck table" })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    const entry = await prisma.auditLog.findFirst({
+      where: { entityId: order.id, action: "order.cancel_attempt_rejected" },
+    });
+    expect(entry).toBeTruthy();
+    expect(entry?.category).toBe("UNAUTHORIZED_ATTEMPT");
+    expect(entry?.isSuspicious).toBe(true);
+
+    // Porudžbina i sto ostaju netaknuti nakon odbijenog pokušaja.
+    const reloaded = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(reloaded.status).toBe("DRAFT");
+  });
+
+  it.each(["OWNER", "ADMIN", "MANAGER"])("allows %s to cancel an abandoned order", async (role) => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, role, `mgr-${role}`);
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    await expect(
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" })
+    ).resolves.toEqual({ orderId: order.id, status: "CANCELLED" });
+  });
+
+  it("rejects a cross-restaurant cancellation attempt", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    const outsider = context(fixture, "MANAGER", "outsider");
+    outsider.restaurantId = fixture.otherRestaurantId;
+    await expect(
+      voids.cancelAbandonedOrder(outsider, order.id, { reason: "Development cleanup — release stuck table" })
+    ).rejects.toThrow("nije pronađena");
+  });
+
+  it("rejects a cross-location cancellation attempt", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    const outsider = context(fixture, "MANAGER", "outsider", [fixture.otherLocationId]);
+    await expect(
+      voids.cancelAbandonedOrder(outsider, order.id, { reason: "Development cleanup — release stuck table" })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects a missing or too-short reason", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    await expect(voids.cancelAbandonedOrder(manager, order.id, { reason: "  " })).rejects.toThrow("smislen");
+    await expect(voids.cancelAbandonedOrder(manager, order.id, { reason: "hi" })).rejects.toThrow("smislen");
+  });
+});
+
+describe("cancelAbandonedOrder: core behavior", () => {
+  it("cancels a never-submitted DRAFT order and releases the table, preserving the Order/OrderItem rows", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+
+    const reloadedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(reloadedOrder.status).toBe("CANCELLED");
+
+    // Redovi ostaju (ne brišu se) — samo status.
+    const reloadedItem = await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(reloadedItem.status).toBe("CANCELLED");
+
+    const table = await prisma.restaurantTable.findUniqueOrThrow({ where: { id: fixture.tableId } });
+    expect(table.status).toBe("FREE");
+  });
+
+  it("cancels a SUBMITTED order, cancels its OrderItemStation rows (KDS), and releases the table", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const { order, item } = await submitOrderWithQuantity(fixture, waiter, 1);
+
+    const stationBefore = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
+    expect(stationBefore.status).toBe("SUBMITTED");
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+
+    const reloadedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(reloadedOrder.status).toBe("CANCELLED");
+    const reloadedItem = await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(reloadedItem.status).toBe("CANCELLED");
+    const stationAfter = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
+    expect(stationAfter.status).toBe("CANCELLED");
+
+    const table = await prisma.restaurantTable.findUniqueOrThrow({ where: { id: fixture.tableId } });
+    expect(table.status).toBe("FREE");
+  });
+
+  it("does not touch station state that is already SERVED", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const kitchen = context(fixture, "KITCHEN", "kitchen-1");
+    kitchen.permissions = new Set(["production.view", "production.manage"]);
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const { order, item } = await submitOrderWithQuantity(fixture, waiter, 1);
+
+    const { production } = await import("@rcs/domain");
+    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SUBMITTED");
+    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "ACCEPTED");
+    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "PREPARING");
+    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "READY");
+    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SERVED");
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+
+    const station = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
+    expect(station.status).toBe("SERVED"); // već served — cancelAbandonedOrder ga ne dira
+  });
+
+  it("writes an order_cancelled OrderEvent and an order.cancelled audit entry in the same transaction", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+
+    const event = await prisma.orderEvent.findFirstOrThrow({ where: { orderId: order.id, type: "order_cancelled" } });
+    expect(event.createdBy).toBe("mgr-1");
+    expect((event.payload as { reason: string }).reason).toBe("Development cleanup — release stuck table");
+
+    const auditEntry = await prisma.auditLog.findFirstOrThrow({ where: { entityId: order.id, action: "order.cancelled" } });
+    expect(auditEntry.userId).toBe("mgr-1");
+    expect(auditEntry.role).toBe("MANAGER");
+    expect(auditEntry.reason).toBe("Development cleanup — release stuck table");
+    expect((auditEntry.previousValue as { status: string }).status).toBe("DRAFT");
+    expect((auditEntry.newValue as { status: string }).status).toBe("CANCELLED");
+  });
+
+  it("creates no Payment, no Receipt, and no InventoryMovement as a side effect", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const { order } = await submitOrderWithQuantity(fixture, waiter, 1);
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+
+    expect(await prisma.payment.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await prisma.receipt.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await prisma.inventoryMovement.count({ where: { orderId: order.id } })).toBe(0);
+  });
+});
+
+describe("cancelAbandonedOrder: protects paid orders and rejects repeat/invalid state", () => {
+  it("rejects cancelling an already-COMPLETED (paid) order, leaving payment/receipt untouched", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const { order } = await submitOrderWithQuantity(fixture, waiter, 1);
+    const { payment, receipt } = await billing.completePayment(waiter, order.id, { method: "CASH" });
+
+    await expect(
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" })
+    ).rejects.toThrow("već zatvorena");
+
+    const reloadedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(reloadedOrder.status).toBe("COMPLETED");
+    expect(await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } })).toBeTruthy();
+    expect(await prisma.receipt.findUniqueOrThrow({ where: { id: receipt.id } })).toBeTruthy();
+  });
+
+  it("rejects cancelling an order that is already CANCELLED (repeated invocation is safely rejected)", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
+    await expect(
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" })
+    ).rejects.toThrow("već zatvorena");
+  });
+});
+
+describe("cancelAbandonedOrder: concurrency", () => {
+  it("allows only one of two concurrent cancellations on the same order to commit", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+
+    const results = await Promise.allSettled([
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" }),
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+
+    const reloadedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(reloadedOrder.status).toBe("CANCELLED"); // tačno jedno otkazivanje primenjeno, ne dupliran efekat
+
+    const table = await prisma.restaurantTable.findUniqueOrThrow({ where: { id: fixture.tableId } });
+    expect(table.status).toBe("FREE");
+  });
+
+  it("a completePayment that wins the race leaves cancelAbandonedOrder safely rejected (no cancelled-but-paid order)", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = context(fixture, "MANAGER", "mgr-1");
+    const { order } = await submitOrderWithQuantity(fixture, waiter, 1);
+
+    const results = await Promise.allSettled([
+      billing.completePayment(waiter, order.id, { method: "CASH" }),
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" }),
+    ]);
+
+    const reloadedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    // Bez obzira koja je operacija pobedila u trci, porudžbina nikad ne sme
+    // završiti kao "i naplaćena i otkazana" — tačno jedno stanje pobeđuje.
+    expect(["COMPLETED", "CANCELLED"]).toContain(reloadedOrder.status);
+    const paymentCount = await prisma.payment.count({ where: { orderId: order.id } });
+    if (reloadedOrder.status === "COMPLETED") {
+      expect(paymentCount).toBe(1);
+    } else {
+      expect(paymentCount).toBe(0);
+    }
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  });
+});

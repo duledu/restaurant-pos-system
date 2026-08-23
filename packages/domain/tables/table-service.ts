@@ -18,13 +18,34 @@ export async function listTables(ctx: AuthContext, locationId: string) {
     include: {
       tables: {
         where: { isActive: true },
+        // Hitno ispravljeno: konobar mora da zna PRE navigacije da li sto
+        // već drži DRUGI konobar (order.openedBy), da ne bi ušao u tuđu
+        // porudžbinu i naleteo na "Ovu porudžbinu je otvorio drugi konobar"
+        // tek posle klika. Vraća SAMO employeeId (nikad ime/lične podatke)
+        // — dovoljno da frontend uporedi sa sopstvenim ctx.employeeId, bez
+        // dodatnog upita/endpoint-a (vidi napomenu u pos-client.tsx).
+        // Uniqueness pravilo (openOrder) garantuje najviše JEDNU aktivnu
+        // porudžbinu po stolu, pa je take:1 uvek dovoljno.
+        include: {
+          orders: {
+            where: { status: { notIn: ["COMPLETED", "CANCELLED"] } },
+            select: { openedBy: true },
+            take: 1,
+          },
+        },
         orderBy: { label: "asc" },
       },
     },
     orderBy: { sortOrder: "asc" },
   });
 
-  return floors;
+  return floors.map((floor) => ({
+    ...floor,
+    tables: floor.tables.map(({ orders, ...table }) => ({
+      ...table,
+      activeOrderOwnerId: orders[0]?.openedBy ?? null,
+    })),
+  }));
 }
 
 export async function getTable(ctx: AuthContext, tableId: string) {

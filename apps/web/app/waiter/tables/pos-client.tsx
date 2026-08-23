@@ -5,12 +5,18 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
+import { isTableHeldByAnotherWaiter } from "../../../lib/table-ownership";
 
 interface Table {
   id: string;
   label: string;
   capacity: number;
   status: "FREE" | "OCCUPIED" | "AWAITING_BILL" | "NEEDS_CLEANING";
+  // Hitna ispravka: employeeId konobara koji trenutno vodi aktivnu
+  // porudžbinu na ovom stolu (null ako nema aktivne porudžbine) — vidi
+  // table-service.ts listTables. Nikad ime/lični podaci, samo ID za
+  // poređenje sa sopstvenim nalogom PRE navigacije.
+  activeOrderOwnerId: string | null;
 }
 interface FloorWithTables {
   id: string;
@@ -56,6 +62,7 @@ async function apiFetch(url: string, options?: RequestInit) {
 export function PosClient() {
   const router = useRouter();
   const [locationId, setLocationId] = useState<string | null>(null);
+  const [employeeId, setEmployeeId] = useState<string | null>(null);
   const [employeeName, setEmployeeName] = useState<string | null>(null);
   const [floors, setFloors] = useState<FloorWithTables[]>([]);
   const [shift, setShift] = useState<Shift | null>(null);
@@ -64,6 +71,9 @@ export function PosClient() {
   const [openingCash, setOpeningCash] = useState("");
   const [opening, setOpening] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Hitna ispravka: sto koji je zauzet od strane DRUGOG konobara — tap
+  // otvara ovaj popup umesto navigacije (vidi selectTable ispod).
+  const [blockedTable, setBlockedTable] = useState<Table | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,6 +83,7 @@ export function PosClient() {
       const loc = me.locationIds[0];
       if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
       setLocationId(loc);
+      setEmployeeId(me.employeeId ?? null);
       setEmployeeName(me.firstName ? `${me.firstName} ${me.lastName ?? ""}`.trim() : null);
 
       const [shiftRes, tablesRes] = await Promise.all([
@@ -109,8 +120,20 @@ export function PosClient() {
     }
   }
 
-  async function selectTable(tableId: string) {
-    router.push(`/waiter/tables/${tableId}`);
+  /**
+   * Hitna ispravka: vlasništvo se proverava PRE navigacije, ne posle.
+   * Slobodan sto ili sto koji vodi TRENUTNI konobar -> normalna navigacija
+   * (server (getOwnedDraftOrder) i dalje ostaje krajnji autoritet — ovo je
+   * samo UX, ne bezbednosna granica). Sto koji vodi DRUGI konobar -> BEZ
+   * navigacije, prikazuje se popup; konobar ostaje na ekranu stolova i
+   * odmah može da tapne drugi sto.
+   */
+  function selectTable(table: Table) {
+    if (isTableHeldByAnotherWaiter(table.activeOrderOwnerId, employeeId)) {
+      setBlockedTable(table);
+      return;
+    }
+    router.push(`/waiter/tables/${table.id}`);
   }
 
   if (loading) {
@@ -232,7 +255,7 @@ export function PosClient() {
             {floor.tables.map((table) => (
               <button
                 key={table.id}
-                onClick={() => selectTable(table.id)}
+                onClick={() => selectTable(table)}
                 className={`group relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${STATUS_STYLE[table.status]}`}
               >
                 <span className={`absolute right-3 top-3 h-2.5 w-2.5 rounded-full ${table.status === "FREE" ? "bg-success" : table.status === "OCCUPIED" ? "bg-gold" : table.status === "AWAITING_BILL" ? "bg-warn" : "bg-slate-400"}`} aria-hidden="true" />
@@ -246,6 +269,31 @@ export function PosClient() {
           </div>
         </section>
       ))}
+
+      {blockedTable && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4"
+          onClick={() => setBlockedTable(null)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="blocked-table-title"
+            className="w-full max-w-xs rounded-lg bg-white p-5 text-center shadow-elevated"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="blocked-table-title" className="mb-1.5 text-lg font-bold text-ink">Sto je zauzet</h2>
+            <p className="mb-5 text-sm text-inkSoft">Ovaj sto trenutno vodi drugi konobar.</p>
+            <button
+              type="button"
+              onClick={() => setBlockedTable(null)}
+              className="min-h-11 w-full rounded-md bg-graphite px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-graphite-700"
+            >
+              U redu
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
