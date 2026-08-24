@@ -159,6 +159,83 @@ const CONFIRMED: Record<string, PriceSpec> = {
   // "Rose Tikveš 0.187" → NOT in provided menu list → NEEDS_PRICE_CONFIRMATION (omitted here)
   [S("Vermouth")]: { price: 150, quantity: 0.1,  unit: "l" },
   [S("Somersby")]: { price: 300, quantity: 0.2,  unit: "l" },
+
+  // ── TOPLO PREDJELO (second batch — real menu photos, needsReview backlog) ──
+  [S("Grilovano povrće")]:    { price: 300 },
+  [S("Pečurke na žaru")]:     { price: 300 },
+  [S("Pohovana zdenka")]:     { price: 300 },
+  [S("Pohovane pečurke")]:    { price: 350 },
+  [S("Pohovani kačkavalj")]:  { price: 150 },
+  [S("Pomfrit")]:             { price: 200 },
+  [S("Pomfrit sa sirom")]:    { price: 250 },
+  [S("Topla daska")]:         { price: 1900 },
+
+  // ── ROŠTILJ (second batch) ───────────────────────────────────────────────
+  [S("Bečka šnicla (pileća)")]:  { price: 400 },
+  [S("Bečka šnicla (svinjska)")]: { price: 500 },
+  [S("Dimljeni batak")]:         { price: 360 },
+  [S("Gurmanska pljeskavica 200 g")]: { price: 300 },
+  [S("Gurmanska pljeskavica 300 g")]: { price: 400 },
+  // Seed name: "Pileće belo"; real menu says "Pileće belo meso"
+  [S("Pileće belo")]:            { price: 300, nameNote: 'Real menu shows "Pileće belo meso". Rename via Admin > Menu if needed.' },
+  [S("Pileći batak")]:           { price: 300 },
+  [S("Pljeskavica 200 g")]:      { price: 250 },
+  [S("Pljeskavica 300 g")]:      { price: 350 },
+  [S("Punjena pljeskavica (kajmak i pršuta) 200 g")]: { price: 350 },
+  [S("Punjena pljeskavica (kajmak i pršuta) 300 g")]: { price: 450 },
+  [S("Punjena pljeskavica 200 g")]: { price: 300 },
+  [S("Punjena pljeskavica 300 g")]: { price: 400 },
+  [S("Punjeno pileće belo")]:    { price: 450 },
+  [S("Uštipak")]:                { price: 150 },
+  [S("Ćevap")]:                  { price: 40 },
+  [S("Ćevapi u kajmaku")]:       { price: 600 },
+
+  // ── JELA PO NARUDŽBINI (second batch) — Ramstek deliberately OMITTED: ────
+  // handwritten/overwritten price on the photograph is not reliable enough.
+  [S("Biftek")]:                 { price: 1600 },
+  [S("Dimljeni svinjski vrat")]: { price: 2000 },
+  [S("Goveđa kobasica")]:        { price: 150 },
+  [S("Pileća Karađorđeva")]:     { price: 600 },
+  [S("Pileća krilca")]:          { price: 700 },
+  [S("Pileći prsti")]:           { price: 700 },
+  [S("Pileći ražnjić")]:         { price: 300 },
+  [S("Pileći ražnjić sa pršutom")]:  { price: 450 },
+  [S("Pileći ražnjić sa slaninom")]: { price: 450 },
+  [S("Punjena vešalica")]:       { price: 600 },
+  [S("Svinjska kobasica")]:      { price: 150 },
+  [S("Svinjska kremenadla")]:    { price: 450 },
+  [S("Svinjski file")]:          { price: 2000 },
+  [S("Svinjski ražnjić")]:       { price: 450 },
+  [S("Teletina u sosu")]:        { price: 1100 },
+  [S("Vešalica")]:               { price: 450 },
+
+  // ── SALATE (second batch) ────────────────────────────────────────────────
+  [S("Grčka salata")]:     { price: 300 },
+  [S("Kajmak")]:           { price: 120 },
+  [S("Krastavac salata")]: { price: 200 },
+  // Seed name: "Kravlji sir"; real menu says "Sir kravlji" (word order)
+  [S("Kravlji sir")]:      { price: 300, nameNote: 'Real menu shows "Sir kravlji". Rename via Admin > Menu if needed.' },
+  [S("Kupus salata")]:     { price: 200 },
+  // "Ljuta papričica" matched to real-menu "Papričica" — confirmed no separate
+  // "Papričica"/pepper item exists in Salate, so this is the same item.
+  [S("Ljuta papričica")]:  { price: 50, nameNote: 'Real menu lists this as "Papričica" (no "Ljuta" qualifier). Rename via Admin > Menu if needed.' },
+  [S("Masline")]:          { price: 200 },
+  [S("Mešana salata")]:    { price: 250 },
+  [S("Moravska salata")]:  { price: 250 },
+  [S("Paradajz salata")]:  { price: 200 },
+  [S("Srpska salata")]:    { price: 250 },
+  [S("Urnebes salata")]:   { price: 200 },
+  [S("Vitaminska salata")]: { price: 300 },
+  [S("Šopska salata")]:    { price: 250 },
+
+  // ── ZIMSKE SALATE (second batch) ─────────────────────────────────────────
+  [S("Ajvar")]:              { price: 200 },
+  [S("Cvekla")]:             { price: 200 },
+  [S("Krompir salata")]:     { price: 200 },
+  [S("Mešana zimska salata")]: { price: 300 },
+  [S("Paprika u pavlaci")]:  { price: 300 },
+  [S("Trljanica")]:          { price: 150 },
+  [S("Zimski kupus")]:       { price: 200 },
 };
 
 const CONFIRMATION_NOTE =
