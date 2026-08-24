@@ -10,7 +10,9 @@ export const GET = withApiAuth<{ id: string }>(async (ctx, _req, { id }) => {
 
 const patchSchema = z.object({
   trackStock:   z.boolean().optional(),
-  minimumStock: z.number().min(0).optional(),
+  // null je namerno dozvoljeno — eksplicitno "ukloni prag" (vidi
+  // inventory-service.ts setMinimumStock), različito od "polje nije poslato".
+  minimumStock: z.number().min(0).nullable().optional(),
 });
 
 export const PATCH = withApiAuth<{ id: string }>(async (ctx, request, { id }) => {

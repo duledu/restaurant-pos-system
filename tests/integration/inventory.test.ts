@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { inventory, billing, orders, shifts } from "@rcs/domain";
-import type { AuthContext } from "@rcs/auth";
+import { ForbiddenError, type AuthContext } from "@rcs/auth";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -463,6 +463,85 @@ describe("inventory: pracenje i minimum stanje", () => {
     await inventory.setMinimumStock(ctx, fixture.menuItemId, 3);
     const mi = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
     expect(Number(mi.minimumStock)).toBe(3);
+  });
+
+  it("setMinimumStock(null) uklanja prag — 'Prag nije podešen', item vise nije LOW", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 5 });
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, 10); // 5 <= 10 => LOW
+
+    let status = await inventory.getStockStatusForMenuItems(fixture.restaurantId, fixture.locationId, [fixture.menuItemId]);
+    expect(status.get(fixture.menuItemId)?.stockStatus).toBe("LOW");
+
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, null);
+    const mi = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(mi.minimumStock).toBeNull();
+
+    status = await inventory.getStockStatusForMenuItems(fixture.restaurantId, fixture.locationId, [fixture.menuItemId]);
+    expect(status.get(fixture.menuItemId)?.stockStatus).toBe("OK"); // null prag nikad ne proizvodi LOW
+  });
+
+  it("rejects a negative threshold, but allows null", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 5 });
+
+    await expect(inventory.setMinimumStock(ctx, fixture.menuItemId, -1)).rejects.toThrow("ne može biti negativna");
+    await expect(inventory.setMinimumStock(ctx, fixture.menuItemId, null)).resolves.toBeUndefined();
+  });
+
+  it("setMinimumStock records an audit entry with previous and new threshold, including a clear-to-null transition", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 5 });
+
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, 3);
+    const first = await prisma.auditLog.findFirst({
+      where: { entityType: "MenuItem", entityId: fixture.menuItemId, action: "inventory.minimum_stock_changed" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(first).toBeTruthy();
+    expect((first?.newValue as { minimumStock: number | null })?.minimumStock).toBe(3);
+    expect(first?.userId).toBe("owner-1");
+
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, null);
+    const second = await prisma.auditLog.findFirst({
+      where: { entityType: "MenuItem", entityId: fixture.menuItemId, action: "inventory.minimum_stock_changed" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect((second?.previousValue as { minimumStock: number | null })?.minimumStock).toBe(3);
+    expect((second?.newValue as { minimumStock: number | null })?.minimumStock).toBeNull();
+  });
+
+  it("changing the threshold does NOT change currentStock and does NOT create an InventoryMovement", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    const invItem = await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 7 });
+
+    const movementsBefore = await inventory.getMovements(ctx, invItem.id);
+
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, 4);
+    await inventory.setMinimumStock(ctx, fixture.menuItemId, null);
+
+    const stock = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(stock.currentStock)).toBe(7); // netaknuto
+
+    const movementsAfter = await inventory.getMovements(ctx, invItem.id);
+    expect(movementsAfter).toHaveLength(movementsBefore.length); // nijedno novo kretanje
+
+    const mi = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(Number(mi.price)).toBeGreaterThan(0); // cena netaknuta (i dalje ono sto je bilo)
+    expect(mi.isActive).toBe(true); // isActive netaknut
+  });
+
+  it("rejects a WAITER from changing the threshold", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    const waiter = waiterCtx(fixture);
+    await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 5 });
+
+    await expect(inventory.setMinimumStock(waiter, fixture.menuItemId, 2)).rejects.toBeInstanceOf(ForbiddenError);
   });
 });
 

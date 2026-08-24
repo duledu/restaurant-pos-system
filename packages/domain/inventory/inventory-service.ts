@@ -308,14 +308,30 @@ export async function setTrackingEnabled(ctx: AuthContext, menuItemId: string, e
   });
 }
 
-export async function setMinimumStock(ctx: AuthContext, menuItemId: string, minimumStock: number) {
+/**
+ * `minimumStock: null` NAMERNO znači "prag nije podešen" (isključuje LOW
+ * status u getInventoryStockStatus, nikad se ne tretira kao 0) — brisanje
+ * praga je legitimna, eksplicitna operacija, ne slučajno stanje. Menja
+ * ISKLJUČIVO MenuItem.minimumStock: nema InventoryMovement, ne dira
+ * currentStock/price/isActive/isAvailable niti bilo šta drugo.
+ */
+export async function setMinimumStock(ctx: AuthContext, menuItemId: string, minimumStock: number | null) {
   requirePermission(ctx, "inventory.manage");
-  if (minimumStock < 0) throw new Error("Minimalna zaliha ne može biti negativna");
+  if (minimumStock != null && minimumStock < 0) throw new Error("Minimalna zaliha ne može biti negativna");
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
+
   await prisma.menuItem.update({ where: { id: menuItemId }, data: { minimumStock } });
+
+  await recordAuditEntry(ctx, {
+    entityType: "MenuItem",
+    entityId: menuItemId,
+    action: "inventory.minimum_stock_changed",
+    previousValue: { minimumStock: menuItem.minimumStock != null ? Number(menuItem.minimumStock) : null },
+    newValue: { minimumStock },
+  });
 }
 
 // ─── Mutations ────────────────────────────────────────────────────────────────

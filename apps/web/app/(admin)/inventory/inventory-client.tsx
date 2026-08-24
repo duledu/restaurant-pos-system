@@ -231,6 +231,61 @@ function AdjustModal({ item, onClose, onDone }: { item: InventoryItem; onClose: 
   );
 }
 
+function ThresholdModal({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: () => void }) {
+  const current = item.menuItem.minimumStock;
+  const [value, setValue] = useState(current != null ? fmtQty(Number(current)) : "");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function save(minimumStock: number | null) {
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch(`/api/admin/inventory/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minimumStock }),
+      });
+      if (!res.ok) { const j = await res.json(); setErr(j.error ?? "Greška"); return; }
+      onDone();
+    } finally { setLoading(false); }
+  }
+
+  function submit() {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      // Namerno se prazno polje NE tretira kao "ukloni prag" — to mora biti
+      // eksplicitna akcija (dugme ispod), da slučajno brisanje sadržaja
+      // polja ne bi tiho izbrisalo prag.
+      setErr('Unesite vrednost praga, ili koristite "Ukloni prag" ispod.');
+      return;
+    }
+    const n = parseFloat(trimmed);
+    if (isNaN(n) || n < 0) { setErr("Prag mora biti broj ≥ 0"); return; }
+    save(n);
+  }
+
+  return (
+    <Modal title={`Prag niske zalihe — ${item.menuItem.name}`} onClose={onClose}>
+      <p className="mb-4 text-sm text-inkSoft">
+        Trenutno stanje: <strong className="text-ink">{fmtQty(item.currentStock)} {item.unit}</strong>
+        {" · "}
+        Trenutni prag: <strong className="text-ink">{current != null ? `${fmtQty(Number(current))} ${item.unit}` : "Prag nije podešen"}</strong>
+      </p>
+      <label className="mb-1 block text-sm font-medium text-ink">Novi prag ({item.unit})</label>
+      <input type="number" min={0} step="any" value={value} onChange={e => setValue(e.target.value)} className={`mb-4 ${inputClass}`} placeholder="npr. 5" />
+      {err && <p className="mb-3 text-sm text-danger">{err}</p>}
+      <div className="flex gap-2">
+        <Button variant="dangerGhost" onClick={() => save(null)} loading={loading} className="flex-1">
+          Ukloni prag
+        </Button>
+        <Button onClick={submit} loading={loading} className="flex-1">
+          {loading ? "Čuvanje…" : "Sačuvaj"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () => void }) {
   const [movements, setMovements] = useState<Movement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -607,10 +662,13 @@ type ModalState =
   | { type: "receive"; item: InventoryItem }
   | { type: "adjust"; item: InventoryItem }
   | { type: "movements"; item: InventoryItem }
+  | { type: "threshold"; item: InventoryItem }
   | { type: "init" }
   | { type: "opening-stock" }
   | { type: "zero-all" }
   | null;
+
+type StatusFilter = "all" | "low" | "out";
 
 const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 
@@ -621,6 +679,7 @@ export function InventoryClient() {
   const [modal, setModal] = useState<ModalState>(null);
   const [search, setSearch] = useState("");
   const [activeCategoryTab, setActiveCategoryTab] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [roles, setRoles] = useState<string[]>([]);
 
   const load = useCallback(() => {
@@ -662,7 +721,8 @@ export function InventoryClient() {
 
   const uncategorizedCount = categoryCount.get(UNCAT) ?? 0;
 
-  // Combined search + category filter
+  // Combined search + category + status filter (AND, ne OR — sve tri moraju
+  // da se poklope, isti obrazac kao ranije search+category).
   const filtered = useMemo(() => {
     return items.filter(it => {
       const matchesSearch =
@@ -673,9 +733,10 @@ export function InventoryClient() {
         (activeCategoryTab === UNCAT
           ? it.menuItem.categoryId === null
           : it.menuItem.categoryId === activeCategoryTab);
-      return matchesSearch && matchesCategory;
+      const matchesStatus = statusFilter === "all" || stockStatus(it) === statusFilter;
+      return matchesSearch && matchesCategory && matchesStatus;
     });
-  }, [items, search, activeCategoryTab]);
+  }, [items, search, activeCategoryTab, statusFilter]);
 
   const outOfStockCount = items.filter(i => stockStatus(i) === "out").length;
   const lowStockCount = items.filter(i => stockStatus(i) === "low").length;
@@ -718,12 +779,15 @@ export function InventoryClient() {
         }
       />
 
-      {/* ── Search + low-stock badge ─────────────────────────────────────────── */}
+      {/* ── Search + status filter ───────────────────────────────────────────── */}
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
-        {outOfStockCount > 0 && <Badge tone="danger">{outOfStockCount} {outOfStockCount === 1 ? "artikal nema" : "artikala nema"} zalihe</Badge>}
-        {lowStockCount > 0 && <Badge tone="warn">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
+        <div className="flex gap-1.5">
+          <TabPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")} label="Sve" />
+          <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowStockCount} />
+          <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outOfStockCount} />
+        </div>
       </div>
 
       {/* ── Category tab strip (same pattern as Menu) ────────────────────────── */}
@@ -817,6 +881,9 @@ export function InventoryClient() {
                           <button onClick={() => setModal({ type: "movements", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">
                             Historija
                           </button>
+                          <button onClick={() => setModal({ type: "threshold", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
+                            Prag
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -831,6 +898,7 @@ export function InventoryClient() {
       {modal?.type === "receive"    && <ReceiveModal   item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "adjust"     && <AdjustModal    item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "movements"  && <MovementsModal item={modal.item} onClose={() => setModal(null)} />}
+      {modal?.type === "threshold"  && <ThresholdModal  item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "init"       && <InitModal               onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "opening-stock" && canOpeningStock && <OpeningStockModal onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "zero-all"      && canOpeningStock && <ZeroAllModal      onClose={() => setModal(null)} onDone={closeAndRefresh} />}
