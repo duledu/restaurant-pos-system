@@ -222,21 +222,41 @@ export async function updateMenuItem(ctx: AuthContext, itemId: string, input: Up
   return updated;
 }
 
+/**
+ * Unos cene za artikal koji čeka pregled (needsReview=true, isActive=false
+ * — vidi seed-menu.ts) NAMERNO, u ISTOJ operaciji, razrešava pregled: item
+ * postaje isActive=true (vidljiv konobaru) i needsReview=false/reviewNote=
+ * null. Ovo je jedini način da takav artikal ikad postane vidljiv u Waiter
+ * POS-u (aktivacija ranije nije postojala — cena se menjala, ali needsReview/
+ * isActive ostajali netaknuti, pa je artikal ostajao trajno skriven i posle
+ * unosa stvarne cene). Prag "validna cena" je > 0 — unos 0 ne razrešava
+ * pregled, jer je 0 sama placeholder vrednost koju needsReview označava.
+ * Već aktivni artikli (needsReview=false) menjaju samo price, bez promene
+ * ponašanja u odnosu na ranije.
+ */
 export async function changePrice(ctx: AuthContext, itemId: string, input: ChangePriceInput) {
   requirePermission(ctx, MENU_MANAGE);
   const existing = await getOwnedItem(ctx, itemId);
 
+  const resolvesReview = existing.needsReview && input.price > 0;
+
   const updated = await prisma.menuItem.update({
     where: { id: itemId },
-    data: { price: input.price },
+    data: {
+      price: input.price,
+      ...(resolvesReview ? { needsReview: false, reviewNote: null, isActive: true } : {}),
+    },
   });
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
     entityId: itemId,
     action: "menu_item.price_changed",
-    previousValue: { price: existing.price },
-    newValue: { price: input.price },
+    previousValue: { price: existing.price, needsReview: existing.needsReview, isActive: existing.isActive },
+    newValue: {
+      price: input.price,
+      ...(resolvesReview ? { needsReview: false, isActive: true } : {}),
+    },
     reason: input.reason,
   });
   return updated;
