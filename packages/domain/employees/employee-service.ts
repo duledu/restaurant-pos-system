@@ -7,7 +7,6 @@ import {
   hashPin,
   verifyPin,
   encryptPin,
-  decryptPin,
   type AuthContext,
 } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
@@ -36,12 +35,14 @@ export async function listEmployees(ctx: AuthContext) {
   });
 
   // pinHash/encryptedPin/failedPinAttempts/pinLockedUntil i user.passwordHash
-  // su interna bezbednosna knjigovodstva — nikad se ne šalju klijentu.
+  // su interna bezbednosna knjigovodstva — nikad se ne šalju klijentu. Ni
+  // encryptedPin postojanje se više ne otkriva (nema PIN-reveal
+  // sposobnosti) — kolona ostaje u bazi/write-side (createEmployee,
+  // resetEmployeePin) radi buduće migracije van nje, samo se ne čita ovde.
   // Klijent dobija samo binarne zastavice i username (vidljiv identifikator).
-  return rows.map(({ pinHash, encryptedPin, failedPinAttempts, pinLockedUntil, user, ...rest }) => ({
+  return rows.map(({ pinHash, encryptedPin: _encryptedPin, failedPinAttempts, pinLockedUntil, user, ...rest }) => ({
     ...rest,
     hasPin: pinHash !== null,
-    hasEncryptedPin: encryptedPin !== null,
     hasLoginCredentials: Boolean(user?.passwordHash),
     username: user?.username ?? null,
   }));
@@ -468,41 +469,6 @@ export async function setEmployeeLoginPassword(
       tx
     );
   });
-}
-
-/**
- * Otkriva PIN zaposlenog admin nalogu (OWNER/ADMIN/MANAGER sa employees.manage).
- * Dešifruje encryptedPin koristeći PIN_ENCRYPTION_KEY iz env-a.
- *
- * Bezbednost:
- * - Zahteva employees.manage permisiju.
- * - Audit zapis se kreira pri svakom otkrivanju (staff.pin_revealed).
- * - Vraćeni PIN se NIKAD ne loguje — samo činjenica radnje.
- * - encryptedPin ne postoji (null) za zaposlene pre ove migracije ili bez PIN-a.
- */
-export async function revealEmployeePin(ctx: AuthContext, employeeId: string): Promise<string> {
-  requirePermission(ctx, EMPLOYEES_MANAGE);
-
-  const employee = await prisma.employee.findFirst({
-    where: { id: employeeId, ...scopeToRestaurant(ctx) },
-    select: { id: true, encryptedPin: true },
-  });
-  if (!employee) throw new Error("Zaposleni nije pronađen");
-
-  if (!employee.encryptedPin) {
-    throw new Error("PIN nije dostupan za otkrivanje — zaposleni nema sačuvan šifrovan PIN. Postavi novi PIN.");
-  }
-
-  const pin = decryptPin(employee.encryptedPin);
-
-  await recordAuditEntry(ctx, {
-    entityType: "Employee",
-    entityId: employeeId,
-    action: "staff.pin_revealed",
-    severity: "WARNING",
-  });
-
-  return pin;
 }
 
 export async function setEmployeeStatus(ctx: AuthContext, employeeId: string, status: "ACTIVE" | "SUSPENDED") {
