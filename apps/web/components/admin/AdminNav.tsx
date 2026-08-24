@@ -77,7 +77,8 @@ const NAV_SECTIONS: NavSection[] = [
     title: "Kontrola",
     items: [
       { href: "/activity", label: "Evidencija aktivnosti", icon: <ActivityIcon /> },
-      { href: "/device-setup", label: "Uređaji", icon: <DeviceIcon /> },
+      { href: "/devices", label: "Registrovani uređaji", icon: <DeviceIcon /> },
+      { href: "/device-setup", label: "Podešavanje uređaja", icon: <DeviceIcon /> },
       { href: "/settings/restaurant", label: "Podešavanja restorana", icon: <SettingsIcon /> },
       { href: "/settings/printers", label: "Štampači", icon: <PrinterIcon /> },
     ],

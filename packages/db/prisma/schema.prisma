@@ -270,6 +270,12 @@ model Device {
   deviceType   DeviceType @default(POS)
   registeredAt DateTime   @default(now())
   isActive     Boolean    @default(true)
+  // Best-effort/throttled (~5 min) aktivnost, upisuje requireAuth (rbac.ts)
+  // kad autentifikovan zahtev nosi ovaj deviceId. Isključivo informativno —
+  // NIKAD se ne koristi za autorizaciju/aktivan-status uređaja (to je
+  // isActive). Null = uređaj nikad nije video autentifikovan zahtev preko
+  // requireAuth (npr. registrovan, ali još nije korišćen za prijavu).
+  lastSeenAt DateTime?
 
   restaurant Restaurant @relation(fields: [restaurantId], references: [id])
   location   Location?  @relation(fields: [locationId], references: [id])

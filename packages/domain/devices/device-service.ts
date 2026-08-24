@@ -1,6 +1,6 @@
 import { prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, verifyPassword, normalizeEmail, type AuthContext } from "@rcs/auth";
-import { recordAuditEntry } from "../audit/audit-service";
+import { recordAuditEntry, resolveEmployeeDisplayNames } from "../audit/audit-service";
 import type { RegisterDeviceInput } from "@rcs/shared";
 
 const DEVICES_MANAGE = "devices.manage";
@@ -12,6 +12,66 @@ export async function listAssignableLocations(ctx: AuthContext) {
     where: { restaurantId: ctx.restaurantId, id: { in: ctx.locationIds } },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
+  });
+}
+
+const REGISTRATION_ACTIONS = ["device.registered", "device.personal_registered"];
+
+/**
+ * Lista uređaja restorana za Admin Devices ekran. "Ko je registrovao" se
+ * IZVODI iz postojećeg AuditLog-a (najraniji device.registered/
+ * device.personal_registered zapis po uređaju) — nema posebne kolone za to,
+ * u skladu sa "izvedi iz postojećih audit podataka ako je moguće bezbedno".
+ * Deljeni POS vs Lični uređaj = employeeId null/not-null (isti obrazac kao
+ * registerPersonalDevice/pin-login), ne poseban tip u bazi.
+ */
+export async function listDevices(ctx: AuthContext) {
+  requirePermission(ctx, DEVICES_MANAGE);
+
+  const devices = await prisma.device.findMany({
+    where: scopeToRestaurant(ctx),
+    include: {
+      location: { select: { id: true, name: true } },
+      employee: { select: { id: true, firstName: true, lastName: true } },
+    },
+    orderBy: { registeredAt: "desc" },
+  });
+  if (devices.length === 0) return [];
+
+  const registrationEntries = await prisma.auditLog.findMany({
+    where: {
+      restaurantId: ctx.restaurantId,
+      entityType: "Device",
+      entityId: { in: devices.map((d) => d.id) },
+      action: { in: REGISTRATION_ACTIONS },
+    },
+    orderBy: { createdAt: "asc" },
+    select: { entityId: true, userId: true },
+  });
+  const registeredByUserId = new Map<string, string>();
+  for (const entry of registrationEntries) {
+    // orderBy asc + "ne prepisuj ako već postoji" => čuva NAJRANIJI zapis
+    // po uređaju (stvarna registracija, ne kasnija izmena istog tipa akcije).
+    if (entry.userId && !registeredByUserId.has(entry.entityId)) {
+      registeredByUserId.set(entry.entityId, entry.userId);
+    }
+  }
+  const actorNames = await resolveEmployeeDisplayNames(ctx.restaurantId, [...registeredByUserId.values()]);
+
+  return devices.map((d) => {
+    const registeredByUser = registeredByUserId.get(d.id);
+    return {
+      id: d.id,
+      name: d.name,
+      deviceType: d.deviceType,
+      isShared: d.employeeId === null,
+      isActive: d.isActive,
+      registeredAt: d.registeredAt,
+      lastSeenAt: d.lastSeenAt,
+      location: d.location,
+      linkedEmployee: d.employee ? { id: d.employee.id, name: `${d.employee.firstName} ${d.employee.lastName}` } : null,
+      registeredBy: registeredByUser ? (actorNames.get(registeredByUser)?.name ?? null) : null,
+    };
   });
 }
 
@@ -235,4 +295,81 @@ export async function registerPersonalDevice(params: { username?: string; email?
     deviceId: device.id,
     employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
   };
+}
+
+/**
+ * Preimenovanje ne menja registracionu istovetnost uređaja — ISTI id,
+ * registeredAt, isActive, employeeId, restaurantId/locationId ostaju
+ * netaknuti. Samo prikazni naziv (name).
+ */
+export async function renameDevice(ctx: AuthContext, deviceId: string, name: string) {
+  requirePermission(ctx, DEVICES_MANAGE);
+
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Naziv uređaja je obavezan");
+  if (trimmed.length > 100) throw new Error("Naziv uređaja je predugačak (max 100 karaktera)");
+
+  const device = await prisma.device.findFirst({ where: { id: deviceId, ...scopeToRestaurant(ctx) } });
+  if (!device) throw new Error("Uređaj nije pronađen");
+
+  const updated = await prisma.device.update({ where: { id: deviceId }, data: { name: trimmed } });
+
+  await recordAuditEntry(ctx, {
+    entityType: "Device",
+    entityId: deviceId,
+    action: "device.renamed",
+    previousValue: { name: device.name },
+    newValue: { name: trimmed },
+    locationId: device.locationId ?? undefined,
+  });
+
+  return updated;
+}
+
+/**
+ * Deljena osnova za revokeDevice/reactivateDevice — isti oblik kao
+ * employee-service.ts setEmployeeStatus: samo isActive zastavica, uz audit.
+ * Idempotentno (no-op ako je uređaj već u traženom stanju) da dupli klik ne
+ * pravi duplirane audit zapise. NIKAD ne menja restaurantId/locationId/
+ * employeeId/name/registeredAt — isključivo isActive.
+ */
+async function setDeviceActive(
+  ctx: AuthContext,
+  deviceId: string,
+  isActive: boolean,
+  action: "device.revoked" | "device.reactivated"
+) {
+  requirePermission(ctx, DEVICES_MANAGE);
+
+  const device = await prisma.device.findFirst({ where: { id: deviceId, ...scopeToRestaurant(ctx) } });
+  if (!device) throw new Error("Uređaj nije pronađen");
+  if (device.isActive === isActive) return device;
+
+  const updated = await prisma.device.update({ where: { id: deviceId }, data: { isActive } });
+
+  await recordAuditEntry(ctx, {
+    entityType: "Device",
+    entityId: deviceId,
+    action,
+    previousValue: { isActive: device.isActive },
+    newValue: { isActive },
+    locationId: device.locationId ?? undefined,
+  });
+
+  return updated;
+}
+
+/**
+ * Opoziva uređaj — blokira NOVE PIN prijave odmah (pin-login.ts već
+ * proverava isActive) i, preko requireAuth-ove Device provere (rbac.ts),
+ * odbacuje i VEĆ IZDATU sesiju sa ovim deviceId-jem na njen sledeći zahtev.
+ * NE briše/menja Employee, role, Orders, Payments, Shifts, Inventory, KDS
+ * podatke, niti bilo koji drugi Device.
+ */
+export async function revokeDevice(ctx: AuthContext, deviceId: string) {
+  return setDeviceActive(ctx, deviceId, false, "device.revoked");
+}
+
+export async function reactivateDevice(ctx: AuthContext, deviceId: string) {
+  return setDeviceActive(ctx, deviceId, true, "device.reactivated");
 }

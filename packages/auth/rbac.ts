@@ -58,6 +58,47 @@ export function assertActiveSessionEntities(entities: ActiveSessionEntities): vo
   }
 }
 
+export interface DeviceSessionEntity {
+  restaurantId: string;
+  isActive: boolean;
+  lastSeenAt: Date | null;
+}
+
+/**
+ * Zatvara bezbednosnu rupu otkrivenu pri Admin Device Management istrazi:
+ * requireAuth ranije NIKAD nije proveravao Device.isActive — opoziv uređaja
+ * je blokirao NOVE PIN prijave (pin-login.ts), ali VEĆ IZDAT session token
+ * je i dalje radio do isteka (12h). Ova provera se primenjuje SAMO kad
+ * sesija uopšte nosi deviceId (Shared POS/Staff Device tok) — sesije bez
+ * deviceId-a (email/lozinka admin prijava) prolaze nepromenjeno, isto kao
+ * pre ove izmene.
+ *
+ * NIKAD ne utiče na rolu/permisije — to ostaje isključivo iz employee.roles
+ * (specifikacija: "device identity must NOT determine employee role").
+ * TypeScript assertion signature sužava `device` posle poziva bez `!`.
+ */
+export function assertActiveDevice(
+  device: DeviceSessionEntity | null,
+  expectedRestaurantId: string
+): asserts device is DeviceSessionEntity {
+  if (!device || device.restaurantId !== expectedRestaurantId || !device.isActive) {
+    throw new UnauthorizedError("Uređaj nije aktivan ili nije registrovan");
+  }
+}
+
+const LAST_SEEN_THROTTLE_MS = 5 * 60 * 1000;
+
+/**
+ * Odlučuje da li je vreme za novi lastSeenAt upis — namerno "best effort"
+ * throttling (specifikacija: "Do NOT write lastSeenAt on every authenticated
+ * API request"), ne tačan heartbeat. Čista funkcija radi jedinične
+ * testabilnosti bez baze/sata.
+ */
+export function shouldRefreshLastSeen(lastSeenAt: Date | null, now: Date = new Date()): boolean {
+  if (!lastSeenAt) return true;
+  return now.getTime() - lastSeenAt.getTime() > LAST_SEEN_THROTTLE_MS;
+}
+
 /**
  * Učitava i validira sesiju iz cookie-ja, zatim učitava SVEŽE role/permission
  * i dozvoljene lokacije iz baze (nikad iz JWT payload-a — vidi napomenu u
@@ -82,26 +123,39 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
     throw new UnauthorizedError("Sesija je nevalidna ili istekla");
   }
 
-  const employee = await prisma.employee.findUnique({
-    where: { id: session.employeeId },
-    include: {
-      user: { select: { isActive: true } },
-      restaurant: {
-        select: {
-          status: true,
-          tenant: { select: { status: true } },
+  // Employee i Device se učitavaju PARALELNO (Promise.all) — ne sekvencijalno
+  // — da provera opozvanog uređaja ne doda merljivu dodatnu latenciju na
+  // svaki autentifikovan zahtev sa deviceId-jem (Waiter/KDS/Shared POS su
+  // veliki deo saobraćaja). Device upit se uopšte ne šalje kad sesija nema
+  // deviceId (email/lozinka admin sesije) — nula dodatnih upita za taj slučaj.
+  const [employee, device] = await Promise.all([
+    prisma.employee.findUnique({
+      where: { id: session.employeeId },
+      include: {
+        user: { select: { isActive: true } },
+        restaurant: {
+          select: {
+            status: true,
+            tenant: { select: { status: true } },
+          },
         },
-      },
-      locations: { select: { locationId: true } },
-      roles: {
-        include: {
-          role: {
-            include: { permissions: { include: { permission: true } } },
+        locations: { select: { locationId: true } },
+        roles: {
+          include: {
+            role: {
+              include: { permissions: { include: { permission: true } } },
+            },
           },
         },
       },
-    },
-  });
+    }),
+    session.deviceId
+      ? prisma.device.findUnique({
+          where: { id: session.deviceId },
+          select: { restaurantId: true, isActive: true, lastSeenAt: true },
+        })
+      : Promise.resolve(null),
+  ]);
 
   if (!employee || employee.restaurantId !== session.restaurantId) {
     throw new UnauthorizedError("Nalog zaposlenog nije aktivan ili ne odgovara sesiji");
@@ -114,6 +168,21 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
     restaurantStatus: employee.restaurant.status,
     tenantStatus: employee.restaurant.tenant.status,
   });
+
+  if (session.deviceId) {
+    assertActiveDevice(device, session.restaurantId);
+
+    // Best-effort throttled aktivnost — vidi shouldRefreshLastSeen. Greška
+    // ovde NIKAD ne sme oboriti stvaran (poslovni) zahtev koji je već
+    // prošao sve bezbednosne provere iznad.
+    if (shouldRefreshLastSeen(device.lastSeenAt)) {
+      try {
+        await prisma.device.update({ where: { id: session.deviceId }, data: { lastSeenAt: new Date() } });
+      } catch {
+        // Namerno progutano — lastSeenAt je isključivo informativno.
+      }
+    }
+  }
 
   const roles = employee.roles.map((er) => er.role.name);
   const permissions = new Set<string>();
