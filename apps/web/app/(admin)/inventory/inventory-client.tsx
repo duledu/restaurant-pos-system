@@ -30,9 +30,20 @@ interface InventoryItem {
     quantity: number | null;
     minimumStock: number | null;
     trackStock: boolean;
+    // P1.3: da li artikal TRENUTNO ima konfigurisan normativ (bar jedna
+    // MenuItemIngredient linija) — kad je true, sirovinski model UVEK
+    // pobeđuje bez obzira na trackStock (isti obrazac kao
+    // inventory-service.ts double-deduction odbrana). UI mora tretirati
+    // stavku kao "efektivno praćenu" samo kad je trackStock && !hasRecipe.
+    hasRecipe: boolean;
     categoryId: string | null;
   };
   location: { id: string; name: string };
+}
+
+/** trackStock && !hasRecipe — jedina ispravna definicija "aktivno praćeno" (P1.3). */
+function isEffectivelyTracked(item: InventoryItem) {
+  return item.menuItem.trackStock && !item.menuItem.hasRecipe;
 }
 
 interface Movement {
@@ -348,6 +359,26 @@ function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () =>
 interface MenuItemOption { id: string; name: string; unit: string | null }
 interface LocationOption { id: string; name: string }
 
+/**
+ * Recipe-produced items are managed through Ingredients + Normativi, not
+ * initialized as finished-goods stock — excludes any MenuItem with a
+ * configured recipe from the candidate list. Purely a UX filter on the
+ * candidate pool; never touches any existing InventoryItem/InventoryMovement
+ * row (a stale/legacy one, if it exists from before a recipe was added,
+ * stays fully intact and remains visible via "Prikaži isključene" + its
+ * "Historija" button on the main Zalihe list).
+ */
+async function fetchDirectStockCandidates(): Promise<MenuItemOption[]> {
+  const [itemsRes, recipesRes] = await Promise.all([
+    fetch("/api/admin/menu/items").then((r) => r.json()),
+    fetch("/api/admin/recipes").then((r) => r.json()),
+  ]);
+  const configuredIds = new Set<string>(
+    (recipesRes.items ?? []).filter((r: { isConfigured: boolean }) => r.isConfigured).map((r: { id: string }) => r.id)
+  );
+  return (itemsRes.items ?? []).filter((m: MenuItemOption) => !configuredIds.has(m.id));
+}
+
 function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [menuItems, setMenuItems] = useState<MenuItemOption[]>([]);
   const [locations, setLocations] = useState<LocationOption[]>([]);
@@ -359,7 +390,7 @@ function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch("/api/admin/menu/items").then(r => r.json()).then(j => setMenuItems(j.items ?? []));
+    fetchDirectStockCandidates().then(setMenuItems);
     fetch("/api/admin/locations").then(r => r.json()).then(j => setLocations(j.locations ?? []));
   }, []);
 
@@ -436,7 +467,7 @@ function OpeningStockModal({ onClose, onDone }: { onClose: () => void; onDone: (
   const [result, setResult] = useState<OpeningStockResult | null>(null);
 
   useEffect(() => {
-    fetch("/api/admin/menu/items").then(r => r.json()).then(j => setMenuItems(j.items ?? []));
+    fetchDirectStockCandidates().then(setMenuItems);
     fetch("/api/admin/locations").then(r => r.json()).then(j => {
       const locs: LocationOption[] = j.locations ?? [];
       setLocations(locs);
@@ -681,6 +712,10 @@ export function InventoryClient() {
   const [activeCategoryTab, setActiveCategoryTab] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [roles, setRoles] = useState<string[]>([]);
+  // P1.3: podrazumevano SAKRIVA recepturisane/isključene stavke (više nisu
+  // "prodajna" zaliha) — istorija ostaje potpuno dostupna preko ovog
+  // prekidača + "Historija" dugmeta po redu, nikad se ne briše.
+  const [showInactive, setShowInactive] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -721,8 +756,10 @@ export function InventoryClient() {
 
   const uncategorizedCount = categoryCount.get(UNCAT) ?? 0;
 
-  // Combined search + category + status filter (AND, ne OR — sve tri moraju
-  // da se poklope, isti obrazac kao ranije search+category).
+  // Combined search + category + status + tracking filter (AND). P1.3: a
+  // recipe-produced (or otherwise disabled) item is hidden from the default
+  // view — it no longer represents sellable finished stock, only historical
+  // record — unless "Prikaži isključene" is explicitly toggled on.
   const filtered = useMemo(() => {
     return items.filter(it => {
       const matchesSearch =
@@ -733,13 +770,17 @@ export function InventoryClient() {
         (activeCategoryTab === UNCAT
           ? it.menuItem.categoryId === null
           : it.menuItem.categoryId === activeCategoryTab);
-      const matchesStatus = statusFilter === "all" || stockStatus(it) === statusFilter;
-      return matchesSearch && matchesCategory && matchesStatus;
+      const matchesTracking = showInactive || isEffectivelyTracked(it);
+      const matchesStatus =
+        statusFilter === "all" || (isEffectivelyTracked(it) && stockStatus(it) === statusFilter);
+      return matchesSearch && matchesCategory && matchesTracking && matchesStatus;
     });
-  }, [items, search, activeCategoryTab, statusFilter]);
+  }, [items, search, activeCategoryTab, statusFilter, showInactive]);
 
-  const outOfStockCount = items.filter(i => stockStatus(i) === "out").length;
-  const lowStockCount = items.filter(i => stockStatus(i) === "low").length;
+  const trackedItems = items.filter(isEffectivelyTracked);
+  const outOfStockCount = trackedItems.filter(i => stockStatus(i) === "out").length;
+  const lowStockCount = trackedItems.filter(i => stockStatus(i) === "low").length;
+  const inactiveCount = items.length - trackedItems.length;
 
   function selectTab(id: string | null) {
     setActiveCategoryTab(prev => (prev === id ? null : id));
@@ -788,6 +829,10 @@ export function InventoryClient() {
           <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowStockCount} />
           <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outOfStockCount} />
         </div>
+        <label className="ml-auto flex items-center gap-1.5 text-xs font-medium text-inkSoft">
+          <input type="checkbox" checked={showInactive} onChange={e => setShowInactive(e.target.checked)} />
+          Prikaži isključene/istorijske stavke ({inactiveCount})
+        </label>
       </div>
 
       {/* ── Category tab strip (same pattern as Menu) ────────────────────────── */}
@@ -841,11 +886,13 @@ export function InventoryClient() {
               </thead>
               <tbody className="divide-y divide-line/60">
                 {filtered.map(item => {
-                  const status = stockStatus(item);
+                  const effectivelyTracked = isEffectivelyTracked(item);
+                  const status = effectivelyTracked ? stockStatus(item) : null;
                   const min = item.menuItem.minimumStock;
                   const rowCls =
                     status === "out" ? "bg-danger-soft/60 shadow-[inset_3px_0_0_#B91C1C]" :
                     status === "low" ? "bg-warn-soft/40 shadow-[inset_3px_0_0_#B45309]" :
+                    !effectivelyTracked ? "opacity-60 hover:bg-cream-200/40" :
                     "hover:bg-cream-200/60";
                   const stockCls =
                     status === "out" ? "text-danger" :
@@ -857,17 +904,19 @@ export function InventoryClient() {
                         <span className="block font-semibold text-ink">{item.menuItem.name}</span>
                         {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
                         {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
+                        {!effectivelyTracked && item.menuItem.hasRecipe && <Badge tone="gold">Normativ aktivan</Badge>}
                       </td>
                       <td className="px-4 py-3 text-inkSoft">{item.location.name}</td>
                       <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${stockCls}`}>
                         {fmtQty(item.currentStock)} {item.unit}
+                        {!effectivelyTracked && <span className="ml-1 text-xs font-normal text-ink/40">(istorijsko)</span>}
                       </td>
                       <td className="px-4 py-3 text-right font-mono tabular-nums text-inkSoft">
                         {min != null ? `${fmtQty(Number(min))} ${item.unit}` : "—"}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <Badge tone={item.menuItem.trackStock ? "success" : "neutral"}>
-                          {item.menuItem.trackStock ? "Aktivno" : "Isključeno"}
+                        <Badge tone={effectivelyTracked ? "success" : "neutral"}>
+                          {effectivelyTracked ? "Aktivno" : item.menuItem.hasRecipe ? "Normativ (sirovine)" : "Isključeno"}
                         </Badge>
                       </td>
                       <td className="px-4 py-3">

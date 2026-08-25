@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
-import { inventory } from "@rcs/domain";
+import { inventory, ingredients, recipes } from "@rcs/domain";
 import type { AuthContext } from "@rcs/auth";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
@@ -212,6 +212,82 @@ describe("inventory opening-stock: atomicity", () => {
     const b = await prisma.inventoryItem.findUnique({ where: { locationId_menuItemId: { locationId: fixture.locationId, menuItemId: fixture.menuItemBId } } });
     expect(Number(a?.currentStock)).toBe(30);
     expect(Number(b?.currentStock)).toBe(15);
+  });
+});
+
+// ─── P1.3: recipe-governed items are excluded/rejected, never silently reinitialized ─
+
+describe("inventory opening-stock: recipe-governed items are protected", () => {
+  it("bulkSetOpeningStock REJECTS the whole batch if any line targets a recipe-governed item", async () => {
+    const fixture = await createFixture();
+    const owner = ctxFor(fixture, "OWNER", "owner-1");
+    const meat = await ingredients.createIngredient(owner, { name: "Meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, fixture.menuItemAId, { ingredientId: meat.id, quantity: 0.2 });
+
+    await expect(
+      inventory.bulkSetOpeningStock(owner, {
+        locationId: fixture.locationId,
+        lines: [
+          { menuItemId: fixture.menuItemAId, quantity: 30 }, // recipe-governed — must reject the WHOLE batch
+          { menuItemId: fixture.menuItemBId, quantity: 15 },
+        ],
+      })
+    ).rejects.toThrow(/normativ/i);
+
+    // Item B (valid, direct-stock) must NOT have been applied either — whole-batch rejection
+    const b = await prisma.inventoryItem.findUnique({ where: { locationId_menuItemId: { locationId: fixture.locationId, menuItemId: fixture.menuItemBId } } });
+    expect(b).toBeNull();
+    // Item A's trackStock must NOT have been force-enabled by the rejected attempt
+    const menuItemA = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemAId } });
+    expect(menuItemA.trackStock).toBe(false);
+  });
+
+  it("bulkZeroOpeningStock SKIPS a recipe-governed item's frozen historical stock — never zeroes or rewrites it", async () => {
+    const fixture = await createFixture();
+    const owner = ctxFor(fixture, "OWNER", "owner-1");
+
+    // Item A: direct-stock, initialized normally.
+    await inventory.bulkSetOpeningStock(owner, { locationId: fixture.locationId, lines: [{ menuItemId: fixture.menuItemAId, quantity: 30 }] });
+
+    // Item B: WAS finished-stock (frozen at 15), THEN got a recipe (legacy/
+    // pre-existing InventoryItem row, now recipe-governed going forward).
+    await inventory.bulkSetOpeningStock(owner, { locationId: fixture.locationId, lines: [{ menuItemId: fixture.menuItemBId, quantity: 15 }] });
+    const meat = await ingredients.createIngredient(owner, { name: "Meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, fixture.menuItemBId, { ingredientId: meat.id, quantity: 0.2 });
+    const bBeforeReset = await prisma.inventoryItem.findUniqueOrThrow({ where: { locationId_menuItemId: { locationId: fixture.locationId, menuItemId: fixture.menuItemBId } } });
+    const bMovementsBeforeReset = await prisma.inventoryMovement.count({ where: { menuItemId: fixture.menuItemBId } });
+
+    const result = await inventory.bulkZeroOpeningStock(owner, { locationId: fixture.locationId });
+
+    // Item A (direct-stock) was reset to 0, as expected.
+    expect(result.results.find((r) => r.menuItemId === fixture.menuItemAId)?.after).toBe(0);
+    // Item B (recipe-governed) is ABSENT from the results entirely — never touched.
+    expect(result.results.find((r) => r.menuItemId === fixture.menuItemBId)).toBeUndefined();
+
+    const bAfterReset = await prisma.inventoryItem.findUniqueOrThrow({ where: { locationId_menuItemId: { locationId: fixture.locationId, menuItemId: fixture.menuItemBId } } });
+    expect(Number(bAfterReset.currentStock)).toBe(Number(bBeforeReset.currentStock)); // unchanged (still 15)
+    const bMovementsAfterReset = await prisma.inventoryMovement.count({ where: { menuItemId: fixture.menuItemBId } });
+    expect(bMovementsAfterReset).toBe(bMovementsBeforeReset); // no new movement created for it
+
+    // Its full history is still readable (viewable via the existing
+    // getMovements/"Historija" path — nothing about the reset hides it).
+    const movements = await inventory.getMovements(owner, bAfterReset.id);
+    expect(movements.length).toBeGreaterThan(0);
+  });
+
+  it("bulkZeroOpeningStock with EVERY tracked item recipe-governed is a safe no-op, not an error", async () => {
+    const fixture = await createFixture();
+    const owner = ctxFor(fixture, "OWNER", "owner-1");
+    await inventory.bulkSetOpeningStock(owner, { locationId: fixture.locationId, lines: [{ menuItemId: fixture.menuItemAId, quantity: 30 }] });
+    const meat = await ingredients.createIngredient(owner, { name: "Meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, fixture.menuItemAId, { ingredientId: meat.id, quantity: 0.2 });
+
+    const result = await inventory.bulkZeroOpeningStock(owner, { locationId: fixture.locationId });
+    expect(result.itemsAffected).toBe(0);
+    expect(result.results).toHaveLength(0);
+
+    const item = await prisma.inventoryItem.findUniqueOrThrow({ where: { locationId_menuItemId: { locationId: fixture.locationId, menuItemId: fixture.menuItemAId } } });
+    expect(Number(item.currentStock)).toBe(30); // untouched
   });
 });
 

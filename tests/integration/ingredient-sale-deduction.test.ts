@@ -640,8 +640,13 @@ describe("Permissions: normal waiter completes payment without inventory.manage"
 
 // ─── 23: coexistence with existing finished-item inventory ────────────────
 
-describe("Coexistence with existing finished-item inventory (InventoryItem)", () => {
-  it("a MenuItem tracked by BOTH finished-item stock AND a raw-material recipe deducts both correctly in one sale", async () => {
+describe("Dual-stock model (P1.3): recipe always wins, never double-deducts", () => {
+  // Supersedes the old "deducts both correctly" expectation (P1.2-era) —
+  // that represented the technical capability, not the correct business
+  // rule. Per the P1.3 decision: a configured recipe is authoritative and
+  // finished-goods stock must NEVER also decrement for the same sale.
+
+  it("normal path: adding the FIRST recipe line to a trackStock=true item auto-disables finished-stock tracking, and the sale deducts ONLY ingredients", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
@@ -650,18 +655,78 @@ describe("Coexistence with existing finished-item inventory (InventoryItem)", ()
     const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
 
+    const menuItemAfterTransition = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(menuItemAfterTransition.trackStock).toBe(false); // auto-disabled by the first recipe line
+
     await orderAndPay(waiterCtx(fixture), fixture, item.id, 3);
 
+    // Finished-goods InventoryItem row is PRESERVED, UNTOUCHED (frozen at 50,
+    // never deleted, never decremented) — only ingredients moved.
     const finishedStock = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: item.id, locationId: fixture.locationId } });
-    expect(Number(finishedStock.currentStock)).toBe(47); // 50 - 3
+    expect(Number(finishedStock.currentStock)).toBe(50);
 
     const rawStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
     expect(Number(rawStock.currentStock)).toBeCloseTo(9.4, 9); // 10 - 0.6
 
     const finishedMovements = await prisma.inventoryMovement.count({ where: { menuItemId: item.id, type: "SALE" } });
     const rawMovements = await prisma.ingredientMovement.count({ where: { ingredientId: meat.id, type: "SALE" } });
-    expect(finishedMovements).toBe(1);
-    expect(rawMovements).toBe(1); // ni jedan sistem nije duplirao/preskocio drugi
+    expect(finishedMovements).toBe(0); // NEVER double-deducted
+    expect(rawMovements).toBe(1);
+
+    const transitionAudit = await prisma.auditLog.findFirst({
+      where: { entityId: item.id, action: "inventory.model_switched_to_recipe" },
+    });
+    expect(transitionAudit).not.toBeNull();
+  });
+
+  it("defense-in-depth: even if legacy/bad data leaves trackStock=true AND a recipe configured for the same item, a sale still deducts ONLY ingredients", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Pljeskavica");
+
+    // Reconstruct the "shouldn't happen via the normal path, but might via a
+    // manual override" state: item starts WITHOUT tracking, gets a recipe
+    // (trackStock stays false — nothing to auto-disable), THEN an
+    // owner/admin explicitly re-enables finished-goods tracking without
+    // removing the recipe first.
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
+    await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 50 });
+
+    const menuItemNow = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(menuItemNow.trackStock).toBe(true); // legacy/bad combination now exists
+
+    await orderAndPay(waiterCtx(fixture), fixture, item.id, 3);
+
+    const finishedStock = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: item.id, locationId: fixture.locationId } });
+    expect(Number(finishedStock.currentStock)).toBe(50); // untouched despite trackStock=true
+
+    const rawStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
+    expect(Number(rawStock.currentStock)).toBeCloseTo(9.4, 9);
+
+    const finishedMovements = await prisma.inventoryMovement.count({ where: { menuItemId: item.id, type: "SALE" } });
+    const rawMovements = await prisma.ingredientMovement.count({ where: { ingredientId: meat.id, type: "SALE" } });
+    expect(finishedMovements).toBe(0);
+    expect(rawMovements).toBe(1);
+  });
+
+  it("defense-in-depth: a stale/zero finished-goods stock never blocks the order or the payment when a recipe governs the item", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Pljeskavica");
+
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
+    // Legacy bad state again, but this time the frozen finished stock is 0 —
+    // if the finished-goods system were still consulted, this would block
+    // the order/payment with InsufficientStockError. It must not.
+    await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 0 });
+
+    const { payment } = await orderAndPay(waiterCtx(fixture), fixture, item.id, 2);
+    expect(payment).toBeTruthy();
+
+    const rawStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
+    expect(Number(rawStock.currentStock)).toBeCloseTo(9.6, 9); // 10 - 0.4
   });
 
   it("an item with ONLY finished-item tracking (no recipe) is unaffected by the new ingredient system", async () => {

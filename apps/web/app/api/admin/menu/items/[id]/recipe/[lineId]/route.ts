@@ -3,7 +3,10 @@ import { z } from "zod";
 import { recipes } from "@rcs/domain";
 import { withApiAuth } from "../../../../../../../../lib/api-helpers";
 
-const updateLineSchema = z.object({ quantity: z.number().positive() });
+const updateLineSchema = z.object({
+  quantity: z.number().positive(),
+  unit: z.enum(["KILOGRAM", "GRAM", "LITER", "MILLILITER", "PIECE"]).optional(),
+});
 
 export const PATCH = withApiAuth<{ id: string; lineId: string }>(async (ctx, request, { lineId }) => {
   const body = await request.json();

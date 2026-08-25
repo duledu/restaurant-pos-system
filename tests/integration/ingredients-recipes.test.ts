@@ -15,7 +15,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
 import type { AuthContext } from "@rcs/auth";
-import { ingredients, recipes, orders, billing } from "@rcs/domain";
+import { ingredients, recipes, orders, billing, inventory } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -322,6 +322,225 @@ describe("Recipe (Normativ): create, edit, remove, multiple ingredients, shared 
     const recipeB = await recipes.getRecipe(manager, otherItem.id);
     expect(Number(recipeA[0].quantity)).toBe(0.2);
     expect(Number(recipeB[0].quantity)).toBe(0.4);
+  });
+});
+
+// ─── P1.3: dual-stock transition — first recipe line auto-disables trackStock ─
+
+describe("Dual-stock transition: first recipe line auto-disables finished-item tracking", () => {
+  it("adding the FIRST recipe line to a trackStock=true item atomically flips trackStock to false", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    await inventory.initializeTracking(manager, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 25 });
+
+    const before = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(before.trackStock).toBe(true);
+
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+
+    const after = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(after.trackStock).toBe(false);
+
+    // Old InventoryItem row and its history are PRESERVED exactly — never
+    // deleted, never reset, never rewritten.
+    const invItem = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId } });
+    expect(Number(invItem.currentStock)).toBe(25);
+    const movements = await prisma.inventoryMovement.findMany({ where: { menuItemId: fixture.menuItemId } });
+    expect(movements.length).toBeGreaterThan(0);
+  });
+
+  it("records an inventory.model_switched_to_recipe audit entry with actor and previous/new state", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture, "mgr-42");
+    await inventory.initializeTracking(manager, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 10 });
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+
+    const entry = await prisma.auditLog.findFirstOrThrow({
+      where: { entityId: fixture.menuItemId, action: "inventory.model_switched_to_recipe" },
+    });
+    expect(entry.userId).toBe("mgr-42");
+    expect((entry.previousValue as { trackStock: boolean }).trackStock).toBe(true);
+    expect((entry.newValue as { trackStock: boolean }).trackStock).toBe(false);
+  });
+
+  it("adding a SECOND recipe line does NOT re-fire the transition (trackStock already false)", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    await inventory.initializeTracking(manager, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 10 });
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    const onion = await ingredients.createIngredient(manager, { name: "Luk", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: onion.id, quantity: 0.05 });
+
+    const transitionEntries = await prisma.auditLog.count({
+      where: { entityId: fixture.menuItemId, action: "inventory.model_switched_to_recipe" },
+    });
+    expect(transitionEntries).toBe(1); // exactly once, not once per line
+  });
+
+  it("a MenuItem that never had trackStock enabled gains a recipe with no transition audit at all", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+
+    const menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(menuItem.trackStock).toBe(false); // was already false, stays false
+
+    const transitionEntries = await prisma.auditLog.count({
+      where: { entityId: fixture.menuItemId, action: "inventory.model_switched_to_recipe" },
+    });
+    expect(transitionEntries).toBe(0); // nothing to transition
+  });
+
+  it("removing the LAST recipe line does NOT re-enable finished-item tracking — item shows as unconfigured, not reverted", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    await inventory.initializeTracking(manager, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 25 });
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    const line = await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+
+    let menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(menuItem.trackStock).toBe(false);
+
+    await recipes.removeRecipeLine(manager, line.id);
+
+    menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(menuItem.trackStock).toBe(false); // NEVER auto-reverted, even with zero recipe lines now
+
+    const recipe = await recipes.getRecipe(manager, fixture.menuItemId);
+    expect(recipe).toHaveLength(0);
+
+    // The old InventoryItem row is STILL there, untouched — explicit
+    // re-enable is the only way back, and that's a separate, deliberate act.
+    const invItem = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId } });
+    expect(Number(invItem.currentStock)).toBe(25);
+
+    await inventory.setTrackingEnabled(manager, fixture.menuItemId, true);
+    menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(menuItem.trackStock).toBe(true); // only via the explicit, separate action
+  });
+});
+
+// ─── P1.3: unit conversion at recipe entry ─────────────────────────────────
+
+describe("Recipe unit conversion: enter in a compatible unit, store in the ingredient's canonical unit", () => {
+  it("entering a recipe quantity in GRAM for a KILOGRAM-stocked ingredient stores the converted kilogram value", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const tomato = await ingredients.createIngredient(manager, { name: "Paradajz", unit: "KILOGRAM" });
+    const line = await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: tomato.id, quantity: 300, unit: "GRAM" });
+    expect(Number(line.quantity)).toBeCloseTo(0.3, 9); // 300 g -> 0.300 kg
+  });
+
+  it("entering a recipe quantity in MILLILITER for a LITER-stocked ingredient stores the converted liter value", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const oil = await ingredients.createIngredient(manager, { name: "Ulje", unit: "LITER" });
+    const line = await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: oil.id, quantity: 15, unit: "MILLILITER" });
+    expect(Number(line.quantity)).toBeCloseTo(0.015, 9);
+  });
+
+  it("omitting the unit interprets the quantity directly in the ingredient's own unit (unchanged, backward compatible)", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const tomato = await ingredients.createIngredient(manager, { name: "Paradajz", unit: "KILOGRAM" });
+    const line = await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: tomato.id, quantity: 0.3 });
+    expect(Number(line.quantity)).toBeCloseTo(0.3, 9);
+  });
+
+  it("updateRecipeLine also converts from a compatible entry unit into the canonical unit", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const tomato = await ingredients.createIngredient(manager, { name: "Paradajz", unit: "KILOGRAM" });
+    const line = await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: tomato.id, quantity: 0.3 });
+    const updated = await recipes.updateRecipeLine(manager, line.id, { quantity: 450, unit: "GRAM" });
+    expect(Number(updated.quantity)).toBeCloseTo(0.45, 9);
+  });
+
+  it("rejects an incompatible-dimension entry unit (mass entered for a volume ingredient) rather than guessing", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const oil = await ingredients.createIngredient(manager, { name: "Ulje", unit: "LITER" });
+    await expect(
+      recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: oil.id, quantity: 300, unit: "GRAM" })
+    ).rejects.toThrow();
+  });
+
+  it("rejects PIECE mixed with any other unit — discrete counts never convert", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const bun = await ingredients.createIngredient(manager, { name: "Lepinja", unit: "PIECE" });
+    await expect(
+      recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: bun.id, quantity: 1, unit: "GRAM" })
+    ).rejects.toThrow();
+  });
+
+  it("real-world example: Šopska salata (Paradajz 300 g against a kg-stocked ingredient) — matches the spec's exact worked example", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const tomato = await ingredients.createIngredient(manager, { name: "Paradajz", unit: "KILOGRAM" });
+    await ingredients.initializeStock(manager, { ingredientId: tomato.id, locationId: fixture.locationId, initialStock: 10 });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: tomato.id, quantity: 300, unit: "GRAM" });
+
+    const waiter = waiterCtx(fixture);
+    async function sellOne() {
+      const table = await prisma.restaurantTable.create({ data: { floorId: (await prisma.floor.findFirstOrThrow({ where: { restaurantId: fixture.restaurantId } })).id, label: `T-${randomUUID().slice(0, 6)}` } });
+      const order = await orders.openOrder(waiter, { tableId: table.id });
+      await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+      const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+      await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    }
+
+    // Sale of 1: 10.000 kg -> 9.700 kg
+    await sellOne();
+    let stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
+    expect(Number(stock.currentStock)).toBeCloseTo(9.7, 9);
+
+    // Sale of 3 more: 9.700 kg -> 8.800 kg
+    await sellOne();
+    await sellOne();
+    await sellOne();
+    stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
+    expect(Number(stock.currentStock)).toBeCloseTo(8.8, 9);
+  });
+});
+
+// ─── P1.3: Normativi overview (Admin listing) ──────────────────────────────
+
+describe("listRecipeOverview: Admin Normativi page data source", () => {
+  it("reports ingredientCount and isConfigured per MenuItem, with category name resolved", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
+
+    const category = await prisma.menuCategory.create({
+      data: { restaurantId: fixture.restaurantId, name: "Bez normativa", slug: `nn-${randomUUID()}`, type: "FOOD" },
+    });
+    const unconfigured = await prisma.menuItem.create({
+      data: { restaurantId: fixture.restaurantId, categoryId: category.id, name: "Coca-Cola", slug: `cola-${randomUUID()}`, price: "250.00", taxRate: "20", preparationStation: "NONE" },
+    });
+
+    const overview = await recipes.listRecipeOverview(manager);
+    const configured = overview.find((o) => o.id === fixture.menuItemId);
+    const notConfigured = overview.find((o) => o.id === unconfigured.id);
+
+    expect(configured?.ingredientCount).toBe(1);
+    expect(configured?.isConfigured).toBe(true);
+    expect(notConfigured?.ingredientCount).toBe(0);
+    expect(notConfigured?.isConfigured).toBe(false);
+    expect(notConfigured?.categoryName).toBe("Bez normativa");
+  });
+
+  it("is restaurant-scoped — never includes another restaurant's menu items", async () => {
+    const fixture = await createFixture();
+    const manager = managerCtx(fixture);
+    const outsider: AuthContext = { ...manager, restaurantId: fixture.otherRestaurantId };
+    const overview = await recipes.listRecipeOverview(outsider);
+    expect(overview.find((o) => o.id === fixture.menuItemId)).toBeUndefined();
   });
 });
 

@@ -6,6 +6,7 @@ import { withApiAuth } from "../../../../../../../lib/api-helpers";
 const addLineSchema = z.object({
   ingredientId: z.string().uuid(),
   quantity: z.number().positive(),
+  unit: z.enum(["KILOGRAM", "GRAM", "LITER", "MILLILITER", "PIECE"]).optional(),
 });
 
 export const GET = withApiAuth<{ id: string }>(async (ctx, _request, { id }) => {
