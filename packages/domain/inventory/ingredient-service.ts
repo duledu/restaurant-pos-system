@@ -7,15 +7,41 @@
  * requireLocationAccess/scopeToRestaurant, recordAuditEntry) su namerno
  * ponovo iskorišćeni odavde — dokazano ispravni, nema razloga za novi stil.
  *
- * VAŽNO (ova faza): NIJEDNA funkcija ovde ne piše "SALE" IngredientMovement
- * i ništa ovde se ne poziva iz billing-service.ts/completePayment. Recepture
- * (recipe-service.ts) postoje i mogu se definisati, ali prodaja ih JOŠ NE
- * troši automatski — to je posebna, kasnija, eksplicitno odobrena faza.
+ * P1.2: `validateAndDecrementIngredientsInTx` (na dnu fajla) POVEZUJE
+ * recepture sa naplatom — poziva se iz billing-service.ts/completePayment,
+ * unutar ISTE transakcije kao gotov-proizvod ekvivalent
+ * (inventory-service.ts validateAndDecrementInventoryInTx). Namerno isti
+ * obrazac: agregacija po (ovde: sirovini, ne artiklu) PRE mutacije, atomični
+ * uslovni UPDATE za konkurentnost, @@unique(paymentId, ingredientId) kao
+ * idempotency brava, InsufficientIngredientStockError kao koherentna,
+ * agregirana greška.
  */
 import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { ALL_UNITS, type UnitOfMeasure } from "./unit-of-measure";
+import { ALL_UNITS, unitLabelSr, type UnitOfMeasure } from "./unit-of-measure";
+
+// ─── Errors ─────────────────────────────────────────────────────────────────
+
+/**
+ * Agregirana greška nedovoljnih sirovina — namerno nosi SVE nedostajuće
+ * sirovine odjednom (ne samo prvu na koju se naiđe), tako da konobar/kasa
+ * odmah vidi kompletan spisak umesto da otkriva nedostatke jedan po jedan
+ * (P1.2 zahtev). Nikad ne izlaže interne ID-jeve — samo naziv/dostupno/
+ * potrebno/jedinica, bezbedno za direktan prikaz na UI.
+ */
+export class InsufficientIngredientStockError extends Error {
+  readonly items: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }>;
+
+  constructor(items: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }>) {
+    const lines = items
+      .map((i) => `${i.name} — dostupno: ${i.available} ${unitLabelSr(i.unit)}, potrebno: ${i.required} ${unitLabelSr(i.unit)}`)
+      .join("\n");
+    super(`Nema dovoljno sirovina za završetak prodaje.\n${lines}`);
+    this.name = "InsufficientIngredientStockError";
+    this.items = items;
+  }
+}
 
 // ─── Create / read ──────────────────────────────────────────────────────────
 
@@ -428,5 +454,206 @@ async function applyDelta(
       },
     });
     return { stock: updated, movement, before, after, locationId: updated.locationId };
+  });
+}
+
+// ─── P1.2: automatsko skidanje po normativu (SALE) ─────────────────────────
+
+/**
+ * Autoritativna tačka potrošnje sirovina — poziva se ISKLJUČIVO iz
+ * billing-service.ts/completePayment, UNUTAR VEĆ POSTOJEĆE
+ * `prisma.$transaction`, odmah pored (istog stila kao)
+ * `validateAndDecrementInventoryInTx` za gotove artikle. Ako ova funkcija
+ * baci grešku, CELA naplatna transakcija se rollback-uje (Payment/Receipt/
+ * sto/OrderEvent) — nikad ne postoji stanje "naplata uspela, sirovine nisu
+ * skinute" ili obrnuto, jer je sve JEDNA atomska transakcija.
+ *
+ * Redosled (namerno, radi tačnosti i bezbednosti):
+ *  1. Agregacija tražene količine PO SIROVINI preko SVIH prodatih stavki
+ *     (više artikala može deliti istu sirovinu — P1.2 §5).
+ *  2. Artikli BEZ recepture se tiho preskaču (P1.2 §12) — ne postoji
+ *     "delimično definisana receptura" greška, samo artikli sa definisanom
+ *     recepturom učestvuju.
+ *  3. Idempotency: sirovine koje VEĆ imaju SALE kretanje za ovaj paymentId
+ *     (@@unique(paymentId, ingredientId) na IngredientMovement) se
+ *     preskaču — bezbedno za slučaj da se ova funkcija ikad pozove više
+ *     puta za isti payment (odbrana u dubinu; primarna zaštita od duple
+ *     naplate je already-COMPLETED guard u completePayment-u).
+ *  4. READ-ONLY provera SVIH preostalih potrebnih sirovina PRE bilo kakve
+ *     mutacije (P1.2 §8/§20) — ako bilo koja nedostaje, baca JEDNU
+ *     InsufficientIngredientStockError sa KOMPLETNIM spiskom nedostataka;
+ *     ništa se ne menja (nijedna sirovina, čak ni one koje IMAJU dovoljno
+ *     stanja).
+ *  5. Tek posle uspešne provere: atomični uslovni UPDATE po sirovini (ista
+ *     tehnika kao applyDelta/validateAndDecrementInventoryInTx) — ovo je
+ *     STVARNA odbrana od konkurentnosti (koraci 4 su samo UX/rana provera;
+ *     dve paralelne transakcije i dalje mogu proći korak 4 istovremeno, pa
+ *     korak 5 mora nezavisno da spreči negativno stanje).
+ *
+ * Konverzija jedinica: NIJE potrebna. Receptura (MenuItemIngredient.quantity)
+ * je po dizajnu foundation faze UVEK izražena u jedinici same sirovine
+ * (Ingredient.unit) — nema po-recepturi override jedinice — pa je količina iz
+ * recepture direktno uporediva/oduzimljiva od IngredientStock.currentStock
+ * bez ikakve konverzije (vidi napomenu u schema.prisma uz MenuItemIngredient
+ * i unit-of-measure.ts).
+ *
+ * Istorijska tačnost: quantityDelta/Before/After na svakom IngredientMovement
+ * redu su IZRAČUNATI I UPISANI U TRENUTKU PRODAJE iz recepture kakva je TADA
+ * bila — kasnija izmena recepture (MenuItemIngredient.quantity) nikad ne menja
+ * već upisane redove (nema UPDATE-a, samo INSERT). Kretanje samo po sebi je
+ * kompletan istorijski zapis — nije potrebna posebna "recipe snapshot"
+ * tabela.
+ */
+export async function validateAndDecrementIngredientsInTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    paymentId: string;
+    orderId: string;
+    restaurantId: string;
+    locationId: string;
+    items: Array<{ menuItemId: string | null; quantity: number }>;
+  }
+): Promise<void> {
+  const soldQtyByMenuItem = new Map<string, number>();
+  for (const it of input.items) {
+    if (!it.menuItemId) continue;
+    soldQtyByMenuItem.set(it.menuItemId, (soldQtyByMenuItem.get(it.menuItemId) ?? 0) + it.quantity);
+  }
+  if (soldQtyByMenuItem.size === 0) return;
+
+  const menuItemIds = [...soldQtyByMenuItem.keys()];
+
+  // Jedan upit za recepture SVIH prodatih artikala (batch, ne po-artiklu).
+  const recipeLines = await tx.menuItemIngredient.findMany({
+    where: { menuItemId: { in: menuItemIds } },
+    include: { ingredient: true },
+  });
+  if (recipeLines.length === 0) return; // nijedan prodat artikal nema definisan normativ
+
+  interface Requirement {
+    ingredientId: string;
+    name: string;
+    unit: UnitOfMeasure;
+    required: Prisma.Decimal;
+  }
+  const requiredByIngredient = new Map<string, Requirement>();
+  for (const line of recipeLines) {
+    const soldQty = soldQtyByMenuItem.get(line.menuItemId);
+    if (!soldQty) continue;
+    // Neaktivna sirovina i dalje učestvuje ako je već u recepturi (P1.2 §13)
+    // — deaktivacija sprečava NOVU upotrebu (u recipe-service.ts UI-u), ne
+    // menja postojeće recepture koje je već referenciraju.
+    const need = new Prisma.Decimal(line.quantity).mul(soldQty);
+    const existing = requiredByIngredient.get(line.ingredientId);
+    if (existing) {
+      existing.required = existing.required.add(need);
+    } else {
+      requiredByIngredient.set(line.ingredientId, {
+        ingredientId: line.ingredientId,
+        name: line.ingredient.name,
+        unit: line.ingredient.unit,
+        required: need,
+      });
+    }
+  }
+  if (requiredByIngredient.size === 0) return;
+
+  // Idempotency: preskoči sirovine koje već imaju SALE kretanje za OVAJ
+  // paymentId (defense-in-depth — vidi napomenu iznad funkcije).
+  const alreadyProcessed = await tx.ingredientMovement.findMany({
+    where: { paymentId: input.paymentId, ingredientId: { in: [...requiredByIngredient.keys()] } },
+    select: { ingredientId: true },
+  });
+  for (const row of alreadyProcessed) {
+    requiredByIngredient.delete(row.ingredientId);
+  }
+  if (requiredByIngredient.size === 0) return; // sve već obrađeno za ovaj payment (retry no-op)
+
+  const ingredientIds = [...requiredByIngredient.keys()];
+  const stocks = await tx.ingredientStock.findMany({
+    where: { restaurantId: input.restaurantId, locationId: input.locationId, ingredientId: { in: ingredientIds } },
+  });
+  const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
+
+  // Korak 4 — read-only provera SVIH sirovina PRE bilo kakve mutacije.
+  const shortages: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }> = [];
+  for (const req of requiredByIngredient.values()) {
+    const stock = stockByIngredient.get(req.ingredientId);
+    const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
+    if (available.lessThan(req.required)) {
+      shortages.push({ name: req.name, available: available.toString(), required: req.required.toString(), unit: req.unit });
+    }
+  }
+  if (shortages.length > 0) {
+    throw new InsufficientIngredientStockError(shortages);
+  }
+
+  // Korak 5 — stvarna, konkurentnost-bezbedna mutacija. Svaka sirovina
+  // garantovano ima stock red ovde (inače bi korak 4 već bacio grešku).
+  for (const req of requiredByIngredient.values()) {
+    const stock = stockByIngredient.get(req.ingredientId)!;
+    const requiredStr = req.required.toString();
+
+    type Row = { currentStock: string };
+    const rows = await tx.$queryRaw<Row[]>`
+      UPDATE ingredient_stocks
+      SET "currentStock" = "currentStock" - ${requiredStr}::numeric
+      WHERE id = ${stock.id}
+        AND "currentStock" >= ${requiredStr}::numeric
+      RETURNING "currentStock"
+    `;
+
+    if (rows.length === 0) {
+      // Izgubljena trka NAKON koraka 4 (redak slučaj prave konkurentnosti) —
+      // izveštava se kao nedovoljno stanje za OVU sirovinu.
+      const current = await tx.ingredientStock.findUnique({
+        where: { id: stock.id },
+        select: { currentStock: true },
+      });
+      throw new InsufficientIngredientStockError([
+        {
+          name: req.name,
+          available: (current?.currentStock ?? new Prisma.Decimal(0)).toString(),
+          required: requiredStr,
+          unit: req.unit,
+        },
+      ]);
+    }
+
+    const after = new Prisma.Decimal(rows[0].currentStock);
+    const before = after.add(req.required);
+
+    await tx.ingredientMovement.create({
+      data: {
+        restaurantId: input.restaurantId,
+        locationId: input.locationId,
+        ingredientId: req.ingredientId,
+        ingredientStockId: stock.id,
+        type: "SALE",
+        quantityDelta: req.required.neg(),
+        quantityBefore: before,
+        quantityAfter: after,
+        paymentId: input.paymentId,
+        orderId: input.orderId,
+        reason: "Prodaja — automatsko skidanje po normativu",
+      },
+    });
+  }
+}
+
+/**
+ * Samostalna verzija (sopstvena transakcija) — zadržana za direktno
+ * testiranje idempotentnosti/konkurentnosti van punog completePayment toka,
+ * isti obrazac kao inventory-service.ts decrementOnSale.
+ */
+export async function decrementIngredientsOnSale(input: {
+  paymentId: string;
+  orderId: string;
+  restaurantId: string;
+  locationId: string;
+  items: Array<{ menuItemId: string | null; quantity: number }>;
+}): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await validateAndDecrementIngredientsInTx(tx, input);
   });
 }

@@ -427,10 +427,18 @@ describe("Concurrency", () => {
   });
 });
 
-// ─── 20: no automatic SALE deduction yet ───────────────────────────────────
+// ─── 20 (P1 foundation) -> superseded by P1.2 ──────────────────────────────
+//
+// Ova tačka je u P1 (foundation) fazi dokazivala da recepture NISU povezane
+// sa prodajom. P1.2 je NAMERNO i eksplicitno dodao tu vezu (automatsko
+// skidanje po normativu pri naplati) — puno pokriveno u
+// tests/integration/ingredient-sale-deduction.test.ts (25 scenarija). Test
+// ispod je AŽURIRAN da odražava novu, tačnu stvarnost umesto da ostane
+// zastareo/pogrešan; zadržan ovde (ne obrisan) kao regresiona provera da
+// osnovna sprega recepture+naplate i dalje radi.
 
-describe("Recipes are NOT connected to sales in this phase", () => {
-  it("completing a payment for an item WITH a defined recipe creates zero IngredientMovement rows of type SALE", async () => {
+describe("Recipes ARE connected to sales (P1.2) — see ingredient-sale-deduction.test.ts for full coverage", () => {
+  it("completing a payment for an item WITH a defined recipe creates the expected SALE IngredientMovement and deducts stock", async () => {
     const fixture = await createFixture();
     const waiter = waiterCtx(fixture);
     const manager = managerCtx(fixture);
@@ -444,10 +452,10 @@ describe("Recipes are NOT connected to sales in this phase", () => {
     await billing.completePayment(waiter, submitted.id, { method: "CASH" });
 
     const saleMovements = await prisma.ingredientMovement.count({ where: { restaurantId: fixture.restaurantId, type: "SALE" } });
-    expect(saleMovements).toBe(0);
+    expect(saleMovements).toBe(1);
 
-    // Sirovinski lager potpuno netaknut prodajom
+    // 100 - (0.2 kg * 3) = 99.4 kg
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBe(100);
+    expect(Number(stock.currentStock)).toBeCloseTo(99.4, 9);
   });
 });

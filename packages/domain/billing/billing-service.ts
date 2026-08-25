@@ -8,6 +8,7 @@ import { requireOrderOperator, requireDraftOwnership, isOrderManager } from "../
 import { computeOrderTotals } from "../orders/order-totals";
 import { dispatchReceiptPrintJob } from "../printing/print-service";
 import { validateAndDecrementInventoryInTx } from "../inventory/inventory-service";
+import { validateAndDecrementIngredientsInTx } from "../inventory/ingredient-service";
 import type { CompletePaymentInput } from "@rcs/shared";
 
 const PAYABLE_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
@@ -185,6 +186,20 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     });
 
     await validateAndDecrementInventoryInTx(tx, {
+      paymentId: payment.id,
+      orderId,
+      restaurantId: ctx.restaurantId,
+      locationId: order.locationId,
+      items: payableItems.map((it) => ({ menuItemId: it.menuItemId, quantity: it.quantity })),
+    });
+
+    // P1.2: automatsko skidanje sirovina po normativu (Normativi) — potpuno
+    // NEZAVISNO od gotov-proizvod inventara iznad (različiti artikli mogu
+    // koristiti jedno, drugo, oba ili nijedno — vidi napomenu na vrhu
+    // ingredient-service.ts). Unutar ISTE transakcije: greška ovde
+    // rollback-uje CELU naplatu (Payment/Receipt/sto/OrderEvent), tačno kao
+    // nedovoljna zaliha gotovog artikla iznad.
+    await validateAndDecrementIngredientsInTx(tx, {
       paymentId: payment.id,
       orderId,
       restaurantId: ctx.restaurantId,
