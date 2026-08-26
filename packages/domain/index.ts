@@ -17,6 +17,7 @@ export * as settings from "./settings/settings-service";
 export * as analytics from "./analytics/analytics-service";
 export * as inventory from "./inventory/inventory-service";
 export * as ingredients from "./inventory/ingredient-service";
+export * as inventoryCategories from "./inventory/inventory-category-service";
 export * as unitOfMeasure from "./inventory/unit-of-measure";
 export * from "./realtime/publisher";
 export { ssePublisher, subscribe } from "./realtime/sse-publisher";

@@ -129,7 +129,11 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
     where,
     include: {
       menuItem: {
-        select: { id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true },
+        select: {
+          id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true,
+          inventoryCategoryId: true,
+          inventoryCategory: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+        },
       },
       location: { select: { id: true, name: true } },
     },

@@ -86,6 +86,7 @@ model Restaurant {
   modifierGroups ModifierGroup[]
   ingredients        Ingredient[]
   ingredientStocks   IngredientStock[]
+  inventoryCategories InventoryCategory[]
 
   @@index([tenantId])
   @@index([status])
@@ -428,8 +429,18 @@ model MenuItem {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime? // soft-delete: meni artikli se arhiviraju/brišu često, istorijske porudžbine već čuvaju snapshot naziva/cene pa fizičko brisanje ovde ne ugrožava izveštaje
 
-  restaurant     Restaurant      @relation(fields: [restaurantId], references: [id])
-  category       MenuCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // P1.5: fizička kategorija ZALIHE (KUHINJA/ŠANK -> podkategorija) — NAMERNO
+  // ODVOJENO od `categoryId` (MenuCategory) iznad, koja organizuje MENI (šta
+  // se prodaje), ne fizičku robu. Koristi je ISKLJUČIVO direct-stock artikal
+  // (npr. Coca-Cola -> ŠANK -> Sokovi) radi organizacije Zalihe ekrana — nema
+  // efekta na naplatu/odbitak (i dalje isključivo InventoryItem/trackStock).
+  // Nullable: postojeći artikli ostaju "Nekategorisano" dok se ručno ne
+  // dodele — nikad se ne pogađa dodela.
+  inventoryCategoryId String?
+
+  restaurant        Restaurant          @relation(fields: [restaurantId], references: [id])
+  category           MenuCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  inventoryCategory   InventoryCategory?  @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
   orderItems     OrderItem[]
   inventoryItems InventoryItem[]
   modifierGroups MenuItemModifierGroup[]
@@ -437,6 +448,7 @@ model MenuItem {
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
+  @@index([inventoryCategoryId])
   @@index([restaurantId, isActive])
   @@index([categoryId])
   @@index([preparationStation])
@@ -1181,18 +1193,60 @@ enum UnitOfMeasure {
   PIECE
 }
 
+// P1.5: SIROVINSKA (fizička) kategorija — NAMERNO odvojena hijerarhija od
+// MenuCategory iznad. MenuCategory organizuje šta se PRODAJE (meni);
+// InventoryCategory organizuje fizičku ROBU koju restoran drži na stanju
+// (KUHINJA/ŠANK -> podkategorija), bez obzira da li ta roba ulazi u
+// recepturu (Ingredient) ili se prodaje direktno (MenuItem/InventoryItem —
+// vidi inventoryCategoryId na MenuItem-u iznad). Restoran-scoped,
+// samo-referencirajuća (parent/children) — TAČNO DVA nivoa u praksi
+// (KUHINJA/ŠANK pa podkategorija), ali model namerno ne ograničava dubinu na
+// schema nivou (jednostavnije nego posebno "level" polje, isti šablon kao
+// MenuCategory da nema veštačkog ograničenja).
+//
+// Deaktivacija umesto brisanja (isti obrazac kao Ingredient/MenuItem) — brisanje
+// kategorije koja ima dodeljene Ingredient/MenuItem redove bi ih osirotilo ili
+// zahtevalo kaskadno reosiromašenje; deactivate je bezbedno i vraćivo.
+model InventoryCategory {
+  id           String  @id @default(uuid())
+  restaurantId String
+  name         String
+  parentId     String?
+  sortOrder    Int     @default(0)
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  parent     InventoryCategory?   @relation("InventoryCategoryChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children   InventoryCategory[]  @relation("InventoryCategoryChildren")
+  ingredients Ingredient[]
+  menuItems   MenuItem[]
+
+  @@index([restaurantId])
+  @@index([restaurantId, isActive])
+  @@index([parentId])
+  @@map("inventory_categories")
+}
+
 model Ingredient {
   id           String  @id @default(uuid())
   restaurantId String
   name         String
   unit         UnitOfMeasure
   category     String? // slobodan tekst u MVP-u (npr. "Meso", "Povrće") — isti obrazac kao MenuItem.unit
+  // P1.5: strukturirana zamena za `category` (free-text) iznad — `category`
+  // NAMERNO ostaje netaknuto polje (postojeći podaci, ako ih ima, se ne
+  // dodiruju), ali nova Admin UI koristi ISKLJUČIVO inventoryCategoryId.
+  // Nullable: postojeće/nove sirovine bez dodele ostaju "Nekategorisano".
+  inventoryCategoryId String?
   sku          String?
   isActive     Boolean @default(true) // deaktivacija umesto brisanja — vidi napomenu ispod
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  restaurant        Restaurant          @relation(fields: [restaurantId], references: [id])
+  inventoryCategory InventoryCategory?  @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
   stocks     IngredientStock[]
   movements  IngredientMovement[]
   recipeLines MenuItemIngredient[]
@@ -1202,6 +1256,7 @@ model Ingredient {
   // sirovine mogu slučajno imati sličan naziv u različitim kategorijama).
   @@index([restaurantId])
   @@index([restaurantId, isActive])
+  @@index([inventoryCategoryId])
   @@map("ingredients")
 }
 

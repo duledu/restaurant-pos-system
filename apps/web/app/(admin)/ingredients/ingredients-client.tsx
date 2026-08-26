@@ -21,11 +21,20 @@ interface Stock {
   currentStock: string;
   lowStockThreshold: string | null;
 }
+interface InventoryCategoryOption {
+  id: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+  isActive: boolean;
+}
 interface Ingredient {
   id: string;
   name: string;
   unit: Unit;
   category: string | null;
+  inventoryCategoryId: string | null;
+  inventoryCategory: { id: string; name: string; parent: { id: string; name: string } | null } | null;
   sku: string | null;
   isActive: boolean;
   stock: Stock | null;
@@ -78,11 +87,43 @@ async function apiFetch(url: string, options?: RequestInit) {
 
 // ─── Create ingredient form ─────────────────────────────────────────────────
 
-function CreateIngredientForm({ onCreated }: { onCreated: () => void }) {
+/** Flat list -> grouped <option>s, "KUHINJA / Meso" style labels for subcategories, top-level categories shown too (assignable directly, e.g. general "KUHINJA" items). */
+function CategorySelect({
+  categories,
+  value,
+  onChange,
+  className,
+}: {
+  categories: InventoryCategoryOption[];
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+}) {
+  const active = categories.filter((c) => c.isActive);
+  const byId = new Map(active.map((c) => [c.id, c]));
+  return (
+    <select className={className ?? inputClass} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Kategorija zaliha… (opciono)</option>
+      {active
+        .slice()
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+        .map((c) => {
+          const parent = c.parentId ? byId.get(c.parentId) : null;
+          return (
+            <option key={c.id} value={c.id}>
+              {parent ? `${parent.name} / ${c.name}` : c.name}
+            </option>
+          );
+        })}
+    </select>
+  );
+}
+
+function CreateIngredientForm({ categories, onCreated }: { categories: InventoryCategoryOption[]; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [unit, setUnit] = useState<Unit>("KILOGRAM");
-  const [category, setCategory] = useState("");
+  const [inventoryCategoryId, setInventoryCategoryId] = useState("");
   const [sku, setSku] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
@@ -94,9 +135,9 @@ function CreateIngredientForm({ onCreated }: { onCreated: () => void }) {
     try {
       await apiFetch("/api/admin/ingredients", {
         method: "POST",
-        body: JSON.stringify({ name, unit, category: category || undefined, sku: sku || undefined }),
+        body: JSON.stringify({ name, unit, inventoryCategoryId: inventoryCategoryId || undefined, sku: sku || undefined }),
       });
-      setName(""); setCategory(""); setSku(""); setOpen(false);
+      setName(""); setInventoryCategoryId(""); setSku(""); setOpen(false);
       onCreated();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Greška");
@@ -113,13 +154,13 @@ function CreateIngredientForm({ onCreated }: { onCreated: () => void }) {
     <Card className="p-4">
       <p className="mb-3 text-sm font-semibold text-ink">Nova sirovina</p>
       <div className="grid gap-2 sm:grid-cols-2">
-        <input className={inputClass} placeholder="Naziv (npr. Mleveno meso)" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className={inputClass} placeholder="Naziv (npr. Biftek)" value={name} onChange={(e) => setName(e.target.value)} />
         <select className={inputClass} value={unit} onChange={(e) => setUnit(e.target.value as Unit)}>
           {UNITS.map((u) => (
             <option key={u} value={u}>{UNIT_LABELS[u]}</option>
           ))}
         </select>
-        <input className={inputClass} placeholder="Kategorija (opciono, npr. Meso)" value={category} onChange={(e) => setCategory(e.target.value)} />
+        <CategorySelect categories={categories} value={inventoryCategoryId} onChange={setInventoryCategoryId} />
         <input className={inputClass} placeholder="Šifra (opciono)" value={sku} onChange={(e) => setSku(e.target.value)} />
       </div>
       {err && <p className="mt-2 text-xs text-danger">{err}</p>}
@@ -287,10 +328,20 @@ function StockPanel({ ingredient, locationId, onChanged }: { ingredient: Ingredi
 
 // ─── Row ─────────────────────────────────────────────────────────────────────
 
-function IngredientRow({ ingredient, locationId, onChanged }: { ingredient: Ingredient; locationId: string; onChanged: () => void }) {
+function IngredientRow({
+  ingredient,
+  locationId,
+  categories,
+  onChanged,
+}: {
+  ingredient: Ingredient;
+  locationId: string;
+  categories: InventoryCategoryOption[];
+  onChanged: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(ingredient.name);
-  const [category, setCategory] = useState(ingredient.category ?? "");
+  const [inventoryCategoryId, setInventoryCategoryId] = useState(ingredient.inventoryCategoryId ?? "");
   const [err, setErr] = useState("");
 
   const status = stockStatus(ingredient.stock);
@@ -305,7 +356,7 @@ function IngredientRow({ ingredient, locationId, onChanged }: { ingredient: Ingr
     try {
       await apiFetch(`/api/admin/ingredients/${ingredient.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name, category: category || null }),
+        body: JSON.stringify({ name, inventoryCategoryId: inventoryCategoryId || null }),
       });
       setEditing(false);
       onChanged();
@@ -325,7 +376,7 @@ function IngredientRow({ ingredient, locationId, onChanged }: { ingredient: Ingr
           {editing ? (
             <div className="flex flex-wrap gap-2">
               <input className={`${inputClass} w-48`} value={name} onChange={(e) => setName(e.target.value)} />
-              <input className={`${inputClass} w-40`} placeholder="Kategorija" value={category} onChange={(e) => setCategory(e.target.value)} />
+              <CategorySelect categories={categories} value={inventoryCategoryId} onChange={setInventoryCategoryId} className={`${inputClass} w-56`} />
               <Button size="sm" onClick={saveEdit}>Sačuvaj</Button>
               <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Otkaži</Button>
               {err && <p className="w-full text-xs text-danger">{err}</p>}
@@ -334,7 +385,13 @@ function IngredientRow({ ingredient, locationId, onChanged }: { ingredient: Ingr
             <div className="flex flex-wrap items-center gap-2">
               <p className="font-semibold text-ink">{ingredient.name}</p>
               <Badge tone="gold">{UNIT_LABELS[ingredient.unit]}</Badge>
-              {ingredient.category && <Badge>{ingredient.category}</Badge>}
+              {ingredient.inventoryCategory ? (
+                <Badge>
+                  {ingredient.inventoryCategory.parent ? `${ingredient.inventoryCategory.parent.name} / ${ingredient.inventoryCategory.name}` : ingredient.inventoryCategory.name}
+                </Badge>
+              ) : (
+                <Badge tone="neutral">Nekategorisano</Badge>
+              )}
               {!ingredient.isActive && <Badge tone="neutral">Neaktivna</Badge>}
               {statusBadge}
               {ingredient.stock && (
@@ -357,23 +414,49 @@ function IngredientRow({ ingredient, locationId, onChanged }: { ingredient: Ingr
   );
 }
 
+// ─── TabPill ──────────────────────────────────────────────────────────────────
+
+function TabPill({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count?: number }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+        active ? "border-gold bg-gold-soft text-gold-dark" : "border-line text-inkSoft hover:bg-cream-200/60"
+      }`}
+    >
+      {label}
+      {count !== undefined && <span className="text-[10px] opacity-70">{count}</span>}
+    </button>
+  );
+}
+
 // ─── Main client ─────────────────────────────────────────────────────────────
 
 export function IngredientsClient() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [locationId, setLocationId] = useState("");
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [categories, setCategories] = useState<InventoryCategoryOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showInactive, setShowInactive] = useState(false);
+  const [activeTopId, setActiveTopId] = useState<string | null>(null);
+  const [activeSubId, setActiveSubId] = useState<string | null>(null);
+  const [seeding, setSeeding] = useState(false);
 
-  const load = useCallback(async (loc: string) => {
+  const loadCategories = useCallback(async () => {
+    const j = await apiFetch("/api/admin/inventory-categories");
+    setCategories(j.categories ?? []);
+  }, []);
+
+  const load = useCallback(async (loc: string, categoryId: string | null) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
       if (loc) params.set("locationId", loc);
       if (search) params.set("search", search);
       if (!showInactive) params.set("activeOnly", "true");
+      if (categoryId) params.set("inventoryCategoryId", categoryId);
       const j = await apiFetch(`/api/admin/ingredients?${params.toString()}`);
       setIngredients(j.ingredients ?? []);
     } finally {
@@ -381,29 +464,76 @@ export function IngredientsClient() {
     }
   }, [search, showInactive]);
 
+  const effectiveCategoryId = activeSubId ?? activeTopId;
+
   useEffect(() => {
+    loadCategories();
     apiFetch("/api/admin/locations").then((j) => {
       const locs: Location[] = j.locations ?? [];
       setLocations(locs);
       const first = locs[0]?.id ?? "";
       setLocationId(first);
-      load(first);
+      load(first, null);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (locationId) load(locationId);
+    if (locationId) load(locationId, effectiveCategoryId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationId, search, showInactive]);
+  }, [locationId, search, showInactive, effectiveCategoryId]);
+
+  async function seedDefaults() {
+    setSeeding(true);
+    try {
+      await apiFetch("/api/admin/inventory-categories/seed-defaults", { method: "POST" });
+      await loadCategories();
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  const topCategories = categories.filter((c) => c.parentId === null && c.isActive).sort((a, b) => a.sortOrder - b.sortOrder);
+  const subCategories = activeTopId
+    ? categories.filter((c) => c.parentId === activeTopId && c.isActive).sort((a, b) => a.sortOrder - b.sortOrder)
+    : [];
+
+  function selectTop(id: string | null) {
+    setActiveTopId((prev) => (prev === id ? null : id));
+    setActiveSubId(null);
+  }
 
   return (
     <div>
       <PageHeader
-        title="Sirovine"
-        description="Sirovinski lager za normative (recepture) — odvojeno od zaliha gotovih artikala."
-        actions={<CreateIngredientForm onCreated={() => load(locationId)} />}
+        title="Sirovine / Zalihe"
+        description="Fizička zaliha sirovina (KUHINJA / ŠANK) za normative (recepture) — odvojeno od zaliha gotovih artikala i od menija."
+        actions={
+          <>
+            <Button size="sm" variant="ghost" onClick={seedDefaults} disabled={seeding}>
+              {seeding ? "Podešavanje…" : "Podesi KUHINJA/ŠANK kategorije"}
+            </Button>
+            <CreateIngredientForm categories={categories} onCreated={() => load(locationId, effectiveCategoryId)} />
+          </>
+        }
       />
+
+      {topCategories.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          <TabPill active={activeTopId === null} onClick={() => selectTop(null)} label="Sve kategorije" />
+          {topCategories.map((c) => (
+            <TabPill key={c.id} active={activeTopId === c.id} onClick={() => selectTop(c.id)} label={c.name} />
+          ))}
+        </div>
+      )}
+      {subCategories.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-1.5 border-l-2 border-line/60 pl-2">
+          <TabPill active={activeSubId === null} onClick={() => setActiveSubId(null)} label={`Sve (${topCategories.find((c) => c.id === activeTopId)?.name ?? ""})`} />
+          {subCategories.map((c) => (
+            <TabPill key={c.id} active={activeSubId === c.id} onClick={() => setActiveSubId((prev) => (prev === c.id ? null : c.id))} label={c.name} />
+          ))}
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <select className={`${inputClass} w-56`} value={locationId} onChange={(e) => setLocationId(e.target.value)}>
@@ -429,7 +559,7 @@ export function IngredientsClient() {
       ) : (
         <div className="space-y-2">
           {ingredients.map((i) => (
-            <IngredientRow key={i.id} ingredient={i} locationId={locationId} onChanged={() => load(locationId)} />
+            <IngredientRow key={i.id} ingredient={i} locationId={locationId} categories={categories} onChanged={() => load(locationId, effectiveCategoryId)} />
           ))}
         </div>
       )}

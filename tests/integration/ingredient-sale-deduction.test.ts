@@ -258,30 +258,42 @@ describe("Insufficient stock: single shortage, multiple shortages, atomicity", (
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
-    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.3);
+    // P1.4: seeded with ENOUGH stock so add/submit succeed (that layer is
+    // now covered separately in recipe-availability.test.ts) — then the
+    // stock is depleted via an admin write-off AFTER submit, simulating the
+    // realistic race this test is actually about: stock changing between
+    // submit and payment. Payment must still be the final authority.
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.5);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
 
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 2 }); // needs 0.4, have 0.3
+    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 2 }); // needs 0.4, have 0.5 — passes at add-time
     const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    const meatStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
+    await ingredients.writeOffStock(owner, meatStockRow.id, { quantity: 0.2, reason: "Kvar" }); // 0.5 -> 0.3, now short of the 0.4 needed
 
     await expect(billing.completePayment(waiter, submitted.id, { method: "CASH" })).rejects.toThrow(
       "Nema dovoljno sirovina"
     );
 
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBe(0.3); // NETAKNUTO
+    expect(Number(stock.currentStock)).toBe(0.3); // NETAKNUTO (osim write-off-a iznad)
   });
 
   it("reports ALL shortages at once, and deducts NOTHING when even one ingredient is short (atomicity)", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Burger");
-    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10); // plenty
-    const onion = await seedIngredient(owner, fixture, "Luk", "KILOGRAM", 0.01); // short
-    const bun = await seedIngredient(owner, fixture, "Lepinja", "PIECE", 0); // short
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10); // stays plenty throughout
+    // P1.4: onion/bun seeded with ENOUGH stock so add/submit succeed, then
+    // depleted via admin write-offs AFTER submit — same race-simulation
+    // pattern as the single-shortage test above (add/submit-time blocking
+    // is covered separately in recipe-availability.test.ts).
+    const onion = await seedIngredient(owner, fixture, "Luk", "KILOGRAM", 0.1);
+    const bun = await seedIngredient(owner, fixture, "Lepinja", "PIECE", 2);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
     await recipes.addRecipeLine(owner, item.id, { ingredientId: onion.id, quantity: 0.05 });
     await recipes.addRecipeLine(owner, item.id, { ingredientId: bun.id, quantity: 1 });
@@ -289,8 +301,13 @@ describe("Insufficient stock: single shortage, multiple shortages, atomicity", (
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 });
+    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 }); // passes: 0.2/0.05/1 all sufficient
     const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    const onionStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: onion.id, locationId: fixture.locationId } });
+    await ingredients.writeOffStock(owner, onionStockRow.id, { quantity: 0.09, reason: "Kvar" }); // 0.1 -> 0.01, short of 0.05
+    const bunStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: bun.id, locationId: fixture.locationId } });
+    await ingredients.writeOffStock(owner, bunStockRow.id, { quantity: 2, reason: "Kvar" }); // 2 -> 0, short of 1
 
     let caught: unknown;
     try {
@@ -781,14 +798,20 @@ describe("Rollback integrity: insufficient ingredients rolls back the ENTIRE pay
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
-    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.1);
+    // P1.4: seeded with enough stock for add/submit to succeed, then
+    // depleted via an admin write-off AFTER submit (race-simulation
+    // pattern, same as the earlier tests in this file).
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.3);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
 
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 });
+    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 }); // needs 0.2, have 0.3 — passes
     const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    const meatStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
+    await ingredients.writeOffStock(owner, meatStockRow.id, { quantity: 0.2, reason: "Kvar" }); // 0.3 -> 0.1, now short of 0.2
 
     await expect(billing.completePayment(waiter, submitted.id, { method: "CASH" })).rejects.toThrow(
       ingredients.InsufficientIngredientStockError

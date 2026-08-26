@@ -34,6 +34,11 @@ interface MenuItemStock {
   minimumStock: string | null;
   stockStatus: "OUT" | "LOW" | "OK" | null;
 }
+interface RecipeAvailability {
+  status: "AVAILABLE" | "LOW" | "OUT";
+  availablePortions: number;
+  limitingIngredientName: string | null;
+}
 interface MenuItem {
   id: string;
   name: string;
@@ -45,6 +50,12 @@ interface MenuItem {
   // P3.3: prisutno SAMO kad je meni zatražen sa locationId (vidi load()
   // ispod) — null dok se ne učita, nikad se ne tumači kao OUT.
   stock: MenuItemStock | null;
+  // P1.4: recepturisan (sirovinski) artikal — prisutno SAMO za artikle sa
+  // konfigurisanim normativom, isto "null = ne primenjuje se" pravilo kao
+  // stock. Nikad oba polja istovremeno smisleno "aktivna" (recepturisan
+  // artikal ima trackStock isključen — vidi inventory-service.ts double-
+  // deduction odbranu), ali oba se čitaju nezavisno radi jasnoće.
+  recipeAvailability: RecipeAvailability | null;
 }
 interface OrderItemModifier {
   id: string;
@@ -567,6 +578,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
       setError(`${item.name} — nema na zalihama.`);
       return;
     }
+    if (item.recipeAvailability?.status === "OUT") {
+      const limiting = item.recipeAvailability.limitingIngredientName;
+      setError(limiting ? `${item.name} — nema dovoljno sirovina (${limiting}).` : `${item.name} — nema dovoljno sirovina.`);
+      return;
+    }
     if (item.modifierGroups.length === 0) {
       addItemWithModifiers(item.id, []);
     } else {
@@ -773,8 +789,13 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
         <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
           {visibleItems.map((item) => {
-            const isOut = item.stock?.stockStatus === "OUT";
-            const isLow = item.stock?.stockStatus === "LOW";
+            const isOut = item.stock?.stockStatus === "OUT" || item.recipeAvailability?.status === "OUT";
+            const isLow = item.stock?.stockStatus === "LOW" || item.recipeAvailability?.status === "LOW";
+            // Recepturisan artikal nema sopstveni "trenutno stanje" broj —
+            // ima izračunate porcije (ograničavajuća sirovina), zato
+            // dobija sopstveni jasan tekst umesto formatStockQty (koji
+            // pretpostavlja InventoryItem.currentStock).
+            const isRecipeItem = item.recipeAvailability !== null;
             return (
               <button
                 key={item.id}
@@ -795,12 +816,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   </span>
                   {isOut && (
                     <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-semibold text-danger">
-                      Nema na zalihama
+                      {isRecipeItem
+                        ? item.recipeAvailability!.limitingIngredientName
+                          ? `Nema dovoljno sirovina — ${item.recipeAvailability!.limitingIngredientName}`
+                          : "Nema dovoljno sirovina"
+                        : "Nema na zalihama"}
                     </span>
                   )}
-                  {isLow && (
+                  {isLow && !isOut && (
                     <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[10px] font-semibold text-warn">
-                      Još {formatStockQty(item.stock!.currentStock ?? "0")}
+                      {isRecipeItem ? `Još ${item.recipeAvailability!.availablePortions} porcija` : `Još ${formatStockQty(item.stock!.currentStock ?? "0")}`}
                     </span>
                   )}
                 </div>

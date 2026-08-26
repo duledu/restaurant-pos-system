@@ -45,11 +45,21 @@ export class InsufficientIngredientStockError extends Error {
 
 // ─── Create / read ──────────────────────────────────────────────────────────
 
+async function assertOwnedActiveInventoryCategory(ctx: AuthContext, inventoryCategoryId: string) {
+  const category = await prisma.inventoryCategory.findFirst({
+    where: { id: inventoryCategoryId, restaurantId: ctx.restaurantId },
+  });
+  if (!category) throw new Error("Kategorija zaliha nije pronađena");
+  if (!category.isActive) throw new Error("Kategorija zaliha je deaktivirana");
+}
+
 export interface CreateIngredientInput {
   name: string;
   unit: UnitOfMeasure;
   category?: string;
   sku?: string;
+  /** P1.5: KUHINJA/ŠANK -> podkategorija dodela (InventoryCategory) — opciono na kreiranju. */
+  inventoryCategoryId?: string;
 }
 
 export async function createIngredient(ctx: AuthContext, input: CreateIngredientInput) {
@@ -59,6 +69,7 @@ export async function createIngredient(ctx: AuthContext, input: CreateIngredient
   if (!name) throw new Error("Naziv sirovine je obavezan");
   if (name.length > 120) throw new Error("Naziv sirovine je predugačak (max 120 znakova)");
   if (!ALL_UNITS.includes(input.unit)) throw new Error("Nepoznata jedinica mere");
+  if (input.inventoryCategoryId) await assertOwnedActiveInventoryCategory(ctx, input.inventoryCategoryId);
 
   const ingredient = await prisma.ingredient.create({
     data: {
@@ -67,6 +78,7 @@ export async function createIngredient(ctx: AuthContext, input: CreateIngredient
       unit: input.unit,
       category: input.category?.trim() || null,
       sku: input.sku?.trim() || null,
+      inventoryCategoryId: input.inventoryCategoryId ?? null,
     },
   });
 
@@ -74,7 +86,7 @@ export async function createIngredient(ctx: AuthContext, input: CreateIngredient
     entityType: "Ingredient",
     entityId: ingredient.id,
     action: "ingredient.created",
-    newValue: { name, unit: input.unit, category: input.category, sku: input.sku },
+    newValue: { name, unit: input.unit, category: input.category, sku: input.sku, inventoryCategoryId: input.inventoryCategoryId ?? null },
   });
 
   return ingredient;
@@ -85,6 +97,7 @@ export interface UpdateIngredientInput {
   unit?: UnitOfMeasure;
   category?: string | null;
   sku?: string | null;
+  inventoryCategoryId?: string | null;
 }
 
 export async function updateIngredient(ctx: AuthContext, ingredientId: string, input: UpdateIngredientInput) {
@@ -107,6 +120,12 @@ export async function updateIngredient(ctx: AuthContext, ingredientId: string, i
   }
   if (input.category !== undefined) data.category = input.category?.trim() || null;
   if (input.sku !== undefined) data.sku = input.sku?.trim() || null;
+  if (input.inventoryCategoryId !== undefined) {
+    if (input.inventoryCategoryId) await assertOwnedActiveInventoryCategory(ctx, input.inventoryCategoryId);
+    data.inventoryCategory = input.inventoryCategoryId
+      ? { connect: { id: input.inventoryCategoryId } }
+      : { disconnect: true };
+  }
 
   const updated = await prisma.ingredient.update({ where: { id: ingredientId }, data });
 
@@ -114,7 +133,7 @@ export async function updateIngredient(ctx: AuthContext, ingredientId: string, i
     entityType: "Ingredient",
     entityId: ingredientId,
     action: "ingredient.updated",
-    previousValue: { name: ingredient.name, unit: ingredient.unit, category: ingredient.category, sku: ingredient.sku },
+    previousValue: { name: ingredient.name, unit: ingredient.unit, category: ingredient.category, sku: ingredient.sku, inventoryCategoryId: ingredient.inventoryCategoryId },
     newValue: input,
   });
 
@@ -167,25 +186,41 @@ export async function activateIngredient(ctx: AuthContext, ingredientId: string)
 export interface ListIngredientsFilter {
   search?: string;
   activeOnly?: boolean;
+  /** Legacy free-text category field (kept for backward compat, unused by the P1.5 UI). */
   category?: string;
+  /** P1.5: filter by an InventoryCategory id — matches that category OR any of its children (so filtering by "KUHINJA" also returns items filed under "KUHINJA > Meso" etc). */
+  inventoryCategoryId?: string;
 }
 
 /**
  * Lista sirovina + (opciono) stanje na JEDNOJ lokaciji, u dva upita ukupno
  * bez obzira na broj sirovina — isti "batch, ne po-artiklu" obrazac kao
- * getStockStatusForMenuItems u inventory-service.ts.
+ * getStockStatusForMenuItems u inventory-service.ts. Uključuje
+ * inventoryCategory (+ parent, radi KUHINJA/ŠANK oznake) u ISTOM upitu —
+ * nema dodatne rundu po sirovini.
  */
 export async function listIngredients(ctx: AuthContext, locationId: string | undefined, filter: ListIngredientsFilter = {}) {
   requirePermission(ctx, "inventory.view");
   if (locationId) requireLocationAccess(ctx, locationId);
+
+  let categoryIdFilter: { in: string[] } | undefined;
+  if (filter.inventoryCategoryId) {
+    const children = await prisma.inventoryCategory.findMany({
+      where: { restaurantId: ctx.restaurantId, parentId: filter.inventoryCategoryId },
+      select: { id: true },
+    });
+    categoryIdFilter = { in: [filter.inventoryCategoryId, ...children.map((c) => c.id)] };
+  }
 
   const ingredients = await prisma.ingredient.findMany({
     where: {
       restaurantId: ctx.restaurantId,
       ...(filter.activeOnly ? { isActive: true } : {}),
       ...(filter.category ? { category: filter.category } : {}),
+      ...(categoryIdFilter ? { inventoryCategoryId: categoryIdFilter } : {}),
       ...(filter.search ? { name: { contains: filter.search, mode: "insensitive" } } : {}),
     },
+    include: { inventoryCategory: { include: { parent: true } } },
     orderBy: { name: "asc" },
   });
 
@@ -504,6 +539,88 @@ async function applyDelta(
  * kompletan istorijski zapis — nije potrebna posebna "recipe snapshot"
  * tabela.
  */
+interface IngredientRequirement {
+  ingredientId: string;
+  name: string;
+  unit: UnitOfMeasure;
+  required: Prisma.Decimal;
+}
+
+/**
+ * Agregira potrebnu količinu PO SIROVINI preko datog skupa (menuItemId ->
+ * tražena količina artikla), iz TRENUTNE recepture (MenuItemIngredient) —
+ * jedan upit bez obzira na broj artikala. Deljena osnova za
+ * validateAndDecrementIngredientsInTx (naplata) I assertIngredientStockAvailable
+ * (predpregled/submit) — ISTA matematika na oba mesta, namerno (P1.4).
+ *
+ * Artikli bez recepture (nema redova) se tiho ne pojavljuju u rezultatu —
+ * ne postoji "delimično definisana receptura" greška. Neaktivna sirovina i
+ * dalje učestvuje ako je već u recepturi (P1.2 §13) — deaktivacija sprečava
+ * NOVU upotrebu, ne menja postojeće recepture koje je već referenciraju.
+ */
+async function computeRequiredIngredients(
+  db: Prisma.TransactionClient | typeof prisma,
+  qtyByMenuItem: Map<string, number>
+): Promise<Map<string, IngredientRequirement>> {
+  const requiredByIngredient = new Map<string, IngredientRequirement>();
+  if (qtyByMenuItem.size === 0) return requiredByIngredient;
+
+  const recipeLines = await db.menuItemIngredient.findMany({
+    where: { menuItemId: { in: [...qtyByMenuItem.keys()] } },
+    include: { ingredient: true },
+  });
+
+  for (const line of recipeLines) {
+    const qty = qtyByMenuItem.get(line.menuItemId);
+    if (!qty) continue;
+    const need = new Prisma.Decimal(line.quantity).mul(qty);
+    const existing = requiredByIngredient.get(line.ingredientId);
+    if (existing) {
+      existing.required = existing.required.add(need);
+    } else {
+      requiredByIngredient.set(line.ingredientId, {
+        ingredientId: line.ingredientId,
+        name: line.ingredient.name,
+        unit: line.ingredient.unit,
+        required: need,
+      });
+    }
+  }
+  return requiredByIngredient;
+}
+
+/**
+ * Read-only provera nedostataka za dati skup potreba naspram
+ * IngredientStock — jedan upit bez obzira na broj sirovina. NIKAD ne
+ * mutira. Deljeno između validateAndDecrementIngredientsInTx (korak 4, PRE
+ * mutacije) i assertIngredientStockAvailable (kompletna provera).
+ */
+async function findIngredientShortages(
+  db: Prisma.TransactionClient | typeof prisma,
+  restaurantId: string,
+  locationId: string,
+  requiredByIngredient: Map<string, IngredientRequirement>
+) {
+  const ingredientIds = [...requiredByIngredient.keys()];
+  const stocks =
+    ingredientIds.length > 0
+      ? await db.ingredientStock.findMany({
+          where: { restaurantId, locationId, ingredientId: { in: ingredientIds } },
+        })
+      : [];
+  const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
+
+  const shortages: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }> = [];
+  for (const req of requiredByIngredient.values()) {
+    const stock = stockByIngredient.get(req.ingredientId);
+    const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
+    if (available.lessThan(req.required)) {
+      shortages.push({ name: req.name, available: available.toString(), required: req.required.toString(), unit: req.unit });
+    }
+  }
+  return { shortages, stockByIngredient };
+}
+
 export async function validateAndDecrementIngredientsInTx(
   tx: Prisma.TransactionClient,
   input: {
@@ -521,42 +638,8 @@ export async function validateAndDecrementIngredientsInTx(
   }
   if (soldQtyByMenuItem.size === 0) return;
 
-  const menuItemIds = [...soldQtyByMenuItem.keys()];
-
-  // Jedan upit za recepture SVIH prodatih artikala (batch, ne po-artiklu).
-  const recipeLines = await tx.menuItemIngredient.findMany({
-    where: { menuItemId: { in: menuItemIds } },
-    include: { ingredient: true },
-  });
-  if (recipeLines.length === 0) return; // nijedan prodat artikal nema definisan normativ
-
-  interface Requirement {
-    ingredientId: string;
-    name: string;
-    unit: UnitOfMeasure;
-    required: Prisma.Decimal;
-  }
-  const requiredByIngredient = new Map<string, Requirement>();
-  for (const line of recipeLines) {
-    const soldQty = soldQtyByMenuItem.get(line.menuItemId);
-    if (!soldQty) continue;
-    // Neaktivna sirovina i dalje učestvuje ako je već u recepturi (P1.2 §13)
-    // — deaktivacija sprečava NOVU upotrebu (u recipe-service.ts UI-u), ne
-    // menja postojeće recepture koje je već referenciraju.
-    const need = new Prisma.Decimal(line.quantity).mul(soldQty);
-    const existing = requiredByIngredient.get(line.ingredientId);
-    if (existing) {
-      existing.required = existing.required.add(need);
-    } else {
-      requiredByIngredient.set(line.ingredientId, {
-        ingredientId: line.ingredientId,
-        name: line.ingredient.name,
-        unit: line.ingredient.unit,
-        required: need,
-      });
-    }
-  }
-  if (requiredByIngredient.size === 0) return;
+  const requiredByIngredient = await computeRequiredIngredients(tx, soldQtyByMenuItem);
+  if (requiredByIngredient.size === 0) return; // nijedan prodat artikal nema definisan normativ
 
   // Idempotency: preskoči sirovine koje već imaju SALE kretanje za OVAJ
   // paymentId (defense-in-depth — vidi napomenu iznad funkcije).
@@ -569,21 +652,8 @@ export async function validateAndDecrementIngredientsInTx(
   }
   if (requiredByIngredient.size === 0) return; // sve već obrađeno za ovaj payment (retry no-op)
 
-  const ingredientIds = [...requiredByIngredient.keys()];
-  const stocks = await tx.ingredientStock.findMany({
-    where: { restaurantId: input.restaurantId, locationId: input.locationId, ingredientId: { in: ingredientIds } },
-  });
-  const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
-
   // Korak 4 — read-only provera SVIH sirovina PRE bilo kakve mutacije.
-  const shortages: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }> = [];
-  for (const req of requiredByIngredient.values()) {
-    const stock = stockByIngredient.get(req.ingredientId);
-    const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
-    if (available.lessThan(req.required)) {
-      shortages.push({ name: req.name, available: available.toString(), required: req.required.toString(), unit: req.unit });
-    }
-  }
+  const { shortages, stockByIngredient } = await findIngredientShortages(tx, input.restaurantId, input.locationId, requiredByIngredient);
   if (shortages.length > 0) {
     throw new InsufficientIngredientStockError(shortages);
   }
@@ -656,4 +726,135 @@ export async function decrementIngredientsOnSale(input: {
   await prisma.$transaction(async (tx) => {
     await validateAndDecrementIngredientsInTx(tx, input);
   });
+}
+
+// ─── P1.4: Waiter availability — recipe-produced items ─────────────────────
+
+export interface IngredientAvailabilityRequirement {
+  menuItemId: string;
+  name: string;
+  quantity: number;
+}
+
+/**
+ * Read-only pre-check — the ingredient/recipe-side twin of
+ * inventory-service.ts assertStockAvailable, called ALONGSIDE it (not
+ * instead of) from order-service.ts addItem/updateItem/submitOrder. NEVER
+ * mutates IngredientStock — that remains exclusively
+ * validateAndDecrementIngredientsInTx's job at Payment (P1.4 requirement:
+ * do not move deduction earlier).
+ *
+ * Aggregates by menuItemId FIRST (same reason as assertStockAvailable: two
+ * lines of the same item with different modifiers must sum before
+ * checking), then computeRequiredIngredients aggregates AGAIN by
+ * ingredient across every recipe-produced item in the requirement set —
+ * two different menu items sharing an ingredient (e.g. Omlet + Omlet sa
+ * sirom both needing eggs) correctly combine into one demand figure
+ * instead of being checked independently against the same starting stock.
+ *
+ * Items with no configured recipe are silently absent from
+ * computeRequiredIngredients's result — this function only ever concerns
+ * itself with recipe-governed items, symmetric with the double-deduction
+ * defense in inventory-service.ts (a configured recipe always wins, and
+ * conversely direct-stock items are never touched here).
+ */
+export async function assertIngredientStockAvailable(
+  db: Prisma.TransactionClient | typeof prisma,
+  input: { restaurantId: string; locationId: string; requirements: IngredientAvailabilityRequirement[] }
+): Promise<void> {
+  const qtyByMenuItem = new Map<string, number>();
+  for (const r of input.requirements) {
+    qtyByMenuItem.set(r.menuItemId, (qtyByMenuItem.get(r.menuItemId) ?? 0) + r.quantity);
+  }
+  if (qtyByMenuItem.size === 0) return;
+
+  const requiredByIngredient = await computeRequiredIngredients(db, qtyByMenuItem);
+  if (requiredByIngredient.size === 0) return; // none of these items has a configured recipe
+
+  const { shortages } = await findIngredientShortages(db, input.restaurantId, input.locationId, requiredByIngredient);
+  if (shortages.length > 0) {
+    throw new InsufficientIngredientStockError(shortages);
+  }
+}
+
+export type RecipeAvailabilityStatus = "AVAILABLE" | "LOW" | "OUT";
+
+export interface RecipeAvailabilityInfo {
+  status: RecipeAvailabilityStatus;
+  /** floor(min over recipe lines of currentStock / lineQuantity), never negative. */
+  availablePortions: number;
+  /** Name of the ingredient constraining availablePortions — always set when the item has a recipe. */
+  limitingIngredientName: string | null;
+}
+
+/**
+ * Batch-computes DISPLAY availability (menu badges) for recipe-produced
+ * items among the given MenuItemIds at ONE location — two queries total
+ * regardless of item count (recipe lines, then ingredient stocks),
+ * matching the existing getStockStatusForMenuItems "batch, not per-item"
+ * pattern exactly. This is advisory display data only — it answers "how
+ * many portions could I sell right now", NOT a specific requested
+ * quantity (that's assertIngredientStockAvailable's job).
+ *
+ * Only MenuItemIds that currently have at least one recipe line appear in
+ * the returned map — direct-stock/untracked items are simply absent, and
+ * the caller (menu-service.ts listMenuItems) treats "no entry" as "not
+ * recipe-governed", the same convention getStockStatusForMenuItems already
+ * uses for trackStock=false.
+ *
+ * LOW status reuses the ALREADY-EXISTING IngredientStock.lowStockThreshold
+ * (the same field the Sirovine admin page already surfaces) on the
+ * limiting ingredient — deliberately not an invented portions-count
+ * threshold, per the explicit instruction to reuse a real mechanism or
+ * skip LOW rather than guess one.
+ */
+export async function getRecipeAvailabilityForMenuItems(
+  restaurantId: string,
+  locationId: string,
+  menuItemIds: string[]
+): Promise<Map<string, RecipeAvailabilityInfo>> {
+  const result = new Map<string, RecipeAvailabilityInfo>();
+  if (menuItemIds.length === 0) return result;
+
+  const recipeLines = await prisma.menuItemIngredient.findMany({
+    where: { menuItemId: { in: menuItemIds } },
+    include: { ingredient: true },
+  });
+  if (recipeLines.length === 0) return result;
+
+  const linesByMenuItem = new Map<string, typeof recipeLines>();
+  for (const line of recipeLines) {
+    const list = linesByMenuItem.get(line.menuItemId) ?? [];
+    list.push(line);
+    linesByMenuItem.set(line.menuItemId, list);
+  }
+
+  const ingredientIds = [...new Set(recipeLines.map((l) => l.ingredientId))];
+  const stocks = await prisma.ingredientStock.findMany({
+    where: { restaurantId, locationId, ingredientId: { in: ingredientIds } },
+  });
+  const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
+
+  for (const [menuItemId, lines] of linesByMenuItem) {
+    let availablePortions = Infinity;
+    let limitingName: string | null = null;
+    let limitingIsLow = false;
+    for (const line of lines) {
+      const stock = stockByIngredient.get(line.ingredientId);
+      const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
+      const perPortion = new Prisma.Decimal(line.quantity);
+      const possible = Math.floor(available.div(perPortion).toNumber());
+      if (possible < availablePortions) {
+        availablePortions = possible;
+        limitingName = line.ingredient.name;
+        const threshold = stock?.lowStockThreshold != null ? new Prisma.Decimal(stock.lowStockThreshold) : null;
+        limitingIsLow = threshold != null && available.lessThanOrEqualTo(threshold);
+      }
+    }
+    availablePortions = Math.max(0, availablePortions);
+    const status: RecipeAvailabilityStatus = availablePortions <= 0 ? "OUT" : limitingIsLow ? "LOW" : "AVAILABLE";
+    result.set(menuItemId, { status, availablePortions, limitingIngredientName: limitingName });
+  }
+
+  return result;
 }

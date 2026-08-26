@@ -2,6 +2,7 @@ import { prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { getStockStatusForMenuItems } from "../inventory/inventory-service";
+import { getRecipeAvailabilityForMenuItems } from "../inventory/ingredient-service";
 import type {
   CreateCategoryInput,
   UpdateCategoryInput,
@@ -162,10 +163,19 @@ export async function listMenuItems(ctx: AuthContext, filters: MenuItemFilters =
 
   if (!filters.locationId) return items;
 
-  // JEDAN dodatni batch-ovan upit za SVE artikle odjednom (specifikacija
-  // #16/#50/#73) — ne po artiklu.
-  const stockByItem = await getStockStatusForMenuItems(ctx.restaurantId, filters.locationId, items.map((i) => i.id));
-  return items.map((item) => ({ ...item, stock: stockByItem.get(item.id) ?? null }));
+  // P1.4: dva batch-ovana upita paralelno (finished-goods status +
+  // recepturisana dostupnost), oba "batch, ne po artiklu" (specifikacija
+  // #16/#50/#73). Potpuno aditivno polje — item.stock ostaje nepromenjeno
+  // za SVAKI postojeći poziv, recipeAvailability je novo, nezavisno polje.
+  const [stockByItem, recipeAvailabilityByItem] = await Promise.all([
+    getStockStatusForMenuItems(ctx.restaurantId, filters.locationId, items.map((i) => i.id)),
+    getRecipeAvailabilityForMenuItems(ctx.restaurantId, filters.locationId, items.map((i) => i.id)),
+  ]);
+  return items.map((item) => ({
+    ...item,
+    stock: stockByItem.get(item.id) ?? null,
+    recipeAvailability: recipeAvailabilityByItem.get(item.id) ?? null,
+  }));
 }
 
 export async function createMenuItem(ctx: AuthContext, input: CreateMenuItemInput) {

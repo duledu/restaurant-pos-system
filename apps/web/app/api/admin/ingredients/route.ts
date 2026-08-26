@@ -11,7 +11,8 @@ export const GET = withApiAuth(async (ctx, request) => {
   const search = searchParams.get("search") ?? undefined;
   const activeOnly = searchParams.get("activeOnly") === "true";
   const category = searchParams.get("category") ?? undefined;
-  const items = await ingredients.listIngredients(ctx, locationId, { search, activeOnly, category });
+  const inventoryCategoryId = searchParams.get("inventoryCategoryId") ?? undefined;
+  const items = await ingredients.listIngredients(ctx, locationId, { search, activeOnly, category, inventoryCategoryId });
   return NextResponse.json({ ingredients: items });
 });
 
@@ -20,6 +21,7 @@ const createSchema = z.object({
   unit: z.enum(UNITS),
   category: z.string().trim().max(60).optional(),
   sku: z.string().trim().max(60).optional(),
+  inventoryCategoryId: z.string().uuid().optional(),
 });
 
 export const POST = withApiAuth(async (ctx, request) => {

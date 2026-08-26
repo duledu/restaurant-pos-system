@@ -15,6 +15,7 @@ const updateSchema = z.object({
   unit: z.enum(UNITS).optional(),
   category: z.string().trim().max(60).nullable().optional(),
   sku: z.string().trim().max(60).nullable().optional(),
+  inventoryCategoryId: z.string().uuid().nullable().optional(),
 });
 
 export const PATCH = withApiAuth<{ id: string }>(async (ctx, request, { id }) => {

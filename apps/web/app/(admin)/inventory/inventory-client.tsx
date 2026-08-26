@@ -37,6 +37,11 @@ interface InventoryItem {
     // stavku kao "efektivno praćenu" samo kad je trackStock && !hasRecipe.
     hasRecipe: boolean;
     categoryId: string | null;
+    // P1.5: fizička kategorija ZALIHE (KUHINJA/ŠANK -> podkategorija) — samo
+    // za organizaciju ove liste, NIKAD za odbitak (i dalje isključivo
+    // trackStock/InventoryItem). Odvojeno od `categoryId` (MenuCategory).
+    inventoryCategoryId: string | null;
+    inventoryCategory: { id: string; name: string; parent: { id: string; name: string } | null } | null;
   };
   location: { id: string; name: string };
 }
@@ -293,6 +298,65 @@ function ThresholdModal({ item, onClose, onDone }: { item: InventoryItem; onClos
           {loading ? "Čuvanje…" : "Sačuvaj"}
         </Button>
       </div>
+    </Modal>
+  );
+}
+
+/**
+ * P1.5: dodeljuje INVENTORY (fizičku, KUHINJA/ŠANK) kategoriju direct-stock
+ * artiklu (npr. Coca-Cola -> ŠANK -> Sokovi) — čisto organizaciono, NIKAD
+ * ne utiče na trackStock/currentStock/odbitak (i dalje isključivo
+ * InventoryItem, nepromenjeno).
+ */
+function CategoryAssignModal({
+  item,
+  categories,
+  onClose,
+  onDone,
+}: {
+  item: InventoryItem;
+  categories: { id: string; name: string; parentId: string | null; isActive: boolean }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState(item.menuItem.inventoryCategoryId ?? "");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const active = categories.filter((c) => c.isActive);
+  const byId = new Map(active.map((c) => [c.id, c]));
+
+  async function save() {
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch(`/api/admin/menu/items/${item.menuItem.id}/inventory-category`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inventoryCategoryId: value || null }),
+      });
+      if (!res.ok) { const j = await res.json(); setErr(j.error ?? "Greška"); return; }
+      onDone();
+    } finally { setLoading(false); }
+  }
+
+  return (
+    <Modal title={`Kategorija zaliha — ${item.menuItem.name}`} onClose={onClose}>
+      <p className="mb-3 text-xs text-inkSoft">Organizuje ovaj artikal pod KUHINJA/ŠANK na listi zaliha — ne menja stanje niti odbitak pri prodaji.</p>
+      <select className={`mb-4 ${inputClass}`} value={value} onChange={(e) => setValue(e.target.value)}>
+        <option value="">Nekategorisano</option>
+        {active
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((c) => {
+            const parent = c.parentId ? byId.get(c.parentId) : null;
+            return (
+              <option key={c.id} value={c.id}>
+                {parent ? `${parent.name} / ${c.name}` : c.name}
+              </option>
+            );
+          })}
+      </select>
+      {err && <p className="mb-3 text-sm text-danger">{err}</p>}
+      <Button onClick={save} loading={loading} className="w-full">{loading ? "Čuvanje…" : "Sačuvaj"}</Button>
     </Modal>
   );
 }
@@ -694,6 +758,7 @@ type ModalState =
   | { type: "adjust"; item: InventoryItem }
   | { type: "movements"; item: InventoryItem }
   | { type: "threshold"; item: InventoryItem }
+  | { type: "category"; item: InventoryItem }
   | { type: "init" }
   | { type: "opening-stock" }
   | { type: "zero-all" }
@@ -706,6 +771,9 @@ const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 export function InventoryClient() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  // P1.5: fizička (KUHINJA/ŠANK) kategorija zaliha — NAMERNO odvojena
+  // promenljiva od `categories` (MenuCategory) iznad, da se ne pomešaju.
+  const [inventoryCategoryOptions, setInventoryCategoryOptions] = useState<{ id: string; name: string; parentId: string | null; isActive: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
   const [search, setSearch] = useState("");
@@ -731,6 +799,10 @@ export function InventoryClient() {
     fetch("/api/admin/menu/categories")
       .then(r => r.json())
       .then(j => setCategories(j.categories ?? []))
+      .catch(() => {});
+    fetch("/api/admin/inventory-categories")
+      .then(r => r.json())
+      .then(j => setInventoryCategoryOptions(j.categories ?? []))
       .catch(() => {});
   }, []);
 
@@ -905,6 +977,11 @@ export function InventoryClient() {
                         {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
                         {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
                         {!effectivelyTracked && item.menuItem.hasRecipe && <Badge tone="gold">Normativ aktivan</Badge>}
+                        {item.menuItem.inventoryCategory ? (
+                          <Badge tone="neutral">
+                            {item.menuItem.inventoryCategory.parent ? `${item.menuItem.inventoryCategory.parent.name} / ${item.menuItem.inventoryCategory.name}` : item.menuItem.inventoryCategory.name}
+                          </Badge>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3 text-inkSoft">{item.location.name}</td>
                       <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${stockCls}`}>
@@ -933,6 +1010,9 @@ export function InventoryClient() {
                           <button onClick={() => setModal({ type: "threshold", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
                             Prag
                           </button>
+                          <button onClick={() => setModal({ type: "category", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
+                            Kategorija
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -948,6 +1028,7 @@ export function InventoryClient() {
       {modal?.type === "adjust"     && <AdjustModal    item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "movements"  && <MovementsModal item={modal.item} onClose={() => setModal(null)} />}
       {modal?.type === "threshold"  && <ThresholdModal  item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
+      {modal?.type === "category"   && <CategoryAssignModal item={modal.item} categories={inventoryCategoryOptions} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "init"       && <InitModal               onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "opening-stock" && canOpeningStock && <OpeningStockModal onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "zero-all"      && canOpeningStock && <ZeroAllModal      onClose={() => setModal(null)} onDone={closeAndRefresh} />}

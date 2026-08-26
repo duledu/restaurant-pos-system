@@ -9,6 +9,7 @@ import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
 import { assertStockAvailable } from "../inventory/inventory-service";
+import { assertIngredientStockAvailable } from "../inventory/ingredient-service";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
 
 const ORDER_ITEM_INCLUDE = {
@@ -120,11 +121,24 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
   // assertStockAvailable). Ne tretira postojeće draft redove (ni ovog ni
   // drugih konobara) kao "rezervisanu" zalihu (specifikacija #8/#9/#10/#20)
   // — ovo je samo trenutna provera "da li je OVAJ zahtev razuman SADA".
-  await assertStockAvailable(prisma, {
-    restaurantId: ctx.restaurantId,
-    locationId: order.locationId,
-    requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
-  });
+  //
+  // P1.4: assertIngredientStockAvailable je NEZAVISNA provera za isti
+  // zahtev — svaka funkcija se tiho ne bavi artiklima izvan svog modela
+  // (assertStockAvailable ignoriše recepturisane artikle, ovo ignoriše
+  // artikle bez recepture), tačno simetrično double-deduction odbrani u
+  // completePayment-u. Paralelno, obe su read-only.
+  await Promise.all([
+    assertStockAvailable(prisma, {
+      restaurantId: ctx.restaurantId,
+      locationId: order.locationId,
+      requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+    }),
+    assertIngredientStockAvailable(prisma, {
+      restaurantId: ctx.restaurantId,
+      locationId: order.locationId,
+      requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+    }),
+  ]);
 
   // P3.2: klijent šalje SAMO identitete izabranih opcija — server učitava
   // grupe STVARNO vezane za ovaj artikal i sam presuđuje cenu (specifikacija
@@ -235,11 +249,18 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
   if (input.quantity !== undefined && input.quantity > item.quantity && item.menuItemId) {
     const menuItem = await prisma.menuItem.findUnique({ where: { id: item.menuItemId }, select: { id: true, name: true } });
     if (menuItem) {
-      await assertStockAvailable(prisma, {
-        restaurantId: ctx.restaurantId,
-        locationId: order.locationId,
-        requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
-      });
+      await Promise.all([
+        assertStockAvailable(prisma, {
+          restaurantId: ctx.restaurantId,
+          locationId: order.locationId,
+          requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+        }),
+        assertIngredientStockAvailable(prisma, {
+          restaurantId: ctx.restaurantId,
+          locationId: order.locationId,
+          requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
+        }),
+      ]);
     }
   }
 
@@ -375,7 +396,15 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
         const currentMenuItem = menuItemById.get(item.menuItemId!);
         return { menuItemId: item.menuItemId!, name: currentMenuItem?.name ?? item.name, quantity: item.quantity };
       });
-    await assertStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
+    // P1.4: ista agregacija (stockRequirements, po menuItemId, VEĆ obuhvata
+    // deljene artikle preko cele porudžbine) prosleđuje se OBEMA nezavisnim
+    // proverama — assertIngredientStockAvailable interno ponovo agregira PO
+    // SIROVINI preko svih recepturisanih stavki, tačno "Omlet + Omlet sa
+    // sirom dele jaja" slučaj iz specifikacije.
+    await Promise.all([
+      assertStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements }),
+      assertIngredientStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements }),
+    ]);
 
     await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });
     await tx.orderItem.updateMany({
