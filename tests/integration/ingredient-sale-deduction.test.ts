@@ -703,15 +703,22 @@ describe("Dual-stock model (P1.3): recipe always wins, never double-deducts", ()
 
     // Reconstruct the "shouldn't happen via the normal path, but might via a
     // manual override" state: item starts WITHOUT tracking, gets a recipe
-    // (trackStock stays false — nothing to auto-disable), THEN an
-    // owner/admin explicitly re-enables finished-goods tracking without
-    // removing the recipe first.
+    // (trackStock stays false — nothing to auto-disable). P1.6:
+    // inventory.initializeTracking now REJECTS this outright (RECIPE-mode
+    // items can't be finished-goods-initialized through the normal API), so
+    // the corrupted state is constructed directly at the data layer here —
+    // this is now the ONLY way it could ever occur, and the test proves the
+    // inventoryTrackingMethod gate still wins even then.
     const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
-    await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 50 });
+    await prisma.inventoryItem.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, menuItemId: item.id, currentStock: 50, unit: "kom" },
+    });
+    await prisma.menuItem.update({ where: { id: item.id }, data: { trackStock: true } });
 
     const menuItemNow = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
     expect(menuItemNow.trackStock).toBe(true); // legacy/bad combination now exists
+    expect(menuItemNow.inventoryTrackingMethod).toBe("RECIPE"); // but the authoritative gate is untouched
 
     await orderAndPay(waiterCtx(fixture), fixture, item.id, 3);
 
@@ -734,10 +741,15 @@ describe("Dual-stock model (P1.3): recipe always wins, never double-deducts", ()
 
     const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
-    // Legacy bad state again, but this time the frozen finished stock is 0 —
-    // if the finished-goods system were still consulted, this would block
-    // the order/payment with InsufficientStockError. It must not.
-    await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 0 });
+    // Legacy bad state again (constructed directly — see P1.6 note above;
+    // inventory.initializeTracking rejects RECIPE-mode items outright), but
+    // this time the frozen finished stock is 0 — if the finished-goods
+    // system were still consulted, this would block the order/payment with
+    // InsufficientStockError. It must not.
+    await prisma.inventoryItem.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, menuItemId: item.id, currentStock: 0, unit: "kom" },
+    });
+    await prisma.menuItem.update({ where: { id: item.id }, data: { trackStock: true } });
 
     const { payment } = await orderAndPay(waiterCtx(fixture), fixture, item.id, 2);
     expect(payment).toBeTruthy();

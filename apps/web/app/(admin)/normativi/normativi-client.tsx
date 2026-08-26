@@ -24,6 +24,7 @@ interface RecipeOverviewItem {
   categoryName: string | null;
   ingredientCount: number;
   isConfigured: boolean;
+  inventoryTrackingMethod: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
 }
 
 const UNCAT = "__uncategorized__";
@@ -198,6 +199,10 @@ export function NormativiClient() {
                     <td className="px-4 py-3 text-center">
                       {item.isConfigured ? (
                         <Badge tone="success">Konfigurisano</Badge>
+                      ) : item.inventoryTrackingMethod === "RECIPE" ? (
+                        // P1.6: artikal je EKSPLICITNO u RECIPE modu ali bez ijedne linije —
+                        // prodaja je blokirana (RecipeNotConfiguredError), ne samo "nije definisano".
+                        <Badge tone="danger">Normativ nije podešen</Badge>
                       ) : (
                         <Badge tone="neutral">Normativ nije definisan</Badge>
                       )}

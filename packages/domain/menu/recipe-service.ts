@@ -18,8 +18,8 @@
  * model je uvek eksplicitna, posebna akcija (inventory-service.ts
  * setTrackingEnabled), nikad automatska posledica brisanja recepture.
  */
-import { prisma, Prisma } from "@rcs/db";
-import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { prisma } from "@rcs/db";
+import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { convertUnit, type UnitOfMeasure } from "../inventory/unit-of-measure";
 
@@ -87,14 +87,21 @@ export async function addRecipeLine(
       include: { ingredient: true },
     });
 
-    // Atomski prelazak: OVO je bila prva linija I artikal je do sada koristio
-    // gotov-artikal zalihu — ugasi je u ISTOJ transakciji (vidi napomenu na
-    // vrhu fajla). Bezopasno čak i u retkoj konkurentnoj trci (dva različita
+    // Atomski prelazak: OVO je bila prva linija — ugasi gotov-artikal zalihu
+    // (ako je bila aktivna) i promoviši metodu praćenja na RECIPE, U ISTOJ
+    // transakciji (vidi napomenu na vrhu fajla). Radi identično bez obzira
+    // da li je artikal do sada bio DIRECT_STOCK ili NO_TRACKING — jedina
+    // metoda koja OVDE nikad tiho ne biva zamenjena je RECIPE samo (ne može
+    // biti already RECIPE ako je countBefore === 0, jer bi tada već imao
+    // liniju). Bezopasno čak i u retkoj konkurentnoj trci (dva različita
     // admina dodaju prvu liniju istovremeno): oba bi nezavisno odlučila istu
-    // ciljnu vrednost (trackStock=false), nema korupcije stanja.
+    // ciljnu vrednost, nema korupcije stanja.
     let didTransition = false;
-    if (countBefore === 0 && menuItem.trackStock) {
-      await tx.menuItem.update({ where: { id: menuItemId }, data: { trackStock: false } });
+    if (countBefore === 0 && menuItem.inventoryTrackingMethod !== "RECIPE") {
+      await tx.menuItem.update({
+        where: { id: menuItemId },
+        data: { trackStock: false, inventoryTrackingMethod: "RECIPE" },
+      });
       didTransition = true;
     }
 
@@ -120,11 +127,11 @@ export async function addRecipeLine(
       entityType: "MenuItem",
       entityId: menuItemId,
       action: "inventory.model_switched_to_recipe",
-      previousValue: { trackStock: true },
+      previousValue: { inventoryTrackingMethod: menuItem.inventoryTrackingMethod },
       newValue: {
-        trackStock: false,
+        inventoryTrackingMethod: "RECIPE",
         reason:
-          "Prva linija recepture kreirana — automatski prelazak sa gotov-artikal zaliha na sirovinski normativ. Postojeći InventoryItem red i istorija kretanja su OČUVANI, samo se više ne koriste za buduće prodaje.",
+          "Prva linija recepture kreirana — automatski prelazak na sirovinski normativ. Postojeći InventoryItem red (ako postoji) i istorija kretanja su OČUVANI, samo se više ne koriste za buduće prodaje.",
       },
     });
   }
@@ -205,28 +212,6 @@ export async function removeRecipeLine(ctx: AuthContext, recipeLineId: string) {
   return { removed: true };
 }
 
-/**
- * Batch provera: koji od datih MenuItemId-jeva TRENUTNO imaju bar jednu
- * liniju recepture. Koristi ga inventory-service.ts kao "recepturisan
- * artikal uvek pobeđuje" odbranu u dubinu (double-deduction guard) — čak i
- * ako legacy/loša kombinacija (trackStock=true I receptura postoji) nekako
- * postoji za isti MenuItem (npr. neko ručno ponovo uključio gotov-artikal
- * praćenje bez uklanjanja recepture), naplata NIKAD tiho ne skida oba —
- * receptura uvek pobeđuje.
- */
-export async function getMenuItemIdsWithRecipes(
-  db: Prisma.TransactionClient | typeof prisma,
-  menuItemIds: string[]
-): Promise<Set<string>> {
-  if (menuItemIds.length === 0) return new Set();
-  const rows = await db.menuItemIngredient.findMany({
-    where: { menuItemId: { in: menuItemIds } },
-    select: { menuItemId: true },
-    distinct: ["menuItemId"],
-  });
-  return new Set(rows.map((r) => r.menuItemId));
-}
-
 export interface RecipeOverviewItem {
   id: string;
   name: string;
@@ -234,6 +219,11 @@ export interface RecipeOverviewItem {
   categoryName: string | null;
   ingredientCount: number;
   isConfigured: boolean;
+  /** P1.6: da li je artikal TRENUTNO konfigurisan na RECIPE metodu praćenja
+   * (odvojeno od isConfigured — artikal može imati stare recepturne linije
+   * a da NIJE u RECIPE modu, ili biti u RECIPE modu sa 0 linija = "Normativ
+   * nije podešen"). */
+  inventoryTrackingMethod: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
 }
 
 /**
@@ -248,7 +238,7 @@ export async function listRecipeOverview(ctx: AuthContext): Promise<RecipeOvervi
   const [menuItems, counts] = await Promise.all([
     prisma.menuItem.findMany({
       where: { restaurantId: ctx.restaurantId, deletedAt: null },
-      select: { id: true, name: true, categoryId: true, category: { select: { name: true } } },
+      select: { id: true, name: true, categoryId: true, category: { select: { name: true } }, inventoryTrackingMethod: true },
       orderBy: { name: "asc" },
     }),
     prisma.menuItemIngredient.groupBy({
@@ -269,6 +259,7 @@ export async function listRecipeOverview(ctx: AuthContext): Promise<RecipeOvervi
       categoryName: m.category?.name ?? null,
       ingredientCount,
       isConfigured: ingredientCount > 0,
+      inventoryTrackingMethod: m.inventoryTrackingMethod,
     };
   });
 }

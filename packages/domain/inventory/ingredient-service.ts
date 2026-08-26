@@ -43,6 +43,26 @@ export class InsufficientIngredientStockError extends Error {
   }
 }
 
+/**
+ * P1.6: artikal je eksplicitno konfigurisan na RECIPE metodu praćenja, ali
+ * NEMA nijednu liniju recepture ("Normativ nije podešen") — NAMERNO
+ * blokirano na SVE tri tačke (dodavanje u porudžbinu, slanje, naplata), ne
+ * tiho dozvoljeno kao "prodaja bez odbitka". Eksplicitna RECIPE metoda
+ * predstavlja svesnu nameru koja MORA biti podržana stvarnom konfiguracijom
+ * pre nego što novac promeni vlasnika — u suprotnom bi to bio stvarni
+ * curenje zalihe (prodaja bez ijednog odbitka sirovina).
+ */
+export class RecipeNotConfiguredError extends Error {
+  readonly items: Array<{ menuItemId: string; name: string }>;
+
+  constructor(items: Array<{ menuItemId: string; name: string }>) {
+    const names = items.map((i) => i.name).join(", ");
+    super(`Normativ nije podešen za: ${names}. Dodajte bar jednu sirovinu u recepturu pre prodaje.`);
+    this.name = "RecipeNotConfiguredError";
+    this.items = items;
+  }
+}
+
 // ─── Create / read ──────────────────────────────────────────────────────────
 
 async function assertOwnedActiveInventoryCategory(ctx: AuthContext, inventoryCategoryId: string) {
@@ -547,6 +567,69 @@ interface IngredientRequirement {
 }
 
 /**
+ * P1.6: koji od datih MenuItemId-jeva su TRENUTNO konfigurisani na RECIPE
+ * metodu praćenja (jedini autoritativni gate — vidi inventory-service.ts
+ * InventoryTrackingMethod napomenu). Zamenjuje raniju "ima bar jednu liniju
+ * recepture" proveru (koja je mešala "konfigurisan" i "ima istorijske
+ * linije") — ove dve funkcije zajedno (ova + getConfiguredMenuItemIds ispod)
+ * razlikuju "RECIPE mod, ali 0 linija" (RecipeNotConfiguredError) od
+ * "RECIPE mod sa definisanom recepturom" (normalna provera zaliha).
+ */
+async function getRecipeTrackedMenuItems(
+  db: Prisma.TransactionClient | typeof prisma,
+  restaurantId: string,
+  menuItemIds: string[]
+): Promise<Array<{ id: string; name: string }>> {
+  if (menuItemIds.length === 0) return [];
+  return db.menuItem.findMany({
+    where: { id: { in: menuItemIds }, restaurantId, inventoryTrackingMethod: "RECIPE" },
+    select: { id: true, name: true },
+  });
+}
+
+/** Batch provera: koji od datih MenuItemId-jeva TRENUTNO imaju bar jednu liniju recepture. */
+async function getConfiguredMenuItemIds(
+  db: Prisma.TransactionClient | typeof prisma,
+  menuItemIds: string[]
+): Promise<Set<string>> {
+  if (menuItemIds.length === 0) return new Set();
+  const rows = await db.menuItemIngredient.findMany({
+    where: { menuItemId: { in: menuItemIds } },
+    select: { menuItemId: true },
+    distinct: ["menuItemId"],
+  });
+  return new Set(rows.map((r) => r.menuItemId));
+}
+
+/**
+ * P1.6: filtrira dati qtyByMenuItem SAMO na artikle koji su TRENUTNO u
+ * RECIPE modu, i baca RecipeNotConfiguredError ako bilo koji od njih nema
+ * ijednu liniju recepture. KRITIČNO: computeRequiredIngredients sam po sebi
+ * NE zna ništa o inventoryTrackingMethod (samo čita MenuItemIngredient
+ * redove) — pozivalac MORA proći kroz OVU funkciju prvo, inače bi zaostala
+ * MenuItemIngredient linija (npr. posle RECIPE -> NO_TRACKING/DIRECT_STOCK
+ * prelaska, koji NAMERNO ne briše recepturu) tiho nastavila da odbija
+ * sirovine iako artikal više NIJE u RECIPE modu.
+ */
+async function filterToConfiguredRecipeItems(
+  db: Prisma.TransactionClient | typeof prisma,
+  restaurantId: string,
+  qtyByMenuItem: Map<string, number>
+): Promise<Map<string, number>> {
+  const recipeItems = await getRecipeTrackedMenuItems(db, restaurantId, [...qtyByMenuItem.keys()]);
+  if (recipeItems.length === 0) return new Map();
+
+  const configuredIds = await getConfiguredMenuItemIds(db, recipeItems.map((i) => i.id));
+  const unconfigured = recipeItems.filter((i) => !configuredIds.has(i.id));
+  if (unconfigured.length > 0) {
+    throw new RecipeNotConfiguredError(unconfigured.map((i) => ({ menuItemId: i.id, name: i.name })));
+  }
+
+  const recipeIds = new Set(recipeItems.map((i) => i.id));
+  return new Map([...qtyByMenuItem].filter(([id]) => recipeIds.has(id)));
+}
+
+/**
  * Agregira potrebnu količinu PO SIROVINI preko datog skupa (menuItemId ->
  * tražena količina artikla), iz TRENUTNE recepture (MenuItemIngredient) —
  * jedan upit bez obzira na broj artikala. Deljena osnova za
@@ -554,9 +637,11 @@ interface IngredientRequirement {
  * (predpregled/submit) — ISTA matematika na oba mesta, namerno (P1.4).
  *
  * Artikli bez recepture (nema redova) se tiho ne pojavljuju u rezultatu —
- * ne postoji "delimično definisana receptura" greška. Neaktivna sirovina i
- * dalje učestvuje ako je već u recepturi (P1.2 §13) — deaktivacija sprečava
- * NOVU upotrebu, ne menja postojeće recepture koje je već referenciraju.
+ * ne postoji "delimično definisana receptura" greška ovde (to je posao
+ * assertRecipesConfigured iznad, koji SE MORA pozvati PRE ove funkcije za
+ * RECIPE-mod artikle). Neaktivna sirovina i dalje učestvuje ako je već u
+ * recepturi (P1.2 §13) — deaktivacija sprečava NOVU upotrebu, ne menja
+ * postojeće recepture koje je već referenciraju.
  */
 async function computeRequiredIngredients(
   db: Prisma.TransactionClient | typeof prisma,
@@ -638,7 +723,15 @@ export async function validateAndDecrementIngredientsInTx(
   }
   if (soldQtyByMenuItem.size === 0) return;
 
-  const requiredByIngredient = await computeRequiredIngredients(tx, soldQtyByMenuItem);
+  // P1.6: filtrira SAMO na RECIPE-mod artikle (baca RecipeNotConfiguredError
+  // pre bilo kakve mutacije ako je neki od njih bez ijedne linije recepture
+  // — "Normativ nije podešen"). Zaostala MenuItemIngredient linija na
+  // artiklu koji je u međuvremenu prešao na DIRECT_STOCK/NO_TRACKING se
+  // OVDE isključuje iz odbitka, ne u computeRequiredIngredients.
+  const recipeQtyByMenuItem = await filterToConfiguredRecipeItems(tx, input.restaurantId, soldQtyByMenuItem);
+  if (recipeQtyByMenuItem.size === 0) return;
+
+  const requiredByIngredient = await computeRequiredIngredients(tx, recipeQtyByMenuItem);
   if (requiredByIngredient.size === 0) return; // nijedan prodat artikal nema definisan normativ
 
   // Idempotency: preskoči sirovine koje već imaju SALE kretanje za OVAJ
@@ -768,7 +861,14 @@ export async function assertIngredientStockAvailable(
   }
   if (qtyByMenuItem.size === 0) return;
 
-  const requiredByIngredient = await computeRequiredIngredients(db, qtyByMenuItem);
+  // P1.6: filter down to RECIPE-mode items only (blocks early — same
+  // RecipeNotConfiguredError rule as payment, surfaced sooner so the
+  // waiter never even gets to submit it) — see filterToConfiguredRecipeItems
+  // for why this filter, not computeRequiredIngredients, is the real gate.
+  const recipeQtyByMenuItem = await filterToConfiguredRecipeItems(db, input.restaurantId, qtyByMenuItem);
+  if (recipeQtyByMenuItem.size === 0) return;
+
+  const requiredByIngredient = await computeRequiredIngredients(db, recipeQtyByMenuItem);
   if (requiredByIngredient.size === 0) return; // none of these items has a configured recipe
 
   const { shortages } = await findIngredientShortages(db, input.restaurantId, input.locationId, requiredByIngredient);
@@ -783,24 +883,34 @@ export interface RecipeAvailabilityInfo {
   status: RecipeAvailabilityStatus;
   /** floor(min over recipe lines of currentStock / lineQuantity), never negative. */
   availablePortions: number;
-  /** Name of the ingredient constraining availablePortions — always set when the item has a recipe. */
+  /** Name of the ingredient constraining availablePortions — always set when the item has a configured recipe. */
   limitingIngredientName: string | null;
+  /**
+   * P1.6: false when the item is in RECIPE tracking mode but has ZERO
+   * configured recipe lines ("Normativ nije podešen") — a distinct reason
+   * for OUT from ordinary "insufficient ingredients", so the UI can show
+   * different wording (Waiter: "Normativ nije podešen" vs. "Nema dovoljno
+   * sirovina — <ingredient>"). Always true when the item has at least one
+   * recipe line.
+   */
+  configured: boolean;
 }
 
 /**
- * Batch-computes DISPLAY availability (menu badges) for recipe-produced
- * items among the given MenuItemIds at ONE location — two queries total
- * regardless of item count (recipe lines, then ingredient stocks),
- * matching the existing getStockStatusForMenuItems "batch, not per-item"
- * pattern exactly. This is advisory display data only — it answers "how
- * many portions could I sell right now", NOT a specific requested
- * quantity (that's assertIngredientStockAvailable's job).
+ * Batch-computes DISPLAY availability (menu badges) for RECIPE-tracked
+ * items among the given MenuItemIds at ONE location — three queries total
+ * regardless of item count (which items are RECIPE-mode, their recipe
+ * lines, then ingredient stocks), matching the existing
+ * getStockStatusForMenuItems "batch, not per-item" pattern. This is
+ * advisory display data only — it answers "how many portions could I sell
+ * right now", NOT a specific requested quantity (that's
+ * assertIngredientStockAvailable's job).
  *
- * Only MenuItemIds that currently have at least one recipe line appear in
- * the returned map — direct-stock/untracked items are simply absent, and
- * the caller (menu-service.ts listMenuItems) treats "no entry" as "not
+ * Only MenuItemIds whose inventoryTrackingMethod is currently RECIPE appear
+ * in the returned map — DIRECT_STOCK/NO_TRACKING items are simply absent,
+ * and the caller (menu-service.ts listMenuItems) treats "no entry" as "not
  * recipe-governed", the same convention getStockStatusForMenuItems already
- * uses for trackStock=false.
+ * uses for non-DIRECT_STOCK items.
  *
  * LOW status reuses the ALREADY-EXISTING IngredientStock.lowStockThreshold
  * (the same field the Sirovine admin page already surfaces) on the
@@ -816,11 +926,13 @@ export async function getRecipeAvailabilityForMenuItems(
   const result = new Map<string, RecipeAvailabilityInfo>();
   if (menuItemIds.length === 0) return result;
 
+  const recipeItemIds = (await getRecipeTrackedMenuItems(prisma, restaurantId, menuItemIds)).map((i) => i.id);
+  if (recipeItemIds.length === 0) return result;
+
   const recipeLines = await prisma.menuItemIngredient.findMany({
-    where: { menuItemId: { in: menuItemIds } },
+    where: { menuItemId: { in: recipeItemIds } },
     include: { ingredient: true },
   });
-  if (recipeLines.length === 0) return result;
 
   const linesByMenuItem = new Map<string, typeof recipeLines>();
   for (const line of recipeLines) {
@@ -830,12 +942,21 @@ export async function getRecipeAvailabilityForMenuItems(
   }
 
   const ingredientIds = [...new Set(recipeLines.map((l) => l.ingredientId))];
-  const stocks = await prisma.ingredientStock.findMany({
-    where: { restaurantId, locationId, ingredientId: { in: ingredientIds } },
-  });
+  const stocks =
+    ingredientIds.length > 0
+      ? await prisma.ingredientStock.findMany({
+          where: { restaurantId, locationId, ingredientId: { in: ingredientIds } },
+        })
+      : [];
   const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
 
-  for (const [menuItemId, lines] of linesByMenuItem) {
+  for (const menuItemId of recipeItemIds) {
+    const lines = linesByMenuItem.get(menuItemId);
+    if (!lines || lines.length === 0) {
+      result.set(menuItemId, { status: "OUT", availablePortions: 0, limitingIngredientName: null, configured: false });
+      continue;
+    }
+
     let availablePortions = Infinity;
     let limitingName: string | null = null;
     let limitingIsLow = false;
@@ -853,7 +974,7 @@ export async function getRecipeAvailabilityForMenuItems(
     }
     availablePortions = Math.max(0, availablePortions);
     const status: RecipeAvailabilityStatus = availablePortions <= 0 ? "OUT" : limitingIsLow ? "LOW" : "AVAILABLE";
-    result.set(menuItemId, { status, availablePortions, limitingIngredientName: limitingName });
+    result.set(menuItemId, { status, availablePortions, limitingIngredientName: limitingName, configured: true });
   }
 
   return result;

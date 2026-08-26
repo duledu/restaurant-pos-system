@@ -417,8 +417,24 @@ model MenuItem {
   isActive  Boolean @default(true) // vidljivo u adminu / meniju uopšte
   isAvailable Boolean @default(true) // privremeno nema na stanju (Temporary Out Of Stock)
 
-  trackStock  Boolean  @default(false) // future-ready: uključuje se kad Inventory modul (Faza 7) proradi
+  // LEGACY / synced mirror — vidi inventoryTrackingMethod ispod, koje je od
+  // P1.6 JEDINI autoritativni izvor za odluku o odbitku/dostupnosti. Ovo
+  // polje se i dalje ažurira (trackStock = method === DIRECT_STOCK) radi
+  // bezbednosti bilo kog preostalog starog koda koji bi ga čitao, ali se
+  // više NIGDE u domain sloju ne koristi kao jedini uslov grananja.
+  trackStock  Boolean  @default(false)
   minimumStock Decimal? @db.Decimal(12, 3)
+
+  // P1.6: eksplicitna, restoranom-konfigurisana metoda praćenja zaliha po
+  // artiklu — NIKAD izvedena iz MenuCategory (isti koncept artikla se sme
+  // različito konfigurisati u različitim restoranima). Struktuurno
+  // garantuje "tačno jedan put odbitka" (jedna kolona ne može istovremeno
+  // biti DIRECT_STOCK i RECIPE) — zamenjuje dinamičku trackStock/
+  // hasRecipe-postoji proveru koja je ranije branila dupli odbitak.
+  // Backward-compat migracija (20260826180000): trackStock=true -> DIRECT_STOCK,
+  // zatim artikli sa >=1 linijom recepture -> RECIPE (receptura pobeđuje,
+  // isti prioritet kao stari getMenuItemIdsWithRecipes odbrana).
+  inventoryTrackingMethod InventoryTrackingMethod @default(NO_TRACKING)
 
   preparationStation PreparationStation @default(NONE)
 
@@ -562,6 +578,13 @@ enum PreparationStation {
   BAR
   KITCHEN_AND_BAR
   NONE
+}
+
+// P1.6: vidi napomenu uz MenuItem.inventoryTrackingMethod iznad.
+enum InventoryTrackingMethod {
+  NO_TRACKING
+  DIRECT_STOCK
+  RECIPE
 }
 
 // ─────────────────────────────────────────────────────────────────────────

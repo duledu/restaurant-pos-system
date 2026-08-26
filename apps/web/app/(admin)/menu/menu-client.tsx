@@ -26,7 +26,15 @@ interface MenuItem {
   reviewNote: string | null;
   category: Category | null;
   categoryId: string | null;
+  // P1.6: eksplicitna metoda praćenja zaliha — NIKAD izvedena iz kategorije.
+  inventoryTrackingMethod: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
 }
+
+const TRACKING_METHOD_LABEL: Record<MenuItem["inventoryTrackingMethod"], string> = {
+  NO_TRACKING: "Ne prati zalihe",
+  DIRECT_STOCK: "Gotov proizvod / direktno stanje",
+  RECIPE: "Receptura / normativ",
+};
 
 const STATION_LABEL: Record<MenuItem["preparationStation"], string> = {
   KITCHEN: "Kuhinja",
@@ -223,8 +231,32 @@ export function MenuManagementClient() {
     } catch (e) { setError(e instanceof Error ? e.message : "Greška"); }
   }
 
+  async function setTrackingMethod(
+    item: MenuItem,
+    method: MenuItem["inventoryTrackingMethod"],
+    confirmSwitchAwayFromDirectStock = false
+  ) {
+    try {
+      await apiFetch(`/api/admin/menu/items/${item.id}/inventory-tracking-method`, {
+        method: "POST",
+        body: JSON.stringify({ method, confirmSwitchAwayFromDirectStock }),
+      });
+      await load();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Greška";
+      // P1.6: "artikal i dalje ima zalihu" nije obična greška — nudi
+      // potvrdu i ponovi zahtev, isti obrazac kao archiveItem/deleteItem
+      // potvrdni dijalozi iznad (window.confirm, nema toast infrastrukture
+      // u ovom adminu).
+      if (message.includes("i dalje ima zalihu") && confirm(`${message}\n\nNastaviti?`)) {
+        return setTrackingMethod(item, method, true);
+      }
+      setError(message);
+    }
+  }
+
   const priceEdit: PriceEditState = { editingPriceId, priceDraft, setEditingPriceId, setPriceDraft };
-  const actions: ItemActions = { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory };
+  const actions: ItemActions = { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, refresh: load };
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -448,6 +480,8 @@ interface ItemActions {
   archiveItem: (id: string) => void;
   deleteItem: (id: string) => void;
   moveToCategory: (id: string, categoryId: string) => void;
+  setTrackingMethod: (item: MenuItem, method: MenuItem["inventoryTrackingMethod"]) => void;
+  refresh: () => void;
 }
 
 // ── CategorySection ───────────────────────────────────────────────────────────
@@ -519,6 +553,7 @@ function CategorySection({
                     <th className="w-24 px-4 py-2 font-medium">Stanica</th>
                     <th className="w-20 px-4 py-2 text-center font-medium">Dostupno</th>
                     <th className="w-20 px-4 py-2 text-center font-medium">Aktivno</th>
+                    <th className="w-44 px-4 py-2 font-medium">Praćenje zaliha</th>
                     <th className="w-36 px-4 py-2 font-medium">Premesti</th>
                     <th className="w-36 px-4 py-2 font-medium">Akcije</th>
                   </tr>
@@ -560,7 +595,7 @@ function ItemRow({
   canManageRecipes: boolean;
 }) {
   const { editingPriceId, priceDraft, setEditingPriceId, setPriceDraft } = priceEdit;
-  const { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory } = actions;
+  const { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, refresh } = actions;
   const isEditing = editingPriceId === item.id;
 
   return (
@@ -651,6 +686,29 @@ function ItemRow({
         />
       </td>
 
+      {/* Inventory tracking method — P1.6: nikad izvedeno iz kategorije, po artiklu. */}
+      <td className="px-4 py-2.5">
+        {canManageRecipes ? (
+          <select
+            className="w-full rounded-sm border border-line bg-transparent px-1.5 py-1 text-xs text-ink/75 focus:outline-none hover:border-ink/30"
+            value={item.inventoryTrackingMethod}
+            onChange={(e) => setTrackingMethod(item, e.target.value as MenuItem["inventoryTrackingMethod"])}
+          >
+            {(Object.keys(TRACKING_METHOD_LABEL) as MenuItem["inventoryTrackingMethod"][]).map((m) => (
+              <option key={m} value={m}>{TRACKING_METHOD_LABEL[m]}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-xs text-ink/60">{TRACKING_METHOD_LABEL[item.inventoryTrackingMethod]}</span>
+        )}
+        {item.inventoryTrackingMethod === "RECIPE" && (
+          <p className="mt-0.5 text-[10px] text-ink/50">Uredi sastojke preko dugmeta &quot;Normativ&quot;</p>
+        )}
+        {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
+          <a href="/inventory" className="mt-0.5 block text-[10px] text-gold-dark hover:underline">Upravljaj zalihama →</a>
+        )}
+      </td>
+
       {/* Move to category */}
       <td className="px-4 py-2.5">
         <select
@@ -668,7 +726,7 @@ function ItemRow({
       {/* Actions */}
       <td className="px-4 py-2.5">
         <div className="flex gap-2 text-xs">
-          <RecipeButton item={item} readOnly={!canManageRecipes} />
+          <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />
           <button
             onClick={() => duplicateItem(item.id)}
             className="text-ink/65 transition-colors hover:text-ink"

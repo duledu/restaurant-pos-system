@@ -361,8 +361,8 @@ describe("Dual-stock transition: first recipe line auto-disables finished-item t
       where: { entityId: fixture.menuItemId, action: "inventory.model_switched_to_recipe" },
     });
     expect(entry.userId).toBe("mgr-42");
-    expect((entry.previousValue as { trackStock: boolean }).trackStock).toBe(true);
-    expect((entry.newValue as { trackStock: boolean }).trackStock).toBe(false);
+    expect((entry.previousValue as { inventoryTrackingMethod: string }).inventoryTrackingMethod).toBe("DIRECT_STOCK");
+    expect((entry.newValue as { inventoryTrackingMethod: string }).inventoryTrackingMethod).toBe("RECIPE");
   });
 
   it("adding a SECOND recipe line does NOT re-fire the transition (trackStock already false)", async () => {
@@ -380,19 +380,21 @@ describe("Dual-stock transition: first recipe line auto-disables finished-item t
     expect(transitionEntries).toBe(1); // exactly once, not once per line
   });
 
-  it("a MenuItem that never had trackStock enabled gains a recipe with no transition audit at all", async () => {
+  it("a MenuItem that never had trackStock enabled still gets promoted NO_TRACKING -> RECIPE, with its own transition audit", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     const meat = await ingredients.createIngredient(manager, { name: "Mleveno meso", unit: "KILOGRAM" });
     await recipes.addRecipeLine(manager, fixture.menuItemId, { ingredientId: meat.id, quantity: 0.2 });
 
     const menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
-    expect(menuItem.trackStock).toBe(false); // was already false, stays false
+    expect(menuItem.trackStock).toBe(false); // was already false, stays false — nothing to "disable"
+    expect(menuItem.inventoryTrackingMethod).toBe("RECIPE"); // P1.6: but the enum IS promoted, even from NO_TRACKING
 
-    const transitionEntries = await prisma.auditLog.count({
+    const entry = await prisma.auditLog.findFirstOrThrow({
       where: { entityId: fixture.menuItemId, action: "inventory.model_switched_to_recipe" },
     });
-    expect(transitionEntries).toBe(0); // nothing to transition
+    expect((entry.previousValue as { inventoryTrackingMethod: string }).inventoryTrackingMethod).toBe("NO_TRACKING");
+    expect((entry.newValue as { inventoryTrackingMethod: string }).inventoryTrackingMethod).toBe("RECIPE");
   });
 
   it("removing the LAST recipe line does NOT re-enable finished-item tracking — item shows as unconfigured, not reverted", async () => {

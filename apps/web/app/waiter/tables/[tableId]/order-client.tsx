@@ -38,6 +38,9 @@ interface RecipeAvailability {
   status: "AVAILABLE" | "LOW" | "OUT";
   availablePortions: number;
   limitingIngredientName: string | null;
+  // P1.6: false = artikal je u RECIPE modu ali nema definisan normativ
+  // ("Normativ nije podešen") — odvojeno od običnog "nema dovoljno sirovina".
+  configured: boolean;
 }
 interface MenuItem {
   id: string;
@@ -579,6 +582,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
       return;
     }
     if (item.recipeAvailability?.status === "OUT") {
+      if (!item.recipeAvailability.configured) {
+        setError(`${item.name} — normativ nije podešen.`);
+        return;
+      }
       const limiting = item.recipeAvailability.limitingIngredientName;
       setError(limiting ? `${item.name} — nema dovoljno sirovina (${limiting}).` : `${item.name} — nema dovoljno sirovina.`);
       return;
@@ -817,9 +824,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   {isOut && (
                     <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-semibold text-danger">
                       {isRecipeItem
-                        ? item.recipeAvailability!.limitingIngredientName
-                          ? `Nema dovoljno sirovina — ${item.recipeAvailability!.limitingIngredientName}`
-                          : "Nema dovoljno sirovina"
+                        ? !item.recipeAvailability!.configured
+                          ? "Normativ nije podešen"
+                          : item.recipeAvailability!.limitingIngredientName
+                            ? `Nema dovoljno sirovina — ${item.recipeAvailability!.limitingIngredientName}`
+                            : "Nema dovoljno sirovina"
                         : "Nema na zalihama"}
                     </span>
                   )}

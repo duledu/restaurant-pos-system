@@ -420,27 +420,23 @@ function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () =>
 
 // ─── Initialize modal ─────────────────────────────────────────────────────────
 
-interface MenuItemOption { id: string; name: string; unit: string | null }
+interface MenuItemOption { id: string; name: string; unit: string | null; inventoryTrackingMethod?: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE" }
 interface LocationOption { id: string; name: string }
 
 /**
- * Recipe-produced items are managed through Ingredients + Normativi, not
- * initialized as finished-goods stock — excludes any MenuItem with a
- * configured recipe from the candidate list. Purely a UX filter on the
- * candidate pool; never touches any existing InventoryItem/InventoryMovement
- * row (a stale/legacy one, if it exists from before a recipe was added,
- * stays fully intact and remains visible via "Prikaži isključene" + its
- * "Historija" button on the main Zalihe list).
+ * P1.6: RECIPE-mod artikli se upravljaju kroz Sirovine + Normativi, ne
+ * inicijalizuju kao gotov-proizvod zaliha — isključuje ih iz liste
+ * kandidata na osnovu TRENUTNE inventoryTrackingMethod (ne na osnovu
+ * "ima linija recepture", jer artikal može zadržati stare linije posle
+ * RECIPE -> DIRECT_STOCK prelaska i i dalje je legitiman kandidat). Čisto
+ * UX filter nad skupom kandidata; nikad ne dira postojeći InventoryItem/
+ * InventoryMovement red (zastareo/istorijski, ako postoji, ostaje potpuno
+ * netaknut i vidljiv preko "Prikaži isključene" + "Historija" dugmeta na
+ * glavnoj Zalihe listi).
  */
 async function fetchDirectStockCandidates(): Promise<MenuItemOption[]> {
-  const [itemsRes, recipesRes] = await Promise.all([
-    fetch("/api/admin/menu/items").then((r) => r.json()),
-    fetch("/api/admin/recipes").then((r) => r.json()),
-  ]);
-  const configuredIds = new Set<string>(
-    (recipesRes.items ?? []).filter((r: { isConfigured: boolean }) => r.isConfigured).map((r: { id: string }) => r.id)
-  );
-  return (itemsRes.items ?? []).filter((m: MenuItemOption) => !configuredIds.has(m.id));
+  const itemsRes = await fetch("/api/admin/menu/items").then((r) => r.json());
+  return (itemsRes.items ?? []).filter((m: MenuItemOption) => m.inventoryTrackingMethod !== "RECIPE");
 }
 
 function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {

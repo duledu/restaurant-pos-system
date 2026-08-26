@@ -1,7 +1,27 @@
 import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { getMenuItemIdsWithRecipes } from "../menu/recipe-service";
+
+export type InventoryTrackingMethod = "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
+
+/**
+ * P1.6: jedina autoritativna kapija za odluku o odbitku/dostupnosti —
+ * zamenjuje raniju dinamičku trackStock+hasRecipe-postoji proveru
+ * (getMenuItemIdsWithRecipes). Struktuurno garantuje "tačno jedan put":
+ * kolona ne može istovremeno biti DIRECT_STOCK i RECIPE.
+ */
+export class DirectStockStillPresentError extends Error {
+  readonly remaining: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>;
+
+  constructor(itemName: string, remaining: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>) {
+    const lines = remaining.map((r) => `${r.locationName}: ${r.quantity} ${r.unit}`).join("\n");
+    super(
+      `Artikal "${itemName}" i dalje ima zalihu gotovog proizvoda na stanju:\n${lines}\nAko nastavite, praćenje ove zalihe se isključuje ali ISTORIJA (InventoryMovement) i tekuće stanje OSTAJU sačuvani, samo se više ne koriste za buduće prodaje. Potvrdite da želite da nastavite.`
+    );
+    this.name = "DirectStockStillPresentError";
+    this.remaining = remaining;
+  }
+}
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -68,15 +88,9 @@ export async function getStockStatusForMenuItems(
 
   const menuItems = await prisma.menuItem.findMany({
     where: { id: { in: menuItemIds }, restaurantId },
-    select: { id: true, trackStock: true, minimumStock: true },
+    select: { id: true, inventoryTrackingMethod: true, minimumStock: true },
   });
-  const candidateTrackedIds = menuItems.filter((m) => m.trackStock).map((m) => m.id);
-
-  // Double-deduction/dual-model defense: a configured recipe always wins
-  // over trackStock=true, even legacy/stale combinations — see
-  // recipe-service.ts getMenuItemIdsWithRecipes.
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(prisma, candidateTrackedIds);
-  const trackedIds = candidateTrackedIds.filter((id) => !recipeMenuItemIds.has(id));
+  const trackedIds = menuItems.filter((m) => m.inventoryTrackingMethod === "DIRECT_STOCK").map((m) => m.id);
 
   const invItems =
     trackedIds.length > 0
@@ -88,7 +102,7 @@ export async function getStockStatusForMenuItems(
   const stockByMenuItem = new Map(invItems.map((i) => [i.menuItemId, i.currentStock]));
 
   for (const mi of menuItems) {
-    if (!mi.trackStock || recipeMenuItemIds.has(mi.id)) {
+    if (mi.inventoryTrackingMethod !== "DIRECT_STOCK") {
       result.set(mi.id, { trackingEnabled: false, currentStock: null, minimumStock: null, stockStatus: null });
       continue;
     }
@@ -131,6 +145,7 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
       menuItem: {
         select: {
           id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true,
+          inventoryTrackingMethod: true,
           inventoryCategoryId: true,
           inventoryCategory: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
         },
@@ -140,14 +155,9 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
     orderBy: [{ location: { name: "asc" } }, { menuItem: { name: "asc" } }],
   });
 
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(
-    prisma,
-    items.map((i) => i.menuItemId)
-  );
-
   return items.map((item) => ({
     ...item,
-    menuItem: { ...item.menuItem, hasRecipe: recipeMenuItemIds.has(item.menuItemId) },
+    menuItem: { ...item.menuItem, hasRecipe: item.menuItem.inventoryTrackingMethod === "RECIPE" },
   }));
 }
 
@@ -209,7 +219,7 @@ export async function getInventoryItem(ctx: AuthContext, id: string) {
   const item = await prisma.inventoryItem.findFirst({
     where: { id, restaurantId: ctx.restaurantId },
     include: {
-      menuItem: { select: { id: true, name: true, slug: true, unit: true, quantity: true, minimumStock: true, trackStock: true } },
+      menuItem: { select: { id: true, name: true, slug: true, unit: true, quantity: true, minimumStock: true, trackStock: true, inventoryTrackingMethod: true } },
       location: { select: { id: true, name: true } },
     },
   });
@@ -260,6 +270,11 @@ export async function initializeTracking(
     where: { id: input.menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
+  if (menuItem.inventoryTrackingMethod === "RECIPE") {
+    throw new Error(
+      `Artikal "${menuItem.name}" ima konfigurisan normativ (receptura od sirovina) — promenite metodu praćenja zaliha na "Gotov proizvod" pre inicijalizacije ove zalihe.`
+    );
+  }
 
   const location = await prisma.location.findFirst({
     where: { id: input.locationId, restaurantId: ctx.restaurantId },
@@ -306,7 +321,7 @@ export async function initializeTracking(
 
     await tx.menuItem.update({
       where: { id: input.menuItemId },
-      data: { trackStock: true },
+      data: { trackStock: true, inventoryTrackingMethod: "DIRECT_STOCK" },
     });
 
     return item;
@@ -322,19 +337,86 @@ export async function initializeTracking(
   return invItem;
 }
 
-export async function setTrackingEnabled(ctx: AuthContext, menuItemId: string, enabled: boolean) {
+/**
+ * Legacy toggle (P1.1) — zadržan zbog postojećeg Zalihe UI checkbox-a i API
+ * rute. Od P1.6 samo tanak omotač oko setInventoryTrackingMethod (DIRECT_STOCK
+ * <-> NO_TRACKING), tako da postoji TAČNO JEDNA autoritativna implementacija
+ * prelaska metode — ne dve paralelne.
+ */
+export async function setTrackingEnabled(
+  ctx: AuthContext,
+  menuItemId: string,
+  enabled: boolean,
+  options?: { confirmSwitchAwayFromDirectStock?: boolean }
+) {
+  return setInventoryTrackingMethod(ctx, menuItemId, enabled ? "DIRECT_STOCK" : "NO_TRACKING", options);
+}
+
+/**
+ * P1.6: JEDINA autoritativna funkcija za promenu MenuItem.inventoryTrackingMethod.
+ * Nikad ne briše InventoryItem/InventoryMovement/MenuItemIngredient/
+ * IngredientMovement — ni istoriju, ni tekuće stanje. Nikad ne izmišlja
+ * količinu (ne kreira InventoryItem/recepturu pri prelasku NA DIRECT_STOCK/
+ * RECIPE — to ostaje eksplicitna, posebna akcija: initializeTracking odn.
+ * addRecipeLine).
+ *
+ * Bezbednosno pravilo (jedino koje ova funkcija primenjuje): prelazak SA
+ * DIRECT_STOCK na bilo šta drugo dok InventoryItem još ima currentStock > 0
+ * na BILO KOJOJ lokaciji baca DirectStockStillPresentError osim ako je
+ * `confirmSwitchAwayFromDirectStock: true` eksplicitno prosleđeno (UI ovo
+ * koristi za potvrdni dijalog). Nijedan drugi pravac prelaska (RECIPE ->
+ * bilo šta, NO_TRACKING -> bilo šta, bilo šta -> RECIPE/NO_TRACKING) nema
+ * analognu proveru — sirovinsko stanje (IngredientStock) je DELJENO preko
+ * više artikala, pa ne pripada pojedinačnom MenuItem-u na način koji bi
+ * "upozorenje o gubitku" imalo smisla.
+ */
+export async function setInventoryTrackingMethod(
+  ctx: AuthContext,
+  menuItemId: string,
+  method: InventoryTrackingMethod,
+  options?: { confirmSwitchAwayFromDirectStock?: boolean }
+) {
   requirePermission(ctx, "inventory.manage");
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
-  await prisma.menuItem.update({ where: { id: menuItemId }, data: { trackStock: enabled } });
+
+  const previous = menuItem.inventoryTrackingMethod as InventoryTrackingMethod;
+  if (previous === method) return menuItem; // no-op, ništa se ne menja niti audituje
+
+  if (previous === "DIRECT_STOCK" && !options?.confirmSwitchAwayFromDirectStock) {
+    const invItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: ctx.restaurantId, menuItemId, currentStock: { gt: 0 } },
+      include: { location: { select: { id: true, name: true } } },
+    });
+    if (invItems.length > 0) {
+      throw new DirectStockStillPresentError(
+        menuItem.name,
+        invItems.map((i) => ({
+          locationId: i.locationId,
+          locationName: i.location.name,
+          quantity: i.currentStock.toString(),
+          unit: i.unit,
+        }))
+      );
+    }
+  }
+
+  const updated = await prisma.menuItem.update({
+    where: { id: menuItemId },
+    data: { inventoryTrackingMethod: method, trackStock: method === "DIRECT_STOCK" },
+  });
+
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
     entityId: menuItemId,
-    action: enabled ? "inventory.tracking_enabled" : "inventory.tracking_disabled",
-    newValue: { trackStock: enabled },
+    action: "menu_item.inventory_tracking_method_changed",
+    previousValue: { inventoryTrackingMethod: previous },
+    newValue: { inventoryTrackingMethod: method },
   });
+
+  return updated;
 }
 
 /**
@@ -469,30 +551,19 @@ export async function validateAndDecrementInventoryInTx(
 
   const menuItemIds = [...byItem.keys()];
 
-  const candidateTrackedItems = await tx.menuItem.findMany({
+  // P1.6: inventoryTrackingMethod je JEDINI gate — struktuurno garantuje da
+  // istovremeno nikad ne postoji i DIRECT_STOCK i RECIPE odbitak za isti
+  // artikal (jedna kolona ne može imati dve vrednosti). RECIPE artikli su
+  // isključivi domen validateAndDecrementIngredientsInTx-a (poziva se
+  // odvojeno, u ISTOJ transakciji).
+  const trackedMenuItems = await tx.menuItem.findMany({
     where: {
       id: { in: menuItemIds },
       restaurantId: input.restaurantId,
-      trackStock: true,
+      inventoryTrackingMethod: "DIRECT_STOCK",
     },
     select: { id: true, name: true },
   });
-  if (candidateTrackedItems.length === 0) return;
-
-  // Double-deduction defense-in-depth: a configured recipe ALWAYS wins over
-  // trackStock=true, even a legacy/stale combination that shouldn't exist
-  // going forward (addRecipeLine already prevents the normal path from
-  // creating it — this guard protects the actual money-moving transaction
-  // independently, in case that state exists anyway, e.g. someone manually
-  // re-enabled trackStock via setTrackingEnabled without removing the
-  // recipe first). Such an item is treated as NOT finished-goods-tracked
-  // for this sale — validateAndDecrementIngredientsInTx (called separately,
-  // same transaction) remains the sole authority for it.
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(
-    tx,
-    candidateTrackedItems.map((item) => item.id)
-  );
-  const trackedMenuItems = candidateTrackedItems.filter((item) => !recipeMenuItemIds.has(item.id));
   if (trackedMenuItems.length === 0) return;
 
   const invItems = await tx.inventoryItem.findMany({
@@ -613,20 +684,10 @@ export async function assertStockAvailable(
   if (byItem.size === 0) return;
 
   const menuItemIds = [...byItem.keys()];
-  const candidateTrackedItems = await db.menuItem.findMany({
-    where: { id: { in: menuItemIds }, restaurantId: input.restaurantId, trackStock: true },
+  const trackedMenuItems = await db.menuItem.findMany({
+    where: { id: { in: menuItemIds }, restaurantId: input.restaurantId, inventoryTrackingMethod: "DIRECT_STOCK" },
     select: { id: true, name: true },
   });
-  if (candidateTrackedItems.length === 0) return;
-
-  // Same double-deduction defense as validateAndDecrementInventoryInTx — a
-  // configured recipe means finished-goods stock is never consulted for
-  // this item, so it can never incorrectly BLOCK an order either.
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(
-    db,
-    candidateTrackedItems.map((item) => item.id)
-  );
-  const trackedMenuItems = candidateTrackedItems.filter((item) => !recipeMenuItemIds.has(item.id));
   if (trackedMenuItems.length === 0) return;
 
   const invItems = await db.inventoryItem.findMany({
@@ -694,7 +755,7 @@ export async function bulkSetOpeningStock(
   const menuItemIds = input.lines.map((l) => l.menuItemId);
   const menuItems = await prisma.menuItem.findMany({
     where: { id: { in: menuItemIds }, restaurantId: ctx.restaurantId },
-    select: { id: true, name: true, unit: true },
+    select: { id: true, name: true, unit: true, inventoryTrackingMethod: true },
   });
   const menuItemById = new Map(menuItems.map((m) => [m.id, m]));
   const missing = menuItemIds.filter((id) => !menuItemById.has(id));
@@ -702,16 +763,15 @@ export async function bulkSetOpeningStock(
     throw new Error(`Artikli ne pripadaju ovom restoranu ili ne postoje: ${missing.join(", ")}`);
   }
 
-  // P1.3: this function force-sets trackStock=true on every line it touches
-  // (see below) — reject the WHOLE batch outright if any line targets a
-  // recipe-governed item, rather than silently reactivating the exact
-  // dual-stock state addRecipeLine's atomic transition exists to prevent.
-  // Same "reject the whole batch" precedent as the "foreign menu item" check
-  // above — the client-side candidate lists (InitModal/OpeningStockModal)
-  // already exclude these, so this is a server-side backstop, not the
-  // primary UX.
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(prisma, menuItemIds);
-  const recipeGoverned = menuItemIds.filter((id) => recipeMenuItemIds.has(id));
+  // P1.6: this function force-sets inventoryTrackingMethod=DIRECT_STOCK on
+  // every line it touches (see below) — reject the WHOLE batch outright if
+  // any line targets a RECIPE-governed item, rather than silently
+  // reactivating the exact dual-stock state addRecipeLine's atomic
+  // transition exists to prevent. Same "reject the whole batch" precedent
+  // as the "foreign menu item" check above — the client-side candidate
+  // lists (InitModal/OpeningStockModal) already exclude these, so this is a
+  // server-side backstop, not the primary UX.
+  const recipeGoverned = menuItems.filter((m) => m.inventoryTrackingMethod === "RECIPE").map((m) => m.id);
   if (recipeGoverned.length > 0) {
     const names = recipeGoverned.map((id) => menuItemById.get(id)?.name ?? id).join(", ");
     throw new Error(
@@ -772,7 +832,7 @@ export async function bulkSetOpeningStock(
           movementId = mov.id;
         }
 
-        await tx.menuItem.update({ where: { id: line.menuItemId }, data: { trackStock: true } });
+        await tx.menuItem.update({ where: { id: line.menuItemId }, data: { trackStock: true, inventoryTrackingMethod: "DIRECT_STOCK" } });
 
         out.push({ menuItemId: line.menuItemId, menuItemName: menuItem.name, before, after, movementId });
       }
@@ -824,12 +884,15 @@ export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId
     return { itemsAffected: 0, itemsUnchanged: 0, results: [] };
   }
 
-  // P1.3: never reconcile a recipe-governed item's frozen historical stock —
+  // P1.6: never reconcile a RECIPE-governed item's frozen historical stock —
   // it's no longer sellable finished-goods, only a preserved historical
   // record. "Postavi sve na 0" must skip it entirely, not silently zero it.
-  const recipeMenuItemIds = await getMenuItemIdsWithRecipes(
-    prisma,
-    tracked.map((t) => t.menuItemId)
+  const methodByMenuItem = await prisma.menuItem.findMany({
+    where: { id: { in: tracked.map((t) => t.menuItemId) } },
+    select: { id: true, inventoryTrackingMethod: true },
+  });
+  const recipeMenuItemIds = new Set(
+    methodByMenuItem.filter((m) => m.inventoryTrackingMethod === "RECIPE").map((m) => m.id)
   );
   const directStockOnly = tracked.filter((t) => !recipeMenuItemIds.has(t.menuItemId));
   if (directStockOnly.length === 0) {

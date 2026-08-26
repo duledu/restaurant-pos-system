@@ -363,7 +363,7 @@ describe("inventory: odbitak pri prodaji (decrementOnSale)", () => {
       initialStock: 10,
     });
 
-    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false);
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false, { confirmSwitchAwayFromDirectStock: true });
 
     await inventory.decrementOnSale({
       paymentId: randomUUID(),
@@ -442,7 +442,7 @@ describe("inventory: pracenje i minimum stanje", () => {
       initialStock: 5,
     });
 
-    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false);
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false, { confirmSwitchAwayFromDirectStock: true });
     const mi = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
     expect(mi.trackStock).toBe(false);
 
@@ -682,7 +682,7 @@ describe("inventory: transakciona integracija sa naplatom", () => {
       locationId: fixture.locationId,
       initialStock: 5,
     });
-    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false);
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false, { confirmSwitchAwayFromDirectStock: true });
 
     const result = await payTrackedOrder(fixture, waiter);
 
