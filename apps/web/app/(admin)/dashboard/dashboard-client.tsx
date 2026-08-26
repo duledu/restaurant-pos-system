@@ -90,8 +90,10 @@ interface AntiFraudOverview {
   cashDiscrepancyShiftsCount: number;
   inventoryCorrectionsCount: number;
 }
-interface StockAttentionItem { id: string; name: string; currentStock: string; minimumStock: number | null; unit: string; status: "out" | "low" }
-interface StockAttentionSummary { outOfStockCount: number; lowStockCount: number; worstItems: StockAttentionItem[] }
+interface StockAttentionItem { id: string; name: string; currentStock: string; minimumStock: number | null; unit: string; status: "negative" | "out" | "low" }
+interface StockAttentionSummary { negativeStockCount: number; outOfStockCount: number; lowStockCount: number; worstItems: StockAttentionItem[] }
+interface IngredientStockAttentionItem { id: string; ingredientName: string; currentStock: string; unit: string; locationId: string; locationName: string }
+interface IngredientStockAttentionSummary { negativeStockCount: number; worstItems: IngredientStockAttentionItem[] }
 
 interface DashboardData {
   kpi: KpiComparison;
@@ -112,6 +114,7 @@ interface DashboardData {
   signals: AntiFraudSignal[];
   antifraud: AntiFraudOverview;
   stock: StockAttentionSummary;
+  ingredientStock: IngredientStockAttentionSummary;
 }
 
 type EmployeeSortKey = "sales" | "orders" | "avgOrder";
@@ -150,7 +153,7 @@ export function DashboardClient() {
       const [
         kpi, trend, hourly, weekdaysRes, stations, items, categories, employees,
         employeesNormalized, voids, discounts, payments, shifts, insightsRes,
-        statusRes, signalsRes, antifraudRes, stockRes,
+        statusRes, signalsRes, antifraudRes, stockRes, ingredientStockRes,
       ] = await Promise.all([
         apiFetch(`/api/admin/analytics/kpi?${query}`),
         apiFetch(`/api/admin/analytics/trend?${query}`),
@@ -173,12 +176,13 @@ export function DashboardClient() {
         apiFetch(`/api/admin/antifraud/signals?${query}`),
         apiFetch(`/api/admin/antifraud/overview?${query}`),
         apiFetch(`/api/admin/inventory/attention?locationId=${filters.locationId}`),
+        apiFetch(`/api/admin/ingredients/attention?locationId=${filters.locationId}`),
       ]);
       setData({
         kpi, trend, hourly, weekdays: weekdaysRes.weekdays, stations, items, categories,
         employees: employees.rows, employeesNormalized, voids, discounts, payments, shifts,
         insights: insightsRes.insights, status: statusRes, signals: signalsRes.signals,
-        antifraud: antifraudRes, stock: stockRes,
+        antifraud: antifraudRes, stock: stockRes, ingredientStock: ingredientStockRes,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju kontrolne table");
@@ -408,11 +412,15 @@ export function DashboardClient() {
             <section>
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-inkSoft">Zalihe</h2>
               <Card className="p-5">
-                {data.stock.outOfStockCount === 0 && data.stock.lowStockCount === 0 ? (
+                {data.stock.negativeStockCount === 0 && data.stock.outOfStockCount === 0 && data.stock.lowStockCount === 0 && data.ingredientStock.negativeStockCount === 0 ? (
                   <EmptyState title="Nema artikala sa niskom zalihom." compact />
                 ) : (
                   <>
-                    <div className="mb-3 grid grid-cols-2 gap-3 text-center">
+                    <div className="mb-3 grid grid-cols-3 gap-3 text-center">
+                      <div>
+                        <p className="text-lg font-bold text-danger">{data.stock.negativeStockCount}</p>
+                        <p className="text-xs text-inkSoft">negativna zaliha</p>
+                      </div>
                       <div>
                         <p className="text-lg font-bold text-danger">{data.stock.outOfStockCount}</p>
                         <p className="text-xs text-inkSoft">nema na zalihama</p>
@@ -422,19 +430,44 @@ export function DashboardClient() {
                         <p className="text-xs text-inkSoft">niska zaliha</p>
                       </div>
                     </div>
+                    {data.stock.worstItems.length > 0 && (
+                      <ul className="space-y-1.5 border-t border-line pt-3">
+                        {data.stock.worstItems.map((it) => (
+                          <li key={it.id} className="flex items-center justify-between text-xs">
+                            <span className="text-ink">{it.name}</span>
+                            <Badge tone={it.status === "negative" ? "dangerSolid" : it.status === "out" ? "danger" : "warn"}>
+                              {it.currentStock} {it.unit}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+                <Link href="/inventory" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na zalihe →</Link>
+              </Card>
+
+              <h2 className="mb-3 mt-4 text-xs font-semibold uppercase tracking-widest text-inkSoft">Sirovine — negativna zaliha</h2>
+              <Card className={data.ingredientStock.negativeStockCount > 0 ? "p-5 shadow-[inset_3px_0_0_#B91C1C]" : "p-5"}>
+                {data.ingredientStock.negativeStockCount === 0 ? (
+                  <EmptyState title="Nema sirovina sa negativnom zalihom." compact />
+                ) : (
+                  <>
+                    <p className="mb-3 text-sm text-ink">
+                      <span className="text-lg font-bold text-danger">{data.ingredientStock.negativeStockCount}</span>{" "}
+                      {data.ingredientStock.negativeStockCount === 1 ? "sirovina ima" : "sirovine imaju"} negativnu zalihu.
+                    </p>
                     <ul className="space-y-1.5 border-t border-line pt-3">
-                      {data.stock.worstItems.map((it) => (
+                      {data.ingredientStock.worstItems.map((it) => (
                         <li key={it.id} className="flex items-center justify-between text-xs">
-                          <span className="text-ink">{it.name}</span>
-                          <Badge tone={it.status === "out" ? "danger" : "warn"}>
-                            {it.currentStock} {it.unit}
-                          </Badge>
+                          <span className="text-ink">{it.ingredientName} <span className="text-inkSoft">· {it.locationName}</span></span>
+                          <Badge tone="dangerSolid">{it.currentStock} {it.unit}</Badge>
                         </li>
                       ))}
                     </ul>
                   </>
                 )}
-                <Link href="/inventory" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na zalihe →</Link>
+                <Link href="/ingredients" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na sirovine →</Link>
               </Card>
             </section>
           </div>

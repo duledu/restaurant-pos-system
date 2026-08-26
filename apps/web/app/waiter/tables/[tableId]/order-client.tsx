@@ -32,15 +32,18 @@ interface MenuItemStock {
   trackingEnabled: boolean;
   currentStock: string | null;
   minimumStock: string | null;
-  stockStatus: "OUT" | "LOW" | "OK" | null;
+  stockStatus: "NEGATIVE" | "OUT" | "LOW" | "OK" | null;
 }
 interface RecipeAvailability {
-  status: "AVAILABLE" | "LOW" | "OUT";
+  status: "NEGATIVE" | "AVAILABLE" | "LOW" | "OUT";
   availablePortions: number;
   limitingIngredientName: string | null;
   // P1.6: false = artikal je u RECIPE modu ali nema definisan normativ
   // ("Normativ nije podešen") — odvojeno od običnog "nema dovoljno sirovina".
   configured: boolean;
+  // P1.7: true iff configured — negativna/nedovoljna zaliha više NE
+  // sprečava prodaju, samo prikazuje savetodavno upozorenje.
+  sellAllowed: boolean;
 }
 interface MenuItem {
   id: string;
@@ -571,23 +574,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
    * dodataka (specifikacija #10), inače otvara ModifierSelectionModal. */
-  /** P3.3: frontend je SAVETODAVNO — server (orders.addItem) je autoritet i
-   * odbija dodavanje OUT artikla bez obzira na ovo (specifikacija #4/#7).
-   * Ovo samo sprečava očigledno beskorisan zahtev i daje trenutnu povratnu
-   * informaciju bez čekanja mrežnog odgovora. */
+  /** P1.7: recorded stock (any level — negative, zero, low) NEVER blocks a
+   * normal sale — TableCore's inventory is control/alerting, not a hard
+   * sales gate (the restaurant may physically have the goods even if the
+   * record is behind). The ONE remaining hard block is a RECIPE item with
+   * no configured normative at all — TableCore genuinely doesn't know what
+   * to deduct, that's a configuration failure, not a stock shortage. */
   function handleTapMenuItem(item: MenuItem) {
     if (cartBusy) return;
-    if (item.stock?.stockStatus === "OUT") {
-      setError(`${item.name} — nema na zalihama.`);
-      return;
-    }
-    if (item.recipeAvailability?.status === "OUT") {
-      if (!item.recipeAvailability.configured) {
-        setError(`${item.name} — normativ nije podešen.`);
-        return;
-      }
-      const limiting = item.recipeAvailability.limitingIngredientName;
-      setError(limiting ? `${item.name} — nema dovoljno sirovina (${limiting}).` : `${item.name} — nema dovoljno sirovina.`);
+    if (item.recipeAvailability !== null && !item.recipeAvailability.configured) {
+      setError(`${item.name} — normativ nije podešen.`);
       return;
     }
     if (item.modifierGroups.length === 0) {
@@ -796,8 +792,14 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
         <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
           {visibleItems.map((item) => {
-            const isOut = item.stock?.stockStatus === "OUT" || item.recipeAvailability?.status === "OUT";
-            const isLow = item.stock?.stockStatus === "LOW" || item.recipeAvailability?.status === "LOW";
+            // P1.7: recorded stock level is advisory ONLY — never disables
+            // the button. The ONE surviving hard block is a RECIPE item
+            // with no configured normative (handleTapMenuItem enforces
+            // this server-side too).
+            const notConfigured = item.recipeAvailability !== null && !item.recipeAvailability.configured;
+            const level = item.stock?.stockStatus ?? item.recipeAvailability?.status ?? null;
+            const isNegativeOrOut = level === "NEGATIVE" || level === "OUT";
+            const isLow = level === "LOW";
             // Recepturisan artikal nema sopstveni "trenutno stanje" broj —
             // ima izračunate porcije (ograničavajuća sirovina), zato
             // dobija sopstveni jasan tekst umesto formatStockQty (koji
@@ -807,10 +809,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
               <button
                 key={item.id}
                 onClick={() => handleTapMenuItem(item)}
-                disabled={cartBusy || isOut}
-                aria-disabled={isOut}
+                disabled={cartBusy || notConfigured}
+                aria-disabled={notConfigured}
                 className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
-                  isOut ? "border-line bg-ink/[0.03]" : "border-line bg-white sm:hover:border-gold/60 sm:hover:shadow-card"
+                  notConfigured ? "border-line bg-ink/[0.03]" : "border-line bg-white sm:hover:border-gold/60 sm:hover:shadow-card"
                 }`}
               >
                 <div className="font-semibold leading-snug text-ink">
@@ -821,18 +823,19 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <span className="text-base font-bold tabular-nums text-gold-dark">
                     {Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
                   </span>
-                  {isOut && (
+                  {notConfigured && (
                     <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-semibold text-danger">
-                      {isRecipeItem
-                        ? !item.recipeAvailability!.configured
-                          ? "Normativ nije podešen"
-                          : item.recipeAvailability!.limitingIngredientName
-                            ? `Nema dovoljno sirovina — ${item.recipeAvailability!.limitingIngredientName}`
-                            : "Nema dovoljno sirovina"
-                        : "Nema na zalihama"}
+                      Normativ nije podešen
                     </span>
                   )}
-                  {isLow && !isOut && (
+                  {/* P1.7 §20: simple advisory for the waiter, never quantities/negative
+                      jargon — OWNER/ADMIN/MANAGER get the full picture on Zalihe/Sirovine. */}
+                  {!notConfigured && isNegativeOrOut && (
+                    <span className="rounded-full bg-danger px-2 py-0.5 text-[10px] font-semibold text-white">
+                      {isRecipeItem ? "Proveri zalihu" : "Nema evidentirane zalihe"}
+                    </span>
+                  )}
+                  {!notConfigured && isLow && (
                     <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[10px] font-semibold text-warn">
                       {isRecipeItem ? `Još ${item.recipeAvailability!.availablePortions} porcija` : `Još ${formatStockQty(item.stock!.currentStock ?? "0")}`}
                     </span>

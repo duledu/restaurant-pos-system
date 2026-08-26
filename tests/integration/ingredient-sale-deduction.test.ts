@@ -4,17 +4,24 @@
  * Pokriva (vidi PART 29 zahteva): 1. jedan artikal -> jedna sirovina, 2.
  * jedan artikal -> više sirovina, 3. množenje količinom, 4. više artikala
  * deli istu sirovinu, 5. kg/g preciznost, 6. l/ml preciznost, 7. komad
- * (PIECE), 8. preciznost malih decimala, 9. nedovoljno JEDNE sirovine, 10.
- * više nedostataka odjednom, 11. nema delimičnog skidanja, 12.
- * konkurentnost, 13. izolacija po lokaciji, 14. izolacija po restoranu, 15.
- * artikal bez recepture, 16. neaktivna sirovina i dalje u postojećoj
- * recepturi, 17. idempotentnost ponovljene naplate, 18. SALE audit trag,
- * 19. istorijsko kretanje preživljava izmenu recepture, 20. poništavanje
- * pre naplate ne skida ništa, 21. refund ne vraća automatski sirovine
- * (trenutno ne postoji refund koncept — dokumentovano ispod), 22. običan
- * konobar ne treba inventory.manage, 23. postojeći gotov-proizvod inventar
- * ostaje funkcionalan uz recepture, 24. KDS lanac nepromenjen, 25. rollback
- * integritet Payment/Receipt-a.
+ * (PIECE), 8. preciznost malih decimala, 12. konkurentnost, 13. izolacija po
+ * lokaciji, 14. izolacija po restoranu, 15. artikal bez recepture, 16.
+ * neaktivna sirovina i dalje u postojećoj recepturi, 17. idempotentnost
+ * ponovljene naplate, 18. SALE audit trag, 19. istorijsko kretanje
+ * preživljava izmenu recepture, 20. poništavanje pre naplate ne skida
+ * ništa, 21. refund ne vraća automatski sirovine (trenutno ne postoji
+ * refund koncept — dokumentovano ispod), 22. običan konobar ne treba
+ * inventory.manage, 23. postojeći gotov-proizvod inventar ostaje
+ * funkcionalan uz recepture, 24. KDS lanac nepromenjen.
+ *
+ * P1.7 (negativna zaliha — vidi audit "Allow negative inventory instead of
+ * blocking sales"): 9/10/11 su PREVAZIĐENI — nedovoljna evidentirana zaliha
+ * (jedne ili više sirovina) NIKAD više ne blokira naplatu, i NEMA
+ * "delimičnog skidanja" izuzeća — SVE potrebne sirovine se odbijaju u
+ * potpunosti, čak i one koje idu u negativno. 25 (rollback) je takođe
+ * PREVAZIĐEN za slučaj manjka zalihe (naplata sada uspeva) — rollback i
+ * dalje važi ISKLJUČIVO za pravu grešku konfiguracije (RecipeNotConfiguredError)
+ * ili stvaran DB kvar, ne za nedovoljnu zalihu.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
@@ -253,45 +260,41 @@ describe("Unit precision: kg, l, piece — no floating-point drift", () => {
 
 // ─── 9, 10, 11: insufficient stock, multiple shortages, no partial deduction ─
 
-describe("Insufficient stock: single shortage, multiple shortages, atomicity", () => {
-  it("rejects payment when a single required ingredient is short, and does not touch stock", async () => {
+describe("P1.7 audit scenario C/D: insufficient recorded stock NEVER blocks payment — deducts fully, goes negative", () => {
+  it("scenario C: payment succeeds despite a shortage, exact recipe quantity deducted, ingredient goes negative", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
-    // P1.4: seeded with ENOUGH stock so add/submit succeed (that layer is
-    // now covered separately in recipe-availability.test.ts) — then the
-    // stock is depleted via an admin write-off AFTER submit, simulating the
-    // realistic race this test is actually about: stock changing between
-    // submit and payment. Payment must still be the final authority.
     const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.5);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
 
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 2 }); // needs 0.4, have 0.5 — passes at add-time
+    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 2 }); // needs 0.4, have 0.5 at add-time
     const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
 
     const meatStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
     await ingredients.writeOffStock(owner, meatStockRow.id, { quantity: 0.2, reason: "Kvar" }); // 0.5 -> 0.3, now short of the 0.4 needed
 
-    await expect(billing.completePayment(waiter, submitted.id, { method: "CASH" })).rejects.toThrow(
-      "Nema dovoljno sirovina"
-    );
+    // P1.7: payment succeeds anyway — recorded shortage is never a sales gate.
+    const result = await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    expect(result.payment.id).toBeTruthy();
 
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBe(0.3); // NETAKNUTO (osim write-off-a iznad)
+    expect(Number(stock.currentStock)).toBeCloseTo(-0.1, 9); // 0.3 - 0.4 = -0.1, exact recipe deduction, never blocked
+
+    const saleMovement = await prisma.ingredientMovement.findFirstOrThrow({ where: { ingredientId: meat.id, type: "SALE" } });
+    expect(Number(saleMovement.quantityDelta)).toBeCloseTo(-0.4, 9);
+    expect(Number(saleMovement.quantityBefore)).toBe(0.3);
+    expect(Number(saleMovement.quantityAfter)).toBeCloseTo(-0.1, 9);
   });
 
-  it("reports ALL shortages at once, and deducts NOTHING when even one ingredient is short (atomicity)", async () => {
+  it("scenario D: multiple deficient ingredients — ALL deducted in full (none skipped), each goes negative independently", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Burger");
-    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10); // stays plenty throughout
-    // P1.4: onion/bun seeded with ENOUGH stock so add/submit succeed, then
-    // depleted via admin write-offs AFTER submit — same race-simulation
-    // pattern as the single-shortage test above (add/submit-time blocking
-    // is covered separately in recipe-availability.test.ts).
+    const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 10); // plenty throughout
     const onion = await seedIngredient(owner, fixture, "Luk", "KILOGRAM", 0.1);
     const bun = await seedIngredient(owner, fixture, "Lepinja", "PIECE", 2);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
@@ -301,7 +304,7 @@ describe("Insufficient stock: single shortage, multiple shortages, atomicity", (
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 }); // passes: 0.2/0.05/1 all sufficient
+    await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 }); // passes: 0.2/0.05/1 all sufficient at add-time
     const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
 
     const onionStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: onion.id, locationId: fixture.locationId } });
@@ -309,29 +312,29 @@ describe("Insufficient stock: single shortage, multiple shortages, atomicity", (
     const bunStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: bun.id, locationId: fixture.locationId } });
     await ingredients.writeOffStock(owner, bunStockRow.id, { quantity: 2, reason: "Kvar" }); // 2 -> 0, short of 1
 
-    let caught: unknown;
-    try {
-      await billing.completePayment(waiter, submitted.id, { method: "CASH" });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(ingredients.InsufficientIngredientStockError);
-    const err = caught as InstanceType<typeof ingredients.InsufficientIngredientStockError>;
-    expect(err.items.map((i) => i.name).sort()).toEqual(["Lepinja", "Luk"]); // OBA nedostatka, ne samo prvi
+    // P1.7: payment succeeds — TWO ingredients are short, neither blocks, both deducted in full.
+    const result = await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    expect(result.payment.id).toBeTruthy();
 
-    // Meso (dovoljno) je NETAKNUTO -- nema delimicnog skidanja
     const meatStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(meatStock.currentStock)).toBe(10);
+    expect(Number(meatStock.currentStock)).toBeCloseTo(9.8, 9); // 10 - 0.2, plenty -> stays positive
 
-    const anySaleMovement = await prisma.ingredientMovement.count({ where: { restaurantId: fixture.restaurantId, type: "SALE" } });
-    expect(anySaleMovement).toBe(0);
+    const onionStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: onion.id, locationId: fixture.locationId } });
+    expect(Number(onionStock.currentStock)).toBeCloseTo(-0.04, 9); // 0.01 - 0.05 = -0.04
+
+    const bunStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: bun.id, locationId: fixture.locationId } });
+    expect(Number(bunStock.currentStock)).toBe(-1); // 0 - 1 = -1
+
+    // Sva TRI SALE kretanja zapisana — nijedno preskočeno zbog manjka.
+    const saleMovements = await prisma.ingredientMovement.count({ where: { restaurantId: fixture.restaurantId, type: "SALE" } });
+    expect(saleMovements).toBe(3);
   });
 });
 
 // ─── 12: concurrency ─────────────────────────────────────────────────────────
 
 describe("Concurrency", () => {
-  it("two simultaneous payments requiring more than available stock -- exactly one succeeds, final stock never negative", async () => {
+  it("P1.7 audit scenario G: two simultaneous payments requiring more than recorded stock -- BOTH succeed, final stock goes negative, no lost update", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
@@ -363,14 +366,14 @@ describe("Concurrency", () => {
 
     const succeeded = results.filter((r) => r.status === "fulfilled");
     const failed = results.filter((r) => r.status === "rejected");
-    expect(succeeded).toHaveLength(1);
-    expect(failed).toHaveLength(1);
+    expect(succeeded).toHaveLength(2); // P1.7: neither rejected for "insufficient" stock
+    expect(failed).toHaveLength(0);
 
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBeCloseTo(0.4, 9); // 1 - 0.6, never negative
+    expect(Number(stock.currentStock)).toBeCloseTo(-0.2, 9); // 1 - 0.6 - 0.6 = -0.2, both decrements applied
 
     const saleMovements = await prisma.ingredientMovement.count({ where: { ingredientId: meat.id, type: "SALE" } });
-    expect(saleMovements).toBe(1); // no duplicate SALE movement from the failed side
+    expect(saleMovements).toBe(2); // one per successful payment, no lost update
   });
 
   // completePayment can never reach this state in production — its own
@@ -805,14 +808,11 @@ describe("KDS lifecycle is unaffected by ingredient deduction", () => {
 
 // ─── 25: Payment/Receipt rollback integrity ────────────────────────────────
 
-describe("Rollback integrity: insufficient ingredients rolls back the ENTIRE payment transaction", () => {
-  it("Payment/Receipt are never created, order stays un-completed, table stays occupied when ingredients are insufficient", async () => {
+describe("P1.7: insufficient ingredients no longer roll back the payment — Payment/Receipt/table proceed normally", () => {
+  it("Payment/Receipt ARE created, order IS completed, table IS freed, ingredient goes negative — a recorded shortage is not a payment failure", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Pljeskavica");
-    // P1.4: seeded with enough stock for add/submit to succeed, then
-    // depleted via an admin write-off AFTER submit (race-simulation
-    // pattern, same as the earlier tests in this file).
     const meat = await seedIngredient(owner, fixture, "Mleveno meso", "KILOGRAM", 0.3);
     await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 });
 
@@ -825,22 +825,30 @@ describe("Rollback integrity: insufficient ingredients rolls back the ENTIRE pay
     const meatStockRow = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
     await ingredients.writeOffStock(owner, meatStockRow.id, { quantity: 0.2, reason: "Kvar" }); // 0.3 -> 0.1, now short of 0.2
 
-    await expect(billing.completePayment(waiter, submitted.id, { method: "CASH" })).rejects.toThrow(
-      ingredients.InsufficientIngredientStockError
-    );
+    // P1.7: succeeds — a recorded shortage never fails the payment transaction.
+    const result = await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    expect(result.payment.id).toBeTruthy();
 
     const payment = await prisma.payment.findFirst({ where: { orderId: submitted.id } });
     const receipt = await prisma.receipt.findFirst({ where: { orderId: submitted.id } });
-    expect(payment).toBeNull();
-    expect(receipt).toBeNull();
+    expect(payment).not.toBeNull();
+    expect(receipt).not.toBeNull();
 
     const orderRow = await prisma.order.findUniqueOrThrow({ where: { id: submitted.id } });
-    expect(orderRow.status).not.toBe("COMPLETED");
+    expect(orderRow.status).toBe("COMPLETED");
 
     const tableRow = await prisma.restaurantTable.findUniqueOrThrow({ where: { id: table.id } });
-    expect(tableRow.status).not.toBe("FREE");
+    expect(tableRow.status).toBe("FREE");
 
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meat.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBe(0.1); // netaknuto
+    expect(Number(stock.currentStock)).toBeCloseTo(-0.1, 9); // 0.1 - 0.2 = -0.1, exact recipe deduction
   });
+
+  // §15 payment atomicity is UNCHANGED (still the same prisma.$transaction
+  // wrapping Payment+Receipt+both deduction paths) — the one remaining
+  // scenario that still rolls back everything is a genuine CONFIGURATION
+  // failure (RECIPE with zero lines, RecipeNotConfiguredError — never a
+  // stock-quantity issue), already covered by
+  // inventory-tracking-method.test.ts "RECIPE artikal sa 0 linija blokira i
+  // samu naplatu (rollback, bez mutacije)".
 });

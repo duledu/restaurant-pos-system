@@ -64,10 +64,13 @@ function fmtQty(n: number) {
   return n % 1 === 0 ? n.toString() : n.toFixed(3).replace(/\.?0+$/, "");
 }
 
-function stockStatus(stock: Stock | null): "missing" | "out" | "low" | "ok" {
+// P1.7: NEGATIVE (currentStock < 0) je NAJJAČI status — evidentiran manjak,
+// MORA odgovarati inventory-service.ts getInventoryStockStatus tačno.
+function stockStatus(stock: Stock | null): "missing" | "negative" | "out" | "low" | "ok" {
   if (!stock) return "missing";
   const current = Number(stock.currentStock);
-  if (current <= 0) return "out";
+  if (current < 0) return "negative";
+  if (current === 0) return "out";
   const threshold = stock.lowStockThreshold != null ? Number(stock.lowStockThreshold) : null;
   if (threshold != null && current <= threshold) return "low";
   return "ok";
@@ -347,6 +350,7 @@ function IngredientRow({
   const status = stockStatus(ingredient.stock);
   const statusBadge =
     status === "missing" ? <Badge>Nema stanja</Badge> :
+    status === "negative" ? <Badge tone="dangerSolid">Negativna zaliha</Badge> :
     status === "out" ? <Badge tone="danger">Nema na stanju</Badge> :
     status === "low" ? <Badge tone="warn">Nisko stanje</Badge> :
     <Badge tone="success">OK</Badge>;
@@ -443,6 +447,9 @@ export function IngredientsClient() {
   const [activeTopId, setActiveTopId] = useState<string | null>(null);
   const [activeSubId, setActiveSubId] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
+  // P1.7 audit §9: status filter (client-side over the already-loaded,
+  // location-scoped list — same pattern as inventory-client.tsx Zalihe).
+  const [statusFilter, setStatusFilter] = useState<"all" | "low" | "out" | "negative">("all");
 
   const loadCategories = useCallback(async () => {
     const j = await apiFetch("/api/admin/inventory-categories");
@@ -503,6 +510,11 @@ export function IngredientsClient() {
     setActiveSubId(null);
   }
 
+  const negativeCount = ingredients.filter((i) => stockStatus(i.stock) === "negative").length;
+  const outCount = ingredients.filter((i) => stockStatus(i.stock) === "out").length;
+  const lowCount = ingredients.filter((i) => stockStatus(i.stock) === "low").length;
+  const filteredIngredients = statusFilter === "all" ? ingredients : ingredients.filter((i) => stockStatus(i.stock) === statusFilter);
+
   return (
     <div>
       <PageHeader
@@ -548,17 +560,24 @@ export function IngredientsClient() {
         </label>
       </div>
 
+      <div className="mb-4 flex flex-wrap gap-1.5">
+        <TabPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")} label="Sve" />
+        <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowCount} />
+        <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outCount} />
+        <TabPill active={statusFilter === "negative"} onClick={() => setStatusFilter("negative")} label="Negativna zaliha" count={negativeCount} />
+      </div>
+
       {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-20 w-full" />
           <Skeleton className="h-20 w-full" />
           <Skeleton className="h-20 w-full" />
         </div>
-      ) : ingredients.length === 0 ? (
+      ) : filteredIngredients.length === 0 ? (
         <EmptyState title="Nema sirovina" description="Dodajte prvu sirovinu da biste mogli da definišete normative." />
       ) : (
         <div className="space-y-2">
-          {ingredients.map((i) => (
+          {filteredIngredients.map((i) => (
             <IngredientRow key={i.id} ingredient={i} locationId={locationId} categories={categories} onChanged={() => load(locationId, effectiveCategoryId)} />
           ))}
         </div>

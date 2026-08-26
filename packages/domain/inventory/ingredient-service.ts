@@ -2,46 +2,27 @@
  * P1: Normativi/sirovine — sirovinski lager (Ingredient/IngredientStock/
  * IngredientMovement). NAMERNO potpuno odvojeno od inventory-service.ts
  * (koji prati gotov MenuItem "na stanju") — vidi napomenu na vrhu te
- * sekcije u schema.prisma. Isti obrasci (atomični uslovni UPDATE za
- * konkurentnost, ledger uz svaku promenu, requirePermission/
- * requireLocationAccess/scopeToRestaurant, recordAuditEntry) su namerno
- * ponovo iskorišćeni odavde — dokazano ispravni, nema razloga za novi stil.
+ * sekcije u schema.prisma. Isti obrasci (ledger uz svaku promenu,
+ * requirePermission/requireLocationAccess/scopeToRestaurant,
+ * recordAuditEntry) su namerno ponovo iskorišćeni odavde — dokazano
+ * ispravni, nema razloga za novi stil.
  *
- * P1.2: `validateAndDecrementIngredientsInTx` (na dnu fajla) POVEZUJE
+ * P1.2/P1.7: `validateAndDecrementIngredientsInTx` (na dnu fajla) POVEZUJE
  * recepture sa naplatom — poziva se iz billing-service.ts/completePayment,
  * unutar ISTE transakcije kao gotov-proizvod ekvivalent
  * (inventory-service.ts validateAndDecrementInventoryInTx). Namerno isti
- * obrazac: agregacija po (ovde: sirovini, ne artiklu) PRE mutacije, atomični
- * uslovni UPDATE za konkurentnost, @@unique(paymentId, ingredientId) kao
- * idempotency brava, InsufficientIngredientStockError kao koherentna,
- * agregirana greška.
+ * obrazac: agregacija po (ovde: sirovini, ne artiklu) PRE mutacije,
+ * @@unique(paymentId, ingredientId) kao idempotency brava. P1.7: naplata
+ * NIKAD ne blokira zbog nedovoljne (ili nepostojeće) evidentirane zalihe —
+ * atomični UPSERT (auto-kreira nedostajući IngredientStock red na 0, pa
+ * odbija) zamenjuje raniji uslovni UPDATE koji je blokirao naplatu.
  */
 import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { ALL_UNITS, unitLabelSr, type UnitOfMeasure } from "./unit-of-measure";
+import { ALL_UNITS, type UnitOfMeasure } from "./unit-of-measure";
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
-
-/**
- * Agregirana greška nedovoljnih sirovina — namerno nosi SVE nedostajuće
- * sirovine odjednom (ne samo prvu na koju se naiđe), tako da konobar/kasa
- * odmah vidi kompletan spisak umesto da otkriva nedostatke jedan po jedan
- * (P1.2 zahtev). Nikad ne izlaže interne ID-jeve — samo naziv/dostupno/
- * potrebno/jedinica, bezbedno za direktan prikaz na UI.
- */
-export class InsufficientIngredientStockError extends Error {
-  readonly items: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }>;
-
-  constructor(items: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }>) {
-    const lines = items
-      .map((i) => `${i.name} — dostupno: ${i.available} ${unitLabelSr(i.unit)}, potrebno: ${i.required} ${unitLabelSr(i.unit)}`)
-      .join("\n");
-    super(`Nema dovoljno sirovina za završetak prodaje.\n${lines}`);
-    this.name = "InsufficientIngredientStockError";
-    this.items = items;
-  }
-}
 
 /**
  * P1.6: artikal je eksplicitno konfigurisan na RECIPE metodu praćenja, ali
@@ -445,11 +426,18 @@ export async function writeOffStock(ctx: AuthContext, ingredientStockId: string,
 
 /**
  * Atomični uslovni UPDATE (ista tehnika kao inventory-service.ts
- * _applyDelta) — WHERE klauzula sprečava negativno stanje i istovremeno
- * zatvara konkurentnu trku: dva paralelna zahteva nad ISTIM redom se
- * serijalizuju kroz Postgres-ovo row-level zaključavanje, drugi vidi već
- * committed rezultat prvog. `quantity >= 0` je tvrdo pravilo ove faze
- * (specifikacija #16) — nema posebne "dozvoljene" korekcije ispod nule.
+ * _applyDelta) — WHERE klauzula zatvara konkurentnu trku: dva paralelna
+ * zahteva nad ISTIM redom se serijalizuju kroz Postgres-ovo row-level
+ * zaključavanje, drugi vidi već committed rezultat prvog.
+ *
+ * P1.7: `delta >= 0` (RECEIPT, ili pozitivna ADJUSTMENT korekcija) UVEK
+ * uspeva bez obzira na trenutno stanje — čak i kad je ono već negativno
+ * (audit §10/§18: "current -0.050kg, RECEIPT +2.000kg -> 1.950kg" mora
+ * raditi, čak i kad RECEIPT ne pokriva CEO manjak). Samo `delta < 0`
+ * (WRITE_OFF, ili negativna ADJUSTMENT korekcija) ostaje uslovljen — ručna
+ * korekcija ne sme sama gurnuti stanje DUBLJE u negativno (zaštita od
+ * greške u kucanju, namerno odvojeno pravilo od naplate — vidi napomenu
+ * uz inventory-service.ts _applyDelta).
  */
 async function applyDelta(
   ctx: AuthContext,
@@ -477,7 +465,7 @@ async function applyDelta(
       SET "currentStock" = "currentStock" + ${delta}::numeric
       WHERE id = ${ingredientStockId}
         AND "restaurantId" = ${ctx.restaurantId}
-        AND "currentStock" + ${delta}::numeric >= 0
+        AND (${delta}::numeric >= 0 OR "currentStock" >= -${delta}::numeric)
       RETURNING id, "restaurantId", "locationId", "ingredientId", "currentStock"
     `;
     const updated = rows[0];
@@ -675,37 +663,14 @@ async function computeRequiredIngredients(
 }
 
 /**
- * Read-only provera nedostataka za dati skup potreba naspram
- * IngredientStock — jedan upit bez obzira na broj sirovina. NIKAD ne
- * mutira. Deljeno između validateAndDecrementIngredientsInTx (korak 4, PRE
- * mutacije) i assertIngredientStockAvailable (kompletna provera).
+ * P1.7: naplata NIKAD ne blokira zbog nedovoljne (ili nepostojeće)
+ * evidentirane zalihe sirovine — vidi napomenu na vrhu fajla. Sirovina bez
+ * IngredientStock reda na ovoj lokaciji se atomično upserta u postojanje
+ * (implicitno od 0), NIKAD tretirana kao "neograničeno dostupna" niti
+ * razlog za blokadu (audit §12). Rezultat MOŽE biti negativan — to je
+ * validno, potpuno auditovano stanje (RECEIPT kasnije prirodno pomiri
+ * knjigu, vidi initializeTracking/receiveStock).
  */
-async function findIngredientShortages(
-  db: Prisma.TransactionClient | typeof prisma,
-  restaurantId: string,
-  locationId: string,
-  requiredByIngredient: Map<string, IngredientRequirement>
-) {
-  const ingredientIds = [...requiredByIngredient.keys()];
-  const stocks =
-    ingredientIds.length > 0
-      ? await db.ingredientStock.findMany({
-          where: { restaurantId, locationId, ingredientId: { in: ingredientIds } },
-        })
-      : [];
-  const stockByIngredient = new Map(stocks.map((s) => [s.ingredientId, s]));
-
-  const shortages: Array<{ name: string; available: string; required: string; unit: UnitOfMeasure }> = [];
-  for (const req of requiredByIngredient.values()) {
-    const stock = stockByIngredient.get(req.ingredientId);
-    const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
-    if (available.lessThan(req.required)) {
-      shortages.push({ name: req.name, available: available.toString(), required: req.required.toString(), unit: req.unit });
-    }
-  }
-  return { shortages, stockByIngredient };
-}
-
 export async function validateAndDecrementIngredientsInTx(
   tx: Prisma.TransactionClient,
   input: {
@@ -725,9 +690,11 @@ export async function validateAndDecrementIngredientsInTx(
 
   // P1.6: filtrira SAMO na RECIPE-mod artikle (baca RecipeNotConfiguredError
   // pre bilo kakve mutacije ako je neki od njih bez ijedne linije recepture
-  // — "Normativ nije podešen"). Zaostala MenuItemIngredient linija na
-  // artiklu koji je u međuvremenu prešao na DIRECT_STOCK/NO_TRACKING se
-  // OVDE isključuje iz odbitka, ne u computeRequiredIngredients.
+  // — "Normativ nije podešen"; ovo OSTAJE tvrda blokada, §3: nedostatak
+  // KONFIGURACIJE nije isto što i nedostatak ZALIHE). Zaostala
+  // MenuItemIngredient linija na artiklu koji je u međuvremenu prešao na
+  // DIRECT_STOCK/NO_TRACKING se OVDE isključuje iz odbitka, ne u
+  // computeRequiredIngredients.
   const recipeQtyByMenuItem = await filterToConfiguredRecipeItems(tx, input.restaurantId, soldQtyByMenuItem);
   if (recipeQtyByMenuItem.size === 0) return;
 
@@ -745,45 +712,28 @@ export async function validateAndDecrementIngredientsInTx(
   }
   if (requiredByIngredient.size === 0) return; // sve već obrađeno za ovaj payment (retry no-op)
 
-  // Korak 4 — read-only provera SVIH sirovina PRE bilo kakve mutacije.
-  const { shortages, stockByIngredient } = await findIngredientShortages(tx, input.restaurantId, input.locationId, requiredByIngredient);
-  if (shortages.length > 0) {
-    throw new InsufficientIngredientStockError(shortages);
-  }
-
-  // Korak 5 — stvarna, konkurentnost-bezbedna mutacija. Svaka sirovina
-  // garantovano ima stock red ovde (inače bi korak 4 već bacio grešku).
+  // Konkurentnost: tx.ingredientStock.upsert kompajlira se u JEDAN atomični
+  // `INSERT ... ON CONFLICT (locationId, ingredientId) DO UPDATE` na
+  // PostgreSQL-u — dva konkurentna zahteva nad ISTIM (čak i nepostojećim)
+  // redom se serijalizuju kroz row-level zaključavanje, oba legitimna
+  // prodaja uspevaju, konačno stanje MOŽE biti negativno, nikad izgubljen
+  // update.
   for (const req of requiredByIngredient.values()) {
-    const stock = stockByIngredient.get(req.ingredientId)!;
-    const requiredStr = req.required.toString();
+    const stock = await tx.ingredientStock.upsert({
+      where: { locationId_ingredientId: { locationId: input.locationId, ingredientId: req.ingredientId } },
+      create: {
+        restaurantId: input.restaurantId,
+        locationId: input.locationId,
+        ingredientId: req.ingredientId,
+        currentStock: req.required.neg(),
+      },
+      update: { currentStock: { decrement: req.required } },
+    });
 
-    type Row = { currentStock: string };
-    const rows = await tx.$queryRaw<Row[]>`
-      UPDATE ingredient_stocks
-      SET "currentStock" = "currentStock" - ${requiredStr}::numeric
-      WHERE id = ${stock.id}
-        AND "currentStock" >= ${requiredStr}::numeric
-      RETURNING "currentStock"
-    `;
-
-    if (rows.length === 0) {
-      // Izgubljena trka NAKON koraka 4 (redak slučaj prave konkurentnosti) —
-      // izveštava se kao nedovoljno stanje za OVU sirovinu.
-      const current = await tx.ingredientStock.findUnique({
-        where: { id: stock.id },
-        select: { currentStock: true },
-      });
-      throw new InsufficientIngredientStockError([
-        {
-          name: req.name,
-          available: (current?.currentStock ?? new Prisma.Decimal(0)).toString(),
-          required: requiredStr,
-          unit: req.unit,
-        },
-      ]);
-    }
-
-    const after = new Prisma.Decimal(rows[0].currentStock);
+    // Izvedeno, ne pročitano posebno — matematički tačno bez obzira da li
+    // je red upravo kreiran ili je već postojao (ista tehnika kao
+    // inventory-service.ts validateAndDecrementInventoryInTx).
+    const after = new Prisma.Decimal(stock.currentStock);
     const before = after.add(req.required);
 
     await tx.ingredientMovement.create({
@@ -830,26 +780,15 @@ export interface IngredientAvailabilityRequirement {
 }
 
 /**
- * Read-only pre-check — the ingredient/recipe-side twin of
- * inventory-service.ts assertStockAvailable, called ALONGSIDE it (not
- * instead of) from order-service.ts addItem/updateItem/submitOrder. NEVER
- * mutates IngredientStock — that remains exclusively
- * validateAndDecrementIngredientsInTx's job at Payment (P1.4 requirement:
- * do not move deduction earlier).
- *
- * Aggregates by menuItemId FIRST (same reason as assertStockAvailable: two
- * lines of the same item with different modifiers must sum before
- * checking), then computeRequiredIngredients aggregates AGAIN by
- * ingredient across every recipe-produced item in the requirement set —
- * two different menu items sharing an ingredient (e.g. Omlet + Omlet sa
- * sirom both needing eggs) correctly combine into one demand figure
- * instead of being checked independently against the same starting stock.
- *
- * Items with no configured recipe are silently absent from
- * computeRequiredIngredients's result — this function only ever concerns
- * itself with recipe-governed items, symmetric with the double-deduction
- * defense in inventory-service.ts (a configured recipe always wins, and
- * conversely direct-stock items are never touched here).
+ * P1.7: read-only pre-check called from order-service.ts
+ * addItem/updateItem/submitOrder. Its ONLY remaining job is the
+ * RecipeNotConfiguredError "Normativ nije podešen" configuration check
+ * (audit §3/§4: that block stays — a missing NORMATIVE is a configuration
+ * failure, not a stock shortage, and TableCore genuinely does not know
+ * what to deduct). Stock-SHORTAGE blocking has been removed entirely — a
+ * configured RECIPE item is always addable/submittable regardless of
+ * recorded ingredient stock (deduction, and the possibility of going
+ * negative, happens exclusively at Payment — validateAndDecrementIngredientsInTx).
  */
 export async function assertIngredientStockAvailable(
   db: Prisma.TransactionClient | typeof prisma,
@@ -861,27 +800,24 @@ export async function assertIngredientStockAvailable(
   }
   if (qtyByMenuItem.size === 0) return;
 
-  // P1.6: filter down to RECIPE-mode items only (blocks early — same
-  // RecipeNotConfiguredError rule as payment, surfaced sooner so the
-  // waiter never even gets to submit it) — see filterToConfiguredRecipeItems
-  // for why this filter, not computeRequiredIngredients, is the real gate.
-  const recipeQtyByMenuItem = await filterToConfiguredRecipeItems(db, input.restaurantId, qtyByMenuItem);
-  if (recipeQtyByMenuItem.size === 0) return;
-
-  const requiredByIngredient = await computeRequiredIngredients(db, recipeQtyByMenuItem);
-  if (requiredByIngredient.size === 0) return; // none of these items has a configured recipe
-
-  const { shortages } = await findIngredientShortages(db, input.restaurantId, input.locationId, requiredByIngredient);
-  if (shortages.length > 0) {
-    throw new InsufficientIngredientStockError(shortages);
-  }
+  // Throws RecipeNotConfiguredError if any RECIPE-mode item in the set has
+  // zero recipe lines — the sole remaining gate. `input.locationId` is
+  // unused now that there's no stock check left, kept in the signature for
+  // call-site stability (order-service.ts passes it alongside restaurantId).
+  await filterToConfiguredRecipeItems(db, input.restaurantId, qtyByMenuItem);
 }
 
-export type RecipeAvailabilityStatus = "AVAILABLE" | "LOW" | "OUT";
+export type RecipeAvailabilityStatus = "NEGATIVE" | "AVAILABLE" | "LOW" | "OUT";
 
 export interface RecipeAvailabilityInfo {
   status: RecipeAvailabilityStatus;
-  /** floor(min over recipe lines of currentStock / lineQuantity), never negative. */
+  /**
+   * floor(min over recipe lines of currentStock / lineQuantity), CLAMPED
+   * to >= 0 for display — P1.7: this is advisory ("how many portions could
+   * I sell right now"), never a `maximumSellQuantity` cap (audit §5). The
+   * true, possibly-negative underlying ingredient stock is visible on the
+   * Sirovine admin page, not here.
+   */
   availablePortions: number;
   /** Name of the ingredient constraining availablePortions — always set when the item has a configured recipe. */
   limitingIngredientName: string | null;
@@ -894,6 +830,14 @@ export interface RecipeAvailabilityInfo {
    * recipe line.
    */
   configured: boolean;
+  /**
+   * P1.7: true iff `configured` — a configured RECIPE item is ALWAYS
+   * sellable regardless of recorded ingredient stock (status/availablePortions
+   * are purely informational). false ONLY when the normative itself is
+   * missing (§3/§4: "RECIPE-without-normative may remain disabled" is the
+   * one surviving hard block).
+   */
+  sellAllowed: boolean;
 }
 
 /**
@@ -953,29 +897,112 @@ export async function getRecipeAvailabilityForMenuItems(
   for (const menuItemId of recipeItemIds) {
     const lines = linesByMenuItem.get(menuItemId);
     if (!lines || lines.length === 0) {
-      result.set(menuItemId, { status: "OUT", availablePortions: 0, limitingIngredientName: null, configured: false });
+      result.set(menuItemId, { status: "OUT", availablePortions: 0, limitingIngredientName: null, configured: false, sellAllowed: false });
       continue;
     }
 
     let availablePortions = Infinity;
     let limitingName: string | null = null;
+    let limitingAvailable = new Prisma.Decimal(0);
     let limitingIsLow = false;
     for (const line of lines) {
       const stock = stockByIngredient.get(line.ingredientId);
       const available = stock ? new Prisma.Decimal(stock.currentStock) : new Prisma.Decimal(0);
       const perPortion = new Prisma.Decimal(line.quantity);
+      // P1.7: floor() of a NEGATIVE fraction rounds further negative (e.g.
+      // -0.1kg / 0.3kg -> floor(-0.33) = -1), so a negative-stock line
+      // naturally sorts as the most constraining ("limiting") one below —
+      // no separate negative-detection pass needed for that part.
       const possible = Math.floor(available.div(perPortion).toNumber());
       if (possible < availablePortions) {
         availablePortions = possible;
         limitingName = line.ingredient.name;
+        limitingAvailable = available;
         const threshold = stock?.lowStockThreshold != null ? new Prisma.Decimal(stock.lowStockThreshold) : null;
         limitingIsLow = threshold != null && available.lessThanOrEqualTo(threshold);
       }
     }
-    availablePortions = Math.max(0, availablePortions);
-    const status: RecipeAvailabilityStatus = availablePortions <= 0 ? "OUT" : limitingIsLow ? "LOW" : "AVAILABLE";
-    result.set(menuItemId, { status, availablePortions, limitingIngredientName: limitingName, configured: true });
+    const displayPortions = Math.max(0, availablePortions);
+    // P1.7: NEGATIVE requires the underlying ingredient STOCK itself to be
+    // negative (a recorded deficit) — OUT is the pre-existing, broader
+    // "can't make even one whole portion" case (availablePortions <= 0),
+    // which also covers a POSITIVE-but-insufficient stock (e.g. 0.05kg on
+    // hand for a 0.1kg-per-portion recipe: not negative, still 0 portions).
+    const status: RecipeAvailabilityStatus = limitingAvailable.lessThan(0)
+      ? "NEGATIVE"
+      : availablePortions <= 0
+        ? "OUT"
+        : limitingIsLow
+          ? "LOW"
+          : "AVAILABLE";
+    result.set(menuItemId, {
+      status,
+      availablePortions: displayPortions,
+      limitingIngredientName: limitingName,
+      configured: true,
+      sellAllowed: true,
+    });
   }
 
   return result;
+}
+
+// ─── P1.7: Owner Control Center — negative ingredient stock alert ─────────
+
+export interface IngredientStockAttentionItem {
+  id: string;
+  ingredientName: string;
+  currentStock: string;
+  unit: UnitOfMeasure;
+  locationId: string;
+  locationName: string;
+}
+
+export interface IngredientStockAttentionSummary {
+  negativeStockCount: number;
+  worstItems: IngredientStockAttentionItem[];
+}
+
+const INGREDIENT_WORST_ITEMS_LIMIT = 5;
+
+/**
+ * Audit §8: OWNER/ADMIN/MANAGER first-class alert for sirovine sa
+ * negativnim stanjem — isti "batch, ne po sirovini" i "najgorih 5" obrazac
+ * kao inventory-service.ts getStockAttention (P2.3 Owner Control Center),
+ * primenjen na IngredientStock. Namerno FOKUSIRANO na negativno stanje
+ * (ne dupliraran pun OUT/LOW pregled — taj već postoji na Sirovine
+ * stranici preko listIngredients) — ovo je alarmni signal, ne kompletna
+ * lista.
+ */
+export async function getIngredientStockAttention(ctx: AuthContext, locationId: string): Promise<IngredientStockAttentionSummary> {
+  requirePermission(ctx, "inventory.view");
+  if (locationId !== "ALL") requireLocationAccess(ctx, locationId);
+
+  const where = {
+    restaurantId: ctx.restaurantId,
+    locationId: locationId === "ALL" ? { in: ctx.locationIds } : locationId,
+    currentStock: { lt: 0 },
+  };
+
+  const [negativeStockCount, worst] = await Promise.all([
+    prisma.ingredientStock.count({ where }),
+    prisma.ingredientStock.findMany({
+      where,
+      include: { ingredient: { select: { name: true, unit: true } }, location: { select: { id: true, name: true } } },
+      orderBy: { currentStock: "asc" }, // najveći manjak prvo
+      take: INGREDIENT_WORST_ITEMS_LIMIT,
+    }),
+  ]);
+
+  return {
+    negativeStockCount,
+    worstItems: worst.map((s) => ({
+      id: s.id,
+      ingredientName: s.ingredient.name,
+      currentStock: s.currentStock.toString(),
+      unit: s.ingredient.unit,
+      locationId: s.location.id,
+      locationName: s.location.name,
+    })),
+  };
 }

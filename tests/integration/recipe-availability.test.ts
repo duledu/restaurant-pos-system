@@ -2,10 +2,13 @@
  * P1.4: Waiter POS availability for recipe-produced items, sourced from
  * IngredientStock + recipe quantities instead of finished-goods stock.
  *
- * Covers: available/OUT status, limiting-ingredient portion math,
- * quantity-aware add/update validation, cross-item shared-ingredient
- * aggregation at submit, direct-stock/untracked items unaffected, stale
- * finished InventoryItem never blocks a recipe item, no ingredient
+ * Covers: available/OUT/NEGATIVE status (advisory only — P1.7), limiting-
+ * ingredient portion math, quantity is NEVER gated against recorded stock
+ * at add/update/submit (P1.7 audit "Allow negative inventory instead of
+ * blocking sales" — only RecipeNotConfiguredError still blocks),
+ * cross-item shared-ingredient aggregation correctly deducted (and
+ * possibly negative) at PAYMENT, direct-stock/untracked items unaffected,
+ * stale finished InventoryItem never blocks a recipe item, no ingredient
  * mutation before payment, deduction only on successful payment,
  * concurrency safety, and restaurant isolation.
  */
@@ -110,7 +113,7 @@ describe("Recipe item availability: add-to-cart validation", () => {
     expect(added).toBeTruthy();
   });
 
-  it("2. adding a recipe item is REJECTED when a required ingredient is insufficient", async () => {
+  it("2. P1.7: adding a recipe item SUCCEEDS even when a required ingredient is insufficient — recorded shortage never blocks add-to-cart", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Omlet");
@@ -120,7 +123,11 @@ describe("Recipe item availability: add-to-cart validation", () => {
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await expect(orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 })).rejects.toThrow(/sirovin/i);
+    await expect(orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 1 })).resolves.toBeTruthy();
+
+    // addItem NIKAD ne mutira IngredientStock — to ostaje isključivo posao Payment-a.
+    const eggStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: eggs.id, locationId: fixture.locationId } });
+    expect(Number(eggStock.currentStock)).toBe(2);
   });
 });
 
@@ -176,7 +183,7 @@ describe("Recipe item availability: limiting-ingredient portion math", () => {
 // ─── 4: quantity-aware validation ──────────────────────────────────────────
 
 describe("Quantity-aware validation", () => {
-  it("4. 3 eggs/portion, stock=8: quantity 1 allowed, quantity 2 allowed, quantity 3 rejected", async () => {
+  it("4. P1.7: 3 eggs/portion, stock=8 -- quantity 1, 2, AND 3 are all allowed (requested quantity never gated against recorded stock)", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Omlet");
@@ -195,10 +202,10 @@ describe("Quantity-aware validation", () => {
 
     const table3 = await newTable(fixture);
     const order3 = await orders.openOrder(waiter, { tableId: table3.id });
-    await expect(orders.addItem(waiter, order3.id, { menuItemId: item.id, quantity: 3 })).rejects.toThrow(/sirovin/i);
+    await expect(orders.addItem(waiter, order3.id, { menuItemId: item.id, quantity: 3 })).resolves.toBeTruthy(); // 9 eggs > 8 recorded — still allowed
   });
 
-  it("updateItem re-validates when quantity is increased on an existing draft line", async () => {
+  it("P1.7: updateItem allows increasing quantity on an existing draft line even beyond recorded stock", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Omlet");
@@ -210,19 +217,19 @@ describe("Quantity-aware validation", () => {
     const order = await orders.openOrder(waiter, { tableId: table.id });
     const line = await orders.addItem(waiter, order.id, { menuItemId: item.id, quantity: 2 }); // 6 eggs, ok
 
-    await expect(orders.updateItem(waiter, order.id, line.id, { quantity: 3 })).rejects.toThrow(/sirovin/i); // 9 eggs, only 8 available
+    await expect(orders.updateItem(waiter, order.id, line.id, { quantity: 3 })).resolves.toBeDefined(); // 9 eggs, only 8 recorded — still allowed
   });
 });
 
 // ─── 5: shared-ingredient aggregation across DIFFERENT menu items ──────────
 
 describe("Cross-item shared-ingredient aggregation", () => {
-  it("5. 2x Omlet + 1x Omlet sa sirom (both need eggs) aggregate to 9 required eggs at submit", async () => {
+  it("5. P1.7: 2x Omlet + 1x Omlet sa sirom (both need eggs) aggregate to 9 required eggs — submit succeeds, and PAYMENT correctly deducts the full aggregate, going negative", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const omlet = await createMenuItem(fixture, "Omlet");
     const omletSaSirom = await createMenuItem(fixture, "Omlet sa sirom", "900.00");
-    const eggs = await seedIngredient(owner, fixture, "Jaja", "PIECE", 8); // need 9, only 8 -> must fail
+    const eggs = await seedIngredient(owner, fixture, "Jaja", "PIECE", 8); // need 9, only 8 recorded — no longer blocks
     const cheese = await seedIngredient(owner, fixture, "Sir", "KILOGRAM", 10);
     await recipes.addRecipeLine(owner, omlet.id, { ingredientId: eggs.id, quantity: 3 });
     await recipes.addRecipeLine(owner, omletSaSirom.id, { ingredientId: eggs.id, quantity: 3 });
@@ -231,17 +238,21 @@ describe("Cross-item shared-ingredient aggregation", () => {
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    // Each individual addItem call passes (2 and 1 eggs-worth don't exceed 8
-    // checked independently against the same un-mutated starting stock —
-    // add-time is deliberately per-request, not cart-aggregate, see P3.3).
     await orders.addItem(waiter, order.id, { menuItemId: omlet.id, quantity: 2 });
     await orders.addItem(waiter, order.id, { menuItemId: omletSaSirom.id, quantity: 1 });
 
-    // Submit aggregates the WHOLE order: 2*3 + 1*3 = 9 eggs > 8 available.
-    await expect(orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() })).rejects.toThrow(/sirovin/i);
+    // Submit aggregates the WHOLE order: 2*3 + 1*3 = 9 eggs > 8 recorded — succeeds anyway.
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    expect(submitted.status).toBe("SUBMITTED");
 
-    const eggStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: eggs.id, locationId: fixture.locationId } });
-    expect(Number(eggStock.currentStock)).toBe(8); // untouched — validation only, never mutates
+    const eggStockBefore = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: eggs.id, locationId: fixture.locationId } });
+    expect(Number(eggStockBefore.currentStock)).toBe(8); // submit still never mutates
+
+    // Payment correctly deducts the FULL aggregated 9 eggs, going negative.
+    const result = await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    expect(result.payment.id).toBeTruthy();
+    const eggStockAfter = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: eggs.id, locationId: fixture.locationId } });
+    expect(Number(eggStockAfter.currentStock)).toBe(-1); // 8 - 9 = -1
   });
 
   it("succeeds and submits when the aggregated shared-ingredient demand fits", async () => {
@@ -269,7 +280,7 @@ describe("Cross-item shared-ingredient aggregation", () => {
 // ─── 6, 7: direct-stock and untracked items unaffected ─────────────────────
 
 describe("Direct-stock and untracked items are unaffected", () => {
-  it("6. a direct-stock (trackStock=true, no recipe) item's OUT behavior is unchanged", async () => {
+  it("6. P1.7: a direct-stock (DIRECT_STOCK, no recipe) item at OUT (stock=0) is still addable — recorded stock never blocks", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const cola = await createMenuItem(fixture, "Coca-Cola", "250.00");
@@ -278,7 +289,7 @@ describe("Direct-stock and untracked items are unaffected", () => {
     const waiter = waiterCtx(fixture);
     const table = await newTable(fixture);
     const order = await orders.openOrder(waiter, { tableId: table.id });
-    await expect(orders.addItem(waiter, order.id, { menuItemId: cola.id, quantity: 1 })).rejects.toThrow();
+    await expect(orders.addItem(waiter, order.id, { menuItemId: cola.id, quantity: 1 })).resolves.toBeTruthy();
   });
 
   it("6b. a direct-stock item with sufficient stock still adds normally", async () => {
@@ -376,11 +387,11 @@ describe("Ingredient stock mutates ONLY on successful payment, never before", ()
 // ─── 11: concurrency/duplicate-payment safety remains intact ──────────────
 
 describe("Concurrency safety is unaffected by the new availability layer", () => {
-  it("11. two concurrent payments for orders requiring more than available stock: exactly one succeeds, stock never negative", async () => {
+  it("11. P1.7 scenario G: two concurrent payments for orders requiring more than recorded stock: BOTH legitimate payments succeed, stock goes negative, no lost update", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Omlet");
-    const eggs = await seedIngredient(owner, fixture, "Jaja", "PIECE", 3); // exactly enough for ONE order of qty 1 (3 eggs)
+    const eggs = await seedIngredient(owner, fixture, "Jaja", "PIECE", 3); // exactly enough for ONE order of qty 1 (3 eggs), not both
     await recipes.addRecipeLine(owner, item.id, { ingredientId: eggs.id, quantity: 3 });
 
     const waiter = waiterCtx(fixture);
@@ -398,16 +409,22 @@ describe("Concurrency safety is unaffected by the new availability layer", () =>
       orders.submitOrder(waiter, orderB.id, { idempotencyKey: randomUUID() }),
     ]);
 
+    // P1.7: neither payment is rejected for "insufficient" stock anymore —
+    // both are legitimate sales and both succeed.
     const results = await Promise.allSettled([
       billing.completePayment(waiter, submittedA.id, { method: "CASH" }),
       billing.completePayment(waiter, submittedB.id, { method: "CASH" }),
     ]);
 
     const succeeded = results.filter((r) => r.status === "fulfilled");
-    expect(succeeded).toHaveLength(1);
+    expect(succeeded).toHaveLength(2);
 
+    // 3 - 3 - 3 = -3 -- both decrements applied, no lost update.
     const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: eggs.id, locationId: fixture.locationId } });
-    expect(Number(stock.currentStock)).toBe(0); // never negative
+    expect(Number(stock.currentStock)).toBe(-3);
+
+    const saleMovements = await prisma.ingredientMovement.findMany({ where: { ingredientId: eggs.id, type: "SALE" } });
+    expect(saleMovements).toHaveLength(2);
   });
 });
 

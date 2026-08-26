@@ -390,24 +390,39 @@ describe("inventory: odbitak pri prodaji (decrementOnSale)", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("decrementOnSale baca InsufficientStockError kada nema dovoljno zaliha", async () => {
+  it("P1.7 audit scenario A/B: decrementOnSale NIKAD ne blokira zbog nedovoljne zalihe -- ide u negativno", async () => {
     const fixture = await createFixture();
     const ctx = ownerCtx(fixture);
-    await inventory.initializeTracking(ctx, {
+    const invItem = await inventory.initializeTracking(ctx, {
       menuItemId: fixture.menuItemId,
       locationId: fixture.locationId,
       initialStock: 1,
     });
 
-    await expect(
-      inventory.decrementOnSale({
-        paymentId: randomUUID(),
-        orderId: randomUUID(),
-        restaurantId: fixture.restaurantId,
-        locationId: fixture.locationId,
-        items: [{ menuItemId: fixture.menuItemId, quantity: 2 }],
-      })
-    ).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    // Scenario A: stock=1, sell 2 -> succeeds, stock = -1.
+    await inventory.decrementOnSale({
+      paymentId: randomUUID(),
+      orderId: randomUUID(),
+      restaurantId: fixture.restaurantId,
+      locationId: fixture.locationId,
+      items: [{ menuItemId: fixture.menuItemId, quantity: 2 }],
+    });
+    let after = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(after.currentStock)).toBe(-1);
+
+    // Scenario B: already negative (-1), sell 3 more -> -4.
+    await inventory.decrementOnSale({
+      paymentId: randomUUID(),
+      orderId: randomUUID(),
+      restaurantId: fixture.restaurantId,
+      locationId: fixture.locationId,
+      items: [{ menuItemId: fixture.menuItemId, quantity: 3 }],
+    });
+    after = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(after.currentStock)).toBe(-4);
+
+    const saleMovements = await prisma.inventoryMovement.findMany({ where: { inventoryItemId: invItem.id, type: "SALE" } });
+    expect(saleMovements).toHaveLength(2);
   });
 
   it("restaurant scope ne moze promeniti zalihe drugog restorana", async () => {
@@ -605,37 +620,41 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     expect(saleMovements[0].paymentId).toBe(result.payment.id);
   });
 
-  it("nedovoljne zalihe odbijaju placanje -- stock ostaje nepromenjen, placanje nije kreirano", async () => {
+  it("P1.7: nedovoljne (recorded) zalihe NIKAD ne odbijaju placanje -- placanje uspeva, stock ide u negativno", async () => {
     const { fixture, waiter } = await setupTracked(1); // stock 1, order 2
 
-    await expect(payTrackedOrder(fixture, waiter)).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const result = await payTrackedOrder(fixture, waiter);
+    expect(result.payment.id).toBeTruthy();
 
-    // Zalihe nisu promenjene
+    // Zaliha ide u negativno -- 1 - 2 = -1, nikad blokirano, nikad zaokruženo na 0.
     const invItem = await prisma.inventoryItem.findFirst({
       where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId },
     });
-    expect(Number(invItem?.currentStock)).toBe(1);
+    expect(Number(invItem?.currentStock)).toBe(-1);
 
-    // Nema SALE kretanja
+    // SALE kretanje JESTE zapisano.
     const saleMovements = await prisma.inventoryMovement.findMany({
       where: { menuItemId: fixture.menuItemId, type: "SALE" },
     });
-    expect(saleMovements).toHaveLength(0);
+    expect(saleMovements).toHaveLength(1);
+    expect(Number(saleMovements[0].quantityDelta)).toBe(-2);
+    expect(Number(saleMovements[0].quantityBefore)).toBe(1);
+    expect(Number(saleMovements[0].quantityAfter)).toBe(-1);
 
-    // Nema naplate
+    // Naplata JESTE kreirana.
     const payments = await prisma.payment.findMany({ where: { restaurantId: fixture.restaurantId } });
-    expect(payments).toHaveLength(0);
+    expect(payments).toHaveLength(1);
 
-    // Porudzbina nije COMPLETED
+    // Porudzbina JESTE COMPLETED.
     const order = await prisma.order.findFirst({ where: { restaurantId: fixture.restaurantId } });
-    expect(order?.status).not.toBe("COMPLETED");
+    expect(order?.status).toBe("COMPLETED");
   });
 
-  it("vise artikala: ako jedan nema dovoljno zaliha, cela transakcija se rollback-uje", async () => {
+  it("P1.7: vise artikala, jedan ima dovoljno a drugi nema -- OBA se prodaju, samo deficitarni ide u negativno", async () => {
     const fixture = await createFixture();
     const ctx = ownerCtx(fixture);
 
-    // Drugi artikal sa dovoljno zaliha
+    // Drugi artikal sa nedovoljno zaliha
     const category2 = await prisma.menuCategory.create({
       data: { restaurantId: fixture.restaurantId, name: "Hrana", slug: `hrana-${randomUUID()}`, type: "FOOD" },
     });
@@ -668,28 +687,27 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
     await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 2 });
 
-    // P3.3: addItem sam radi svežu proveru dostupnosti (assertStockAvailable)
-    // u trenutku dodavanja u draft — ne čeka se više do naplate da bi se
-    // nedovoljna zaliha otkrila. Item2 (Pivo, 0 zaliha) se zato odbija ODMAH
-    // ovde, fail-fast, ne tek na completePayment.
-    await expect(
-      orders.addItem(waiter, order.id, { menuItemId: menuItem2.id, quantity: 1 })
-    ).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    // P1.7: addItem NIKAD ne blokira zbog recorded stock nivoa — Item2 (Pivo,
+    // 0 zaliha) se dodaje bez problema, čak i pre bilo kakvog prijema robe.
+    await orders.addItem(waiter, order.id, { menuItemId: menuItem2.id, quantity: 1 });
 
-    // Item 1 ostaje na 10 (addItem nikad ne menja currentStock — to je
-    // isključivo posao Payment-a)
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    const result = await billing.completePayment(waiter, submitted.id, { method: "CASH" });
+    expect(result.payment.id).toBeTruthy();
+
+    // Item 1: dovoljno zalihe -- normalan odbitak, 10 -> 8.
     const inv1 = await prisma.inventoryItem.findFirst({ where: { menuItemId: fixture.menuItemId } });
-    expect(Number(inv1?.currentStock)).toBe(10);
+    expect(Number(inv1?.currentStock)).toBe(8);
 
-    // Item 2 ostaje na 0
+    // Item 2: nedovoljno zalihe -- ipak prodato, 0 -> -1 (nikad blokirano).
     const inv2 = await prisma.inventoryItem.findFirst({ where: { menuItemId: menuItem2.id } });
-    expect(Number(inv2?.currentStock)).toBe(0);
+    expect(Number(inv2?.currentStock)).toBe(-1);
 
-    // Bez SALE kretanja
+    // OBA SALE kretanja zapisana.
     const saleMov = await prisma.inventoryMovement.findMany({
       where: { restaurantId: fixture.restaurantId, type: "SALE" },
     });
-    expect(saleMov).toHaveLength(0);
+    expect(saleMov).toHaveLength(2);
   });
 
   it("nepracao artikal (trackStock=false) -- placanje prolazi normalno bez SALE kretanja", async () => {
@@ -716,7 +734,7 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     expect(saleMov).toHaveLength(0);
   });
 
-  it("pracen artikal bez zalihe na lokaciji odbija naplatu i ne dira drugu lokaciju", async () => {
+  it("P1.7/§12/§25: pracen artikal bez InventoryItem reda na lokaciji NIKAD ne odbija naplatu -- red se atomično kreira i ide negativno, druga lokacija netaknuta", async () => {
     const fixture = await createFixture();
     const ctx = ownerCtx(fixture);
     const otherLocation = await prisma.location.create({
@@ -730,14 +748,23 @@ describe("inventory: transakciona integracija sa naplatom", () => {
       initialStock: 10,
     });
 
-    await expect(payTrackedOrder(fixture, ctx)).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const result = await payTrackedOrder(fixture, ctx);
+    expect(result.payment.id).toBeTruthy();
 
+    // Druga lokacija ostaje POTPUNO netaknuta -- nikad "pozajmljena".
     const unchanged = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: otherInventory.id } });
     expect(Number(unchanged.currentStock)).toBe(10);
-    expect(await prisma.payment.count({ where: { restaurantId: fixture.restaurantId } })).toBe(0);
+
+    // Na fixture.locationId, red je atomično kreiran i ide u negativno (0 - 2 = -2).
+    const created = await prisma.inventoryItem.findFirstOrThrow({
+      where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId },
+    });
+    expect(Number(created.currentStock)).toBe(-2);
+
+    expect(await prisma.payment.count({ where: { restaurantId: fixture.restaurantId } })).toBe(1);
     expect(await prisma.inventoryMovement.count({
-      where: { restaurantId: fixture.restaurantId, type: "SALE" },
-    })).toBe(0);
+      where: { restaurantId: fixture.restaurantId, type: "SALE", locationId: fixture.locationId },
+    })).toBe(1);
   });
 
   it("ponavljanje naplate (isti paymentId) -- zalihe se oduzimaju samo jednom", async () => {
@@ -775,7 +802,7 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     expect(result.payment.id).toBeTruthy();
   });
 
-  it("konkurentne prodaje iste kolicine -- samo jedna uspeva", async () => {
+  it("P1.7 audit scenario F: konkurentne prodaje kada recorded stock nije dovoljan za obe -- OBE legitimne naplate uspevaju, stock ide u negativno, bez izgubljenog update-a", async () => {
     const fixture = await createFixture();
     const ctx = ownerCtx(fixture);
     const waiter = ownerCtx(fixture);
@@ -783,7 +810,7 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     await inventory.initializeTracking(ctx, {
       menuItemId: fixture.menuItemId,
       locationId: fixture.locationId,
-      initialStock: 2, // samo 2 komada
+      initialStock: 2, // samo 2 komada -- nedovoljno za obe porudžbine od po 2
     });
 
     // Kreiraj drugu lokaciju i sto za drugu porudzbinu
@@ -801,7 +828,8 @@ describe("inventory: transakciona integracija sa naplatom", () => {
     await orders.addItem(waiter, order2.id, { menuItemId: fixture.menuItemId, quantity: 2 });
     const submitted2 = await orders.submitOrder(waiter, order2.id, { idempotencyKey: randomUUID() });
 
-    // Konkurentne naplate
+    // Konkurentne naplate — P1.7: nijedna više ne sme biti odbijena zbog
+    // "nedovoljne" zalihe (to više nije greška). Obe su legitimne prodaje.
     const [r1, r2] = await Promise.allSettled([
       billing.completePayment(waiter, submitted1.id, { method: "CASH" }),
       billing.completePayment(waiter, submitted2.id, { method: "CASH" }),
@@ -809,20 +837,20 @@ describe("inventory: transakciona integracija sa naplatom", () => {
 
     const succeeded = [r1, r2].filter((r) => r.status === "fulfilled");
     const failed = [r1, r2].filter((r) => r.status === "rejected");
-    expect(succeeded).toHaveLength(1);
-    expect(failed).toHaveLength(1);
-    expect((failed[0] as PromiseRejectedResult).reason).toBeInstanceOf(inventory.InsufficientStockError);
+    expect(succeeded).toHaveLength(2);
+    expect(failed).toHaveLength(0);
 
-    // Stock mora biti tacno 0 (nije negativan)
+    // Stock: 2 - 2 - 2 = -2 -- oba odbitka primenjena, bez izgubljenog update-a.
     const inv = await prisma.inventoryItem.findFirst({
       where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId },
     });
-    expect(Number(inv?.currentStock)).toBe(0);
+    expect(Number(inv?.currentStock)).toBe(-2);
 
-    // Tacno jedno SALE kretanje
+    // Tacno DVA SALE kretanja -- jedno po naplati, nijedno izgubljeno/duplirano.
     const saleMov = await prisma.inventoryMovement.findMany({
       where: { menuItemId: fixture.menuItemId, type: "SALE" },
     });
-    expect(saleMov).toHaveLength(1);
+    expect(saleMov).toHaveLength(2);
+    expect(saleMov.map((m) => Number(m.quantityDelta)).sort()).toEqual([-2, -2]);
   });
 });

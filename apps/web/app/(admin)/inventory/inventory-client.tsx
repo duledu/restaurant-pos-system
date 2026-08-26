@@ -81,8 +81,12 @@ function fmtQty(n: number) {
   return n % 1 === 0 ? n.toString() : n.toFixed(3).replace(/\.?0+$/, "");
 }
 
-function stockStatus(item: InventoryItem): "out" | "low" | "ok" {
-  if (item.currentStock <= 0) return "out";
+// P1.7: NEGATIVE (currentStock < 0) je NAJJAČI status — evidentiran manjak,
+// odvojen od običnog OUT (currentStock == 0) — MORA odgovarati
+// inventory-service.ts getInventoryStockStatus tačno (ista granica).
+function stockStatus(item: InventoryItem): "negative" | "out" | "low" | "ok" {
+  if (item.currentStock < 0) return "negative";
+  if (item.currentStock === 0) return "out";
   const min = item.menuItem.minimumStock;
   if (min != null && item.currentStock <= Number(min)) return "low";
   return "ok";
@@ -760,7 +764,7 @@ type ModalState =
   | { type: "zero-all" }
   | null;
 
-type StatusFilter = "all" | "low" | "out";
+type StatusFilter = "all" | "low" | "out" | "negative";
 
 const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 
@@ -846,6 +850,7 @@ export function InventoryClient() {
   }, [items, search, activeCategoryTab, statusFilter, showInactive]);
 
   const trackedItems = items.filter(isEffectivelyTracked);
+  const negativeStockCount = trackedItems.filter(i => stockStatus(i) === "negative").length;
   const outOfStockCount = trackedItems.filter(i => stockStatus(i) === "out").length;
   const lowStockCount = trackedItems.filter(i => stockStatus(i) === "low").length;
   const inactiveCount = items.length - trackedItems.length;
@@ -896,6 +901,7 @@ export function InventoryClient() {
           <TabPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")} label="Sve" />
           <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowStockCount} />
           <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outOfStockCount} />
+          <TabPill active={statusFilter === "negative"} onClick={() => setStatusFilter("negative")} label="Negativna zaliha" count={negativeStockCount} />
         </div>
         <label className="ml-auto flex items-center gap-1.5 text-xs font-medium text-inkSoft">
           <input type="checkbox" checked={showInactive} onChange={e => setShowInactive(e.target.checked)} />
@@ -958,11 +964,13 @@ export function InventoryClient() {
                   const status = effectivelyTracked ? stockStatus(item) : null;
                   const min = item.menuItem.minimumStock;
                   const rowCls =
+                    status === "negative" ? "bg-danger/10 shadow-[inset_3px_0_0_#B91C1C]" :
                     status === "out" ? "bg-danger-soft/60 shadow-[inset_3px_0_0_#B91C1C]" :
                     status === "low" ? "bg-warn-soft/40 shadow-[inset_3px_0_0_#B45309]" :
                     !effectivelyTracked ? "opacity-60 hover:bg-cream-200/40" :
                     "hover:bg-cream-200/60";
                   const stockCls =
+                    status === "negative" ? "text-danger" :
                     status === "out" ? "text-danger" :
                     status === "low" ? "text-warn" :
                     "text-ink";
@@ -970,6 +978,7 @@ export function InventoryClient() {
                     <tr key={item.id} className={rowCls}>
                       <td className="px-4 py-3">
                         <span className="block font-semibold text-ink">{item.menuItem.name}</span>
+                        {status === "negative" && <Badge tone="dangerSolid">Negativna zaliha</Badge>}
                         {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
                         {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
                         {!effectivelyTracked && item.menuItem.hasRecipe && <Badge tone="gold">Normativ aktivan</Badge>}

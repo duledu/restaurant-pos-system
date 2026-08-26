@@ -424,7 +424,7 @@ describe("Dostupnost po metodi (nezavisno testirano)", () => {
     expect(info?.configured).toBe(false);
   });
 
-  it("audit §6: sirovina POSTOJI kao Ingredient ali NEMA IngredientStock red za ovu lokaciju -> tretira se kao 0 dostupno (NIKAD 'neograničeno'), i blokira i dostupnost i naplatu", async () => {
+  it("audit §6/§12: sirovina POSTOJI kao Ingredient ali NEMA IngredientStock red za ovu lokaciju -> tretira se kao 0 dostupno (NIKAD 'neograničeno') za PRIKAZ, ali naplata NIKAD ne blokira — red se atomično kreira na 0 i ide u negativno", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
     const item = await createMenuItem(fixture, "Šopska (bez inicijalizovane zalihe)");
@@ -440,16 +440,23 @@ describe("Dostupnost po metodi (nezavisno testirano)", () => {
     expect(info?.status).toBe("OUT"); // NIKAD "neograničeno dostupno"
     expect(info?.configured).toBe(true); // normativ JESTE podešen -- razlog je zaliha, ne konfiguracija
     expect(info?.availablePortions).toBe(0);
+    expect(info?.sellAllowed).toBe(true); // P1.7: OUT prikaz i dalje NE blokira prodaju
 
-    await expect(
-      ingredients.decrementIngredientsOnSale({
-        paymentId: randomUUID(),
-        orderId: randomUUID(),
-        restaurantId: fixture.restaurantId,
-        locationId: fixture.locationId,
-        items: [{ menuItemId: item.id, quantity: 1 }],
-      })
-    ).rejects.toBeInstanceOf(ingredients.InsufficientIngredientStockError);
+    // P1.7 audit §12: naplata NIKAD ne blokira zbog nedostajućeg reda —
+    // atomično se kreira na 0, pa odbija (rezultat je negativan).
+    await ingredients.decrementIngredientsOnSale({
+      paymentId: randomUUID(),
+      orderId: randomUUID(),
+      restaurantId: fixture.restaurantId,
+      locationId: fixture.locationId,
+      items: [{ menuItemId: item.id, quantity: 1 }],
+    });
+
+    const createdStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
+    expect(Number(createdStock.currentStock)).toBeCloseTo(-0.3, 9);
+    const movement = await prisma.ingredientMovement.findFirstOrThrow({ where: { ingredientId: tomato.id, type: "SALE" } });
+    expect(Number(movement.quantityBefore)).toBe(0);
+    expect(Number(movement.quantityAfter)).toBeCloseTo(-0.3, 9);
   });
 
   it("NO_TRACKING artikal se nikad ne pojavljuje kao 'OUT' zbog zaliha — inventar ga nikad ne blokira", async () => {
@@ -479,18 +486,20 @@ describe("Dostupnost po metodi (nezavisno testirano)", () => {
     expect(atB.get(item.id)?.status).toBe("OUT"); // zaliha sa A se NIKAD ne "pozajmljuje" na B
     expect(atB.get(item.id)?.availablePortions).toBe(0);
 
-    // Naplata na lokaciji B mora biti odbijena -- ne sme "pozajmiti" zalihu sa A.
-    await expect(
-      ingredients.decrementIngredientsOnSale({
-        paymentId: randomUUID(),
-        orderId: randomUUID(),
-        restaurantId: fixture.restaurantId,
-        locationId: fixture.otherLocationId,
-        items: [{ menuItemId: item.id, quantity: 1 }],
-      })
-    ).rejects.toBeInstanceOf(ingredients.InsufficientIngredientStockError);
+    // P1.7: naplata na lokaciji B NIKAD ne blokira, ali NIKAD ne "pozajmljuje"
+    // zalihu sa A — B-ov IngredientStock red se kreira nezavisno i ide negativno.
+    await ingredients.decrementIngredientsOnSale({
+      paymentId: randomUUID(),
+      orderId: randomUUID(),
+      restaurantId: fixture.restaurantId,
+      locationId: fixture.otherLocationId,
+      items: [{ menuItemId: item.id, quantity: 1 }],
+    });
 
-    // Zaliha na A ostaje netaknuta.
+    const stockB = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.otherLocationId } });
+    expect(Number(stockB.currentStock)).toBeCloseTo(-0.3, 9);
+
+    // Zaliha na A ostaje POTPUNO netaknuta.
     const stockA = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
     expect(Number(stockA.currentStock)).toBe(10);
   });
