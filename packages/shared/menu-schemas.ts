@@ -52,7 +52,12 @@ export const createMenuItemSchema = z.object({
   sortOrder: z.number().int().default(0),
   isActive: z.boolean().default(true),
   isAvailable: z.boolean().default(true),
-  trackStock: z.boolean().default(false),
+  // P1.6: trackStock/inventoryTrackingMethod NAMERNO NISU deo ove opšte
+  // šeme (isti obrazac kao price/categoryId iznad) — menjaju se ISKLJUČIVO
+  // preko setInventoryTrackingMethod (/inventory-tracking-method rute),
+  // koja sinhronizuje oba polja atomično i primenjuje DirectStockStillPresentError
+  // bezbednosnu proveru. Generičko kreiranje/izmena artikla nikad ne sme
+  // moći da postavi trackStock nezavisno od inventoryTrackingMethod.
   minimumStock: z.number().nonnegative().optional(),
   preparationStation: preparationStationSchema.default("NONE"),
   needsReview: z.boolean().default(false),

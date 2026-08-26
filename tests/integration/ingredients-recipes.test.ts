@@ -420,9 +420,29 @@ describe("Dual-stock transition: first recipe line auto-disables finished-item t
     const invItem = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId } });
     expect(Number(invItem.currentStock)).toBe(25);
 
-    await inventory.setTrackingEnabled(manager, fixture.menuItemId, true);
+    // P1.6 §19: that 25 is a FROZEN, unverified number from before the
+    // RECIPE detour — re-enabling DIRECT_STOCK must not silently trust it.
+    await expect(inventory.setTrackingEnabled(manager, fixture.menuItemId, true)).rejects.toBeInstanceOf(
+      inventory.StaleDirectStockQuantityError
+    );
     menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
-    expect(menuItem.trackStock).toBe(true); // only via the explicit, separate action
+    expect(menuItem.trackStock).toBe(false); // rejected attempt changes nothing
+
+    await inventory.setTrackingEnabled(manager, fixture.menuItemId, true, { confirmReactivateDirectStock: true });
+    menuItem = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(menuItem.trackStock).toBe(true); // only via the explicit, separate, CONFIRMED action
+
+    // Confirming reactivation ZEROES the stale number (auditable WRITE-OFF-
+    // style reconciliation) rather than silently trusting it — the item is
+    // DIRECT_STOCK again but OUT until the manager enters the real count.
+    const invItemAfter = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.menuItemId, locationId: fixture.locationId } });
+    expect(Number(invItemAfter.currentStock)).toBe(0);
+    const zeroingMovement = await prisma.inventoryMovement.findFirst({
+      where: { inventoryItemId: invItemAfter.id, type: "ADJUSTMENT", quantityAfter: 0 },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(zeroingMovement).not.toBeNull();
+    expect(Number(zeroingMovement?.quantityBefore)).toBe(25);
   });
 });
 

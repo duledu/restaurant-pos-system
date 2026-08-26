@@ -234,22 +234,27 @@ export function MenuManagementClient() {
   async function setTrackingMethod(
     item: MenuItem,
     method: MenuItem["inventoryTrackingMethod"],
-    confirmSwitchAwayFromDirectStock = false
+    confirm_: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean } = {}
   ) {
     try {
       await apiFetch(`/api/admin/menu/items/${item.id}/inventory-tracking-method`, {
         method: "POST",
-        body: JSON.stringify({ method, confirmSwitchAwayFromDirectStock }),
+        body: JSON.stringify({ method, ...confirm_ }),
       });
       await load();
     } catch (e) {
       const message = e instanceof Error ? e.message : "Greška";
-      // P1.6: "artikal i dalje ima zalihu" nije obična greška — nudi
-      // potvrdu i ponovi zahtev, isti obrazac kao archiveItem/deleteItem
-      // potvrdni dijalozi iznad (window.confirm, nema toast infrastrukture
-      // u ovom adminu).
+      // P1.6: dve odvojene bezbednosne provere (DirectStockStillPresentError
+      // pri napuštanju DIRECT_STOCK sa preostalom zalihom; StaleDirectStockQuantityError
+      // pri povratku na DIRECT_STOCK preko zastarelog zapisa) nisu obične
+      // greške — nude potvrdu i ponove zahtev sa odgovarajućim flagom, isti
+      // obrazac kao archiveItem/deleteItem dijalozi iznad (window.confirm,
+      // nema toast infrastrukture u ovom adminu).
       if (message.includes("i dalje ima zalihu") && confirm(`${message}\n\nNastaviti?`)) {
-        return setTrackingMethod(item, method, true);
+        return setTrackingMethod(item, method, { confirmSwitchAwayFromDirectStock: true });
+      }
+      if (message.includes("zastareo") && confirm(`${message}\n\nNastaviti?`)) {
+        return setTrackingMethod(item, method, { confirmReactivateDirectStock: true });
       }
       setError(message);
     }

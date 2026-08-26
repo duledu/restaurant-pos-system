@@ -23,6 +23,28 @@ export class DirectStockStillPresentError extends Error {
   }
 }
 
+/**
+ * Symmetric to DirectStockStillPresentError — fires on the OPPOSITE
+ * direction (entering DIRECT_STOCK, from ANY previous method), when a
+ * pre-existing InventoryItem row with a non-zero quantity already exists
+ * for this MenuItem (e.g. it was DIRECT_STOCK long ago, switched away, and
+ * is now being switched back — or went DIRECT_STOCK -> RECIPE -> DIRECT_STOCK).
+ * That frozen number was never verified as CURRENT physical reality and
+ * must never be silently trusted again — see audit §19.
+ */
+export class StaleDirectStockQuantityError extends Error {
+  readonly existing: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>;
+
+  constructor(itemName: string, existing: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>) {
+    const lines = existing.map((r) => `${r.locationName}: ${r.quantity} ${r.unit}`).join("\n");
+    super(
+      `Artikal "${itemName}" već ima zapis gotov-proizvod zalihe iz ranijeg perioda (možda zastareo):\n${lines}\nOva količina NIJE potvrđena kao trenutno tačna fizička zaliha i NEĆE se automatski koristiti. Ako nastavite, zaliha će biti nulirana (auditovano) i artikal će biti "nema na stanju" dok ne unesete stvarno fizičko stanje preko Zaliha. Potvrdite da želite da nastavite.`
+    );
+    this.name = "StaleDirectStockQuantityError";
+    this.existing = existing;
+  }
+}
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 export class InsufficientStockError extends Error {
@@ -290,8 +312,21 @@ export async function initializeTracking(
     const existing = await tx.inventoryItem.findUnique({
       where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: input.menuItemId } },
     });
+    // Reconcile to the ENTERED value even when a row already exists — the
+    // admin explicitly typed this number in the "inicijalizacija" form, it
+    // must never be silently discarded (that would let a stale/frozen
+    // number from a past DIRECT_STOCK period keep being treated as current
+    // physical reality, exactly what the audit forbids). Same reconcile
+    // pattern (before/after + auditable movement) as bulkSetOpeningStock.
+    const before = existing ? Number(existing.currentStock) : 0;
+    const after = input.initialStock;
+    const delta = after - before;
+
     const item = existing
-      ? await tx.inventoryItem.update({ where: { id: existing.id }, data: { unit } })
+      ? await tx.inventoryItem.update({
+          where: { id: existing.id },
+          data: delta !== 0 ? { unit, currentStock: after } : { unit },
+        })
       : await tx.inventoryItem.create({
           data: {
         restaurantId: ctx.restaurantId,
@@ -302,19 +337,19 @@ export async function initializeTracking(
           },
         });
 
-    if (!existing && input.initialStock > 0) {
+    if (delta !== 0) {
       await tx.inventoryMovement.create({
         data: {
           restaurantId: ctx.restaurantId,
           locationId: input.locationId,
           menuItemId: input.menuItemId,
           inventoryItemId: item.id,
-          type: "INITIAL",
-          quantityDelta: input.initialStock,
-          quantityBefore: 0,
-          quantityAfter: input.initialStock,
+          type: existing ? "OPENING_STOCK" : "INITIAL",
+          quantityDelta: delta,
+          quantityBefore: before,
+          quantityAfter: after,
           employeeId: ctx.employeeId,
-          reason: "Inicijalizacija praćenja zaliha",
+          reason: existing ? "Ponovna inicijalizacija/korekcija zalihe pri (re)aktivaciji praćenja" : "Inicijalizacija praćenja zaliha",
         },
       });
     }
@@ -347,7 +382,7 @@ export async function setTrackingEnabled(
   ctx: AuthContext,
   menuItemId: string,
   enabled: boolean,
-  options?: { confirmSwitchAwayFromDirectStock?: boolean }
+  options?: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean }
 ) {
   return setInventoryTrackingMethod(ctx, menuItemId, enabled ? "DIRECT_STOCK" : "NO_TRACKING", options);
 }
@@ -374,7 +409,7 @@ export async function setInventoryTrackingMethod(
   ctx: AuthContext,
   menuItemId: string,
   method: InventoryTrackingMethod,
-  options?: { confirmSwitchAwayFromDirectStock?: boolean }
+  options?: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean }
 ) {
   requirePermission(ctx, "inventory.manage");
   const menuItem = await prisma.menuItem.findFirst({
@@ -403,9 +438,61 @@ export async function setInventoryTrackingMethod(
     }
   }
 
-  const updated = await prisma.menuItem.update({
-    where: { id: menuItemId },
-    data: { inventoryTrackingMethod: method, trackStock: method === "DIRECT_STOCK" },
+  // §19: entering DIRECT_STOCK (from ANY previous method) while an existing
+  // InventoryItem row already carries a non-zero quantity — that number was
+  // frozen from whenever this item last used finished-goods tracking and is
+  // never auto-trusted as current physical reality again.
+  let staleItems: Array<{ id: string; locationId: string; location: { id: string; name: string }; currentStock: Prisma.Decimal; unit: string }> = [];
+  if (method === "DIRECT_STOCK") {
+    staleItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: ctx.restaurantId, menuItemId, currentStock: { gt: 0 } },
+      include: { location: { select: { id: true, name: true } } },
+    });
+    if (staleItems.length > 0 && !options?.confirmReactivateDirectStock) {
+      throw new StaleDirectStockQuantityError(
+        menuItem.name,
+        staleItems.map((i) => ({
+          locationId: i.locationId,
+          locationName: i.location.name,
+          quantity: i.currentStock.toString(),
+          unit: i.unit,
+        }))
+      );
+    }
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.menuItem.update({
+      where: { id: menuItemId },
+      data: { inventoryTrackingMethod: method, trackStock: method === "DIRECT_STOCK" },
+    });
+
+    // Confirmed reactivation with a stale nonzero row: never let that old
+    // number go straight back to being sellable — zero it out (audited),
+    // so the item is DIRECT_STOCK but OUT until the manager explicitly
+    // re-enters the REAL physical count via Zalihe (initializeTracking/
+    // receiveStock). This is a deliberate, auditable WRITE-OFF-style
+    // reconciliation, never a silent mutation.
+    for (const stale of staleItems) {
+      const before = Number(stale.currentStock);
+      await tx.inventoryItem.update({ where: { id: stale.id }, data: { currentStock: 0 } });
+      await tx.inventoryMovement.create({
+        data: {
+          restaurantId: ctx.restaurantId,
+          locationId: stale.locationId,
+          menuItemId,
+          inventoryItemId: stale.id,
+          type: "ADJUSTMENT",
+          quantityDelta: -before,
+          quantityBefore: before,
+          quantityAfter: 0,
+          employeeId: ctx.employeeId,
+          reason: "Nulirano pri ponovnoj aktivaciji direktnog praćenja zaliha — potrebna nova fizička provera pre prodaje",
+        },
+      });
+    }
+
+    return result;
   });
 
   await recordAuditEntry(ctx, {

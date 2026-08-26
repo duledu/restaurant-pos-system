@@ -23,6 +23,8 @@ interface Fixture {
   restaurantId: string;
   locationId: string;
   categoryId: string;
+  otherLocationId: string;
+  otherRestaurantId: string;
 }
 
 function ownerCtx(fixture: Fixture, employeeId = "owner-1"): AuthContext {
@@ -55,12 +57,21 @@ function waiterCtx(fixture: Fixture, employeeId = "waiter-1"): AuthContext {
 async function createFixture(): Promise<Fixture> {
   const tenant = await prisma.tenant.create({ data: { name: "TrackMethod tenant", slug: `tm-${randomUUID()}` } });
   const restaurant = await prisma.restaurant.create({ data: { tenantId: tenant.id, name: "Restaurant", currency: "RSD" } });
+  const otherRestaurant = await prisma.restaurant.create({ data: { tenantId: tenant.id, name: "Other Restaurant" } });
   const location = await prisma.location.create({ data: { restaurantId: restaurant.id, name: "Main" } });
+  const otherLocation = await prisma.location.create({ data: { restaurantId: restaurant.id, name: "Other" } });
   await prisma.shift.create({ data: { restaurantId: restaurant.id, locationId: location.id, openedBy: "owner-1" } });
+  await prisma.shift.create({ data: { restaurantId: restaurant.id, locationId: otherLocation.id, openedBy: "owner-1" } });
   const category = await prisma.menuCategory.create({
     data: { restaurantId: restaurant.id, name: "Test", slug: `test-${randomUUID()}`, type: "FOOD" },
   });
-  return { restaurantId: restaurant.id, locationId: location.id, categoryId: category.id };
+  return {
+    restaurantId: restaurant.id,
+    locationId: location.id,
+    categoryId: category.id,
+    otherLocationId: otherLocation.id,
+    otherRestaurantId: otherRestaurant.id,
+  };
 }
 
 async function createMenuItem(fixture: Fixture, name: string, price = "800.00") {
@@ -270,6 +281,54 @@ describe("Prelazak metode: istorija se NIKAD ne briše, bez obzira na pravac", (
     expect(mi.trackStock).toBe(true); // legacy mirror sinhronizovan
   });
 
+  it("RECIPE -> DIRECT_STOCK sa ZASTARELIM neisptažnjenim InventoryItem redom: zahteva potvrdu (StaleDirectStockQuantityError), pa NULIRA zalihu (nikad tiho ne veruje starom broju)", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Artikal B2");
+    const invItem = await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 15 });
+    const meat = await seedIngredient(owner, fixture, "Meso B2", "KILOGRAM", 10);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: meat.id, quantity: 0.2 }); // auto-promoveno na RECIPE; stari InventoryItem red (15) ostaje netaknut
+
+    await expect(inventory.setInventoryTrackingMethod(owner, item.id, "DIRECT_STOCK")).rejects.toBeInstanceOf(
+      inventory.StaleDirectStockQuantityError
+    );
+    let unchanged = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(unchanged.inventoryTrackingMethod).toBe("RECIPE"); // odbijen pokušaj ne menja ništa
+    let stillStale = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(stillStale.currentStock)).toBe(15);
+
+    await inventory.setInventoryTrackingMethod(owner, item.id, "DIRECT_STOCK", { confirmReactivateDirectStock: true });
+
+    const confirmed = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(confirmed.inventoryTrackingMethod).toBe("DIRECT_STOCK");
+    // Potvrda NIKAD tiho ne veruje starom broju — nulira ga (auditovano),
+    // artikal je DIRECT_STOCK ali OUT dok menadžer ne unese stvarno stanje.
+    const zeroed = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(zeroed.currentStock)).toBe(0);
+    const zeroingMovement = await prisma.inventoryMovement.findFirst({
+      where: { inventoryItemId: invItem.id, type: "ADJUSTMENT", quantityAfter: 0 },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(zeroingMovement).not.toBeNull();
+    expect(Number(zeroingMovement?.quantityBefore)).toBe(15);
+  });
+
+  it("initializeTracking pozvan PONOVO na već postojeći red REKONCILIŠE na uneti broj (nikad tiho ne odbacuje unos), auditovano", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Artikal B3");
+    const invItem = await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 10 });
+
+    const reInit = await inventory.initializeTracking(owner, { menuItemId: item.id, locationId: fixture.locationId, initialStock: 4 });
+    expect(reInit.id).toBe(invItem.id); // isti red, ne duplikat
+    expect(Number(reInit.currentStock)).toBe(4); // uneti broj se PRIMENJUJE, ne odbacuje
+
+    const movements = await prisma.inventoryMovement.findMany({ where: { inventoryItemId: invItem.id }, orderBy: { createdAt: "asc" } });
+    expect(movements.map((m) => m.type)).toEqual(["INITIAL", "OPENING_STOCK"]);
+    expect(Number(movements[1].quantityBefore)).toBe(10);
+    expect(Number(movements[1].quantityAfter)).toBe(4);
+  });
+
   it("DIRECT_STOCK -> NO_TRACKING sa preostalom zalihom: zahteva potvrdu (DirectStockStillPresentError), pa uspeva uz confirm", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
@@ -365,6 +424,34 @@ describe("Dostupnost po metodi (nezavisno testirano)", () => {
     expect(info?.configured).toBe(false);
   });
 
+  it("audit §6: sirovina POSTOJI kao Ingredient ali NEMA IngredientStock red za ovu lokaciju -> tretira se kao 0 dostupno (NIKAD 'neograničeno'), i blokira i dostupnost i naplatu", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Šopska (bez inicijalizovane zalihe)");
+    // Sirovina kreirana, ali initializeStock NIKAD pozvan za ovu lokaciju -- nema IngredientStock reda uopšte (različito od "postoji red sa 0").
+    const tomato = await ingredients.createIngredient(owner, { name: "Paradajz bez zalihe", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: tomato.id, quantity: 0.3 });
+
+    const stockRow = await prisma.ingredientStock.findFirst({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
+    expect(stockRow).toBeNull(); // zaista nema reda, ne samo 0
+
+    const availability = await ingredients.getRecipeAvailabilityForMenuItems(fixture.restaurantId, fixture.locationId, [item.id]);
+    const info = availability.get(item.id);
+    expect(info?.status).toBe("OUT"); // NIKAD "neograničeno dostupno"
+    expect(info?.configured).toBe(true); // normativ JESTE podešen -- razlog je zaliha, ne konfiguracija
+    expect(info?.availablePortions).toBe(0);
+
+    await expect(
+      ingredients.decrementIngredientsOnSale({
+        paymentId: randomUUID(),
+        orderId: randomUUID(),
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationId,
+        items: [{ menuItemId: item.id, quantity: 1 }],
+      })
+    ).rejects.toBeInstanceOf(ingredients.InsufficientIngredientStockError);
+  });
+
   it("NO_TRACKING artikal se nikad ne pojavljuje kao 'OUT' zbog zaliha — inventar ga nikad ne blokira", async () => {
     const fixture = await createFixture();
     const owner = ownerCtx(fixture);
@@ -374,6 +461,85 @@ describe("Dostupnost po metodi (nezavisno testirano)", () => {
     const recipeAvailability = await ingredients.getRecipeAvailabilityForMenuItems(fixture.restaurantId, fixture.locationId, [item.id]);
     expect(stockStatus.get(item.id)?.trackingEnabled).toBe(false);
     expect(recipeAvailability.has(item.id)).toBe(false); // odsutan iz mape = "nije recepturisan"
+  });
+
+  it("audit §25 (scenario H): sirovina dostupna na Lokaciji A NE čini artikal dostupnim na Lokaciji B", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Šopska (dve lokacije)");
+    const tomato = await ingredients.createIngredient(owner, { name: "Paradajz dve lokacije", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: tomato.id, quantity: 0.3 });
+    // Zaliha postoji SAMO na glavnoj lokaciji (A) -- ne i na "Other" (B).
+    await ingredients.initializeStock(owner, { ingredientId: tomato.id, locationId: fixture.locationId, initialStock: 10 });
+
+    const atA = await ingredients.getRecipeAvailabilityForMenuItems(fixture.restaurantId, fixture.locationId, [item.id]);
+    expect(atA.get(item.id)?.status).toBe("AVAILABLE");
+
+    const atB = await ingredients.getRecipeAvailabilityForMenuItems(fixture.restaurantId, fixture.otherLocationId, [item.id]);
+    expect(atB.get(item.id)?.status).toBe("OUT"); // zaliha sa A se NIKAD ne "pozajmljuje" na B
+    expect(atB.get(item.id)?.availablePortions).toBe(0);
+
+    // Naplata na lokaciji B mora biti odbijena -- ne sme "pozajmiti" zalihu sa A.
+    await expect(
+      ingredients.decrementIngredientsOnSale({
+        paymentId: randomUUID(),
+        orderId: randomUUID(),
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.otherLocationId,
+        items: [{ menuItemId: item.id, quantity: 1 }],
+      })
+    ).rejects.toBeInstanceOf(ingredients.InsufficientIngredientStockError);
+
+    // Zaliha na A ostaje netaknuta.
+    const stockA = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: tomato.id, locationId: fixture.locationId } });
+    expect(Number(stockA.currentStock)).toBe(10);
+  });
+});
+
+describe("audit §32: cross-restaurant izolacija za nove P1.6 funkcije", () => {
+  it("setInventoryTrackingMethod odbija menuItemId koji pripada DRUGOM restoranu", async () => {
+    const fixture = await createFixture();
+    const foreignOwner: AuthContext = {
+      userId: "foreign-owner",
+      employeeId: "foreign-owner",
+      restaurantId: fixture.otherRestaurantId,
+      locationIds: [],
+      roles: ["OWNER"],
+      permissions: new Set(["inventory.manage", "menu.view", "menu.manage"]),
+    };
+    const item = await createMenuItem(fixture, "Tuđi artikal");
+
+    await expect(inventory.setInventoryTrackingMethod(foreignOwner, item.id, "DIRECT_STOCK")).rejects.toThrow(/nije pronađen/i);
+
+    const unchanged = await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(unchanged.inventoryTrackingMethod).toBe("NO_TRACKING");
+  });
+
+  it("getRecipeAvailabilityForMenuItems se ne curi preko restaurantId granice — druga restoran-scoped sirovina ne utiče", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const foreignLocation = await prisma.location.create({ data: { restaurantId: fixture.otherRestaurantId, name: "Foreign" } });
+    const foreignOwner: AuthContext = {
+      userId: "foreign-owner-2",
+      employeeId: "foreign-owner-2",
+      restaurantId: fixture.otherRestaurantId,
+      locationIds: [foreignLocation.id],
+      roles: ["OWNER"],
+      permissions: new Set(["inventory.manage", "inventory.view", "menu.view", "menu.manage"]),
+    };
+
+    const item = await createMenuItem(fixture, "Restoran A artikal");
+    const tomato = await ingredients.createIngredient(owner, { name: "Paradajz A", unit: "KILOGRAM" });
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: tomato.id, quantity: 0.3 });
+    await ingredients.initializeStock(owner, { ingredientId: tomato.id, locationId: fixture.locationId, initialStock: 10 });
+
+    // Isti naziv sirovine u DRUGOM restoranu, sa velikom zalihom -- ne sme uticati.
+    const foreignTomato = await ingredients.createIngredient(foreignOwner, { name: "Paradajz A", unit: "KILOGRAM" });
+    await ingredients.initializeStock(foreignOwner, { ingredientId: foreignTomato.id, locationId: foreignLocation.id, initialStock: 999 });
+
+    const availability = await ingredients.getRecipeAvailabilityForMenuItems(fixture.restaurantId, fixture.locationId, [item.id]);
+    expect(availability.get(item.id)?.status).toBe("AVAILABLE");
+    expect(availability.get(item.id)?.availablePortions).toBe(Math.floor(10 / 0.3));
   });
 });
 

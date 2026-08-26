@@ -436,19 +436,39 @@ describe("inventory: pracenje i minimum stanje", () => {
   it("setTrackingEnabled menja trackStock na MenuItem-u", async () => {
     const fixture = await createFixture();
     const ctx = ownerCtx(fixture);
+    // initialStock: 0 -- switching away and back never hits the P1.6 §19
+    // stale-quantity guard (that's covered by its own dedicated test below),
+    // so this test stays focused purely on the trackStock toggle itself.
     await inventory.initializeTracking(ctx, {
       menuItemId: fixture.menuItemId,
       locationId: fixture.locationId,
-      initialStock: 5,
+      initialStock: 0,
     });
 
-    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false, { confirmSwitchAwayFromDirectStock: true });
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false);
     const mi = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
     expect(mi.trackStock).toBe(false);
 
     await inventory.setTrackingEnabled(ctx, fixture.menuItemId, true);
     const mi2 = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
     expect(mi2.trackStock).toBe(true);
+  });
+
+  it("re-enabling DIRECT_STOCK with a stale nonzero InventoryItem row requires confirmReactivateDirectStock, then zeroes it (never silently trusts the old number)", async () => {
+    const fixture = await createFixture();
+    const ctx = ownerCtx(fixture);
+    const invItem = await inventory.initializeTracking(ctx, { menuItemId: fixture.menuItemId, locationId: fixture.locationId, initialStock: 5 });
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, false, { confirmSwitchAwayFromDirectStock: true });
+
+    await expect(inventory.setTrackingEnabled(ctx, fixture.menuItemId, true)).rejects.toBeInstanceOf(inventory.StaleDirectStockQuantityError);
+    const stillOff = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(stillOff.trackStock).toBe(false);
+
+    await inventory.setTrackingEnabled(ctx, fixture.menuItemId, true, { confirmReactivateDirectStock: true });
+    const mi2 = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.menuItemId } });
+    expect(mi2.trackStock).toBe(true);
+    const zeroed = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(zeroed.currentStock)).toBe(0);
   });
 
   it("setMinimumStock azurira minimumStock na MenuItem-u", async () => {

@@ -14,8 +14,11 @@ const patchSchema = z.object({
   // inventory-service.ts setMinimumStock), različito od "polje nije poslato".
   minimumStock: z.number().min(0).nullable().optional(),
   // P1.6: potvrda da administrator svesno isključuje praćenje iako još ima
-  // zalihe na stanju (vidi inventory-service.ts DirectStockStillPresentError).
+  // zalihe na stanju (vidi inventory-service.ts DirectStockStillPresentError),
+  // odn. da svesno ponovo aktivira praćenje uz postojeći (možda zastareo)
+  // zapis (vidi StaleDirectStockQuantityError).
   confirmSwitchAwayFromDirectStock: z.boolean().optional(),
+  confirmReactivateDirectStock: z.boolean().optional(),
 });
 
 export const PATCH = withApiAuth<{ id: string }>(async (ctx, request, { id }) => {
@@ -27,6 +30,7 @@ export const PATCH = withApiAuth<{ id: string }>(async (ctx, request, { id }) =>
   if (input.trackStock !== undefined) {
     await inventory.setTrackingEnabled(ctx, invItem.menuItemId, input.trackStock, {
       confirmSwitchAwayFromDirectStock: input.confirmSwitchAwayFromDirectStock,
+      confirmReactivateDirectStock: input.confirmReactivateDirectStock,
     });
   }
   if (input.minimumStock !== undefined) {
