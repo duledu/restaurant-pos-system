@@ -12,15 +12,13 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 const NEW_PERMISSIONS = [
-  { code: "orders.print", description: "Štampa/pregled/reprint kuhinjskog, šank i kupčevog tiketa (Faza 6)" },
-  { code: "settings.manage", description: "Podešavanja restorana i konfiguracija štampača (Faza 6)" },
+  { code: "inventory.count", description: "Fizičko prebrojavanje zaliha (Inventura) — sesija/redovi/potvrda" },
 ] as const;
 
 const NEW_ROLE_GRANTS: Record<string, string[]> = {
-  OWNER: ["orders.print", "settings.manage"],
-  ADMIN: ["orders.print", "settings.manage"],
-  MANAGER: ["orders.print", "settings.manage"],
-  WAITER: ["orders.print"],
+  OWNER: ["inventory.count"],
+  ADMIN: ["inventory.count"],
+  MANAGER: ["inventory.count"],
 };
 
 async function main() {
