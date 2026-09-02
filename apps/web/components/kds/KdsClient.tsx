@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { LogoutButton } from "../ui/LogoutButton";
 import { AppLogo } from "../branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
@@ -204,6 +205,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           <span className="rounded-md border border-white/10 bg-white/[.05] px-3 py-2 text-xs font-semibold tabular-nums text-cream-300/80">
             {orders.length} aktivnih
           </span>
+          <Link
+            href={station === "KITCHEN" ? "/kitchen/availability" : "/bar/availability"}
+            className="flex min-h-11 items-center rounded-md border border-white/10 bg-white/[.05] px-3 text-xs font-semibold text-cream-300/80 hover:bg-white/[.1]"
+          >
+            Dostupnost
+          </Link>
           <LogoutButton theme="dark" />
         </div>
       </div>

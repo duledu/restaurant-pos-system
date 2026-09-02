@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { VOID_REASON_CODES } from "./void-reasons";
+import { AVAILABILITY_REASON_CODES } from "./availability-reasons";
 
 export const openShiftSchema = z.object({
   locationId: z.string().uuid(),
@@ -101,6 +102,22 @@ export const transferOrderItemsSchema = z.object({
   lines: z.array(splitBillLineSchema).min(1).max(100),
 });
 export type TransferOrderItemsInput = z.infer<typeof transferOrderItemsSchema>;
+
+// ── Operativna dostupnost (Kuhinja/Šank "Nije dostupno") ─────────────────
+
+export const setMenuItemAvailabilitySchema = z
+  .object({
+    locationId: z.string().uuid(),
+    menuItemId: z.string().uuid(),
+    isAvailable: z.boolean(),
+    reasonCode: z.enum(AVAILABILITY_REASON_CODES).optional(),
+    note: z.string().trim().max(500).optional(),
+  })
+  .refine((v) => v.isAvailable || v.reasonCode !== undefined, {
+    message: "Razlog je obavezan kada se artikal označava kao nedostupan",
+    path: ["reasonCode"],
+  });
+export type SetMenuItemAvailabilityInput = z.infer<typeof setMenuItemAvailabilitySchema>;
 
 export const voidOrderItemSchema = z.object({
   quantity: z.number().int().min(1),

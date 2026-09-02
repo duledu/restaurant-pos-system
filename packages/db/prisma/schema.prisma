@@ -71,21 +71,21 @@ model Restaurant {
   updatedAt DateTime         @updatedAt
   createdBy String?
 
-  tenant    Tenant     @relation(fields: [tenantId], references: [id])
-  locations Location[]
-  employees Employee[]
-  roles     Role[]
-  devices   Device[]
-  menuCategories MenuCategory[]
-  menuItems      MenuItem[]
-  floors    Floor[]
-  shifts    Shift[]
-  orders    Order[]
-  settings  RestaurantSettings?
-  inventoryItems InventoryItem[]
-  modifierGroups ModifierGroup[]
-  ingredients        Ingredient[]
-  ingredientStocks   IngredientStock[]
+  tenant              Tenant              @relation(fields: [tenantId], references: [id])
+  locations           Location[]
+  employees           Employee[]
+  roles               Role[]
+  devices             Device[]
+  menuCategories      MenuCategory[]
+  menuItems           MenuItem[]
+  floors              Floor[]
+  shifts              Shift[]
+  orders              Order[]
+  settings            RestaurantSettings?
+  inventoryItems      InventoryItem[]
+  modifierGroups      ModifierGroup[]
+  ingredients         Ingredient[]
+  ingredientStocks    IngredientStock[]
   inventoryCategories InventoryCategory[]
 
   @@index([tenantId])
@@ -146,10 +146,10 @@ model User {
 // identifiers. Database persistence makes throttling consistent across
 // serverless instances.
 model LoginThrottle {
-  key            String   @id
-  failedAttempts Int      @default(0)
+  key            String    @id
+  failedAttempts Int       @default(0)
   lockedUntil    DateTime?
-  updatedAt      DateTime @updatedAt
+  updatedAt      DateTime  @updatedAt
 
   @@index([lockedUntil])
   @@map("login_throttles")
@@ -276,7 +276,7 @@ model Device {
   // NIKAD se ne koristi za autorizaciju/aktivan-status uređaja (to je
   // isActive). Null = uređaj nikad nije video autentifikovan zahtev preko
   // requireAuth (npr. registrovan, ali još nije korišćen za prijavu).
-  lastSeenAt DateTime?
+  lastSeenAt   DateTime?
 
   restaurant Restaurant @relation(fields: [restaurantId], references: [id])
   location   Location?  @relation(fields: [locationId], references: [id])
@@ -389,7 +389,7 @@ enum CategoryType {
 }
 
 model MenuItem {
-  id           String   @id @default(uuid())
+  id           String  @id @default(uuid())
   restaurantId String
   categoryId   String?
   // Nullable namerno: needsReview stavke (vidi ispod) mogu biti kreirane
@@ -401,8 +401,8 @@ model MenuItem {
   slug        String
   description String?
 
-  price    Decimal @db.Decimal(12, 2)
-  taxRate  Decimal @db.Decimal(5, 2) @default(20)
+  price   Decimal @db.Decimal(12, 2)
+  taxRate Decimal @default(20) @db.Decimal(5, 2)
 
   quantity Decimal? @db.Decimal(12, 3) // težina/zapremina broj (npr. 250)
   unit     String? // "g", "ml", "kom", "l" — slobodan tekst u MVP-u
@@ -413,8 +413,8 @@ model MenuItem {
   purchasePrice Decimal? @db.Decimal(12, 2) // future-ready: nabavna cena za maržu (nije MVP izveštaj)
   imageUrl      String?
 
-  sortOrder Int     @default(0)
-  isActive  Boolean @default(true) // vidljivo u adminu / meniju uopšte
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true) // vidljivo u adminu / meniju uopšte
   isAvailable Boolean @default(true) // privremeno nema na stanju (Temporary Out Of Stock)
 
   // LEGACY / synced mirror — vidi inventoryTrackingMethod ispod, koje je od
@@ -422,7 +422,7 @@ model MenuItem {
   // polje se i dalje ažurira (trackStock = method === DIRECT_STOCK) radi
   // bezbednosti bilo kog preostalog starog koda koji bi ga čitao, ali se
   // više NIGDE u domain sloju ne koristi kao jedini uslov grananja.
-  trackStock  Boolean  @default(false)
+  trackStock   Boolean  @default(false)
   minimumStock Decimal? @db.Decimal(12, 3)
 
   // P1.6: eksplicitna, restoranom-konfigurisana metoda praćenja zaliha po
@@ -454,13 +454,13 @@ model MenuItem {
   // dodele — nikad se ne pogađa dodela.
   inventoryCategoryId String?
 
-  restaurant        Restaurant          @relation(fields: [restaurantId], references: [id])
-  category           MenuCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  inventoryCategory   InventoryCategory?  @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
-  orderItems     OrderItem[]
-  inventoryItems InventoryItem[]
-  modifierGroups MenuItemModifierGroup[]
-  recipeLines    MenuItemIngredient[]
+  restaurant        Restaurant              @relation(fields: [restaurantId], references: [id])
+  category          MenuCategory?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  inventoryCategory InventoryCategory?      @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
+  orderItems        OrderItem[]
+  inventoryItems    InventoryItem[]
+  modifierGroups    MenuItemModifierGroup[]
+  recipeLines       MenuItemIngredient[]
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
@@ -494,16 +494,16 @@ model ModifierGroup {
   // required/min/max je JEDAN fleksibilan model umesto posebnih "tipova"
   // grupa (Veličina/Dodaci/...) — specifikacija #4/#5 eksplicitno traži da
   // se izbegnu hardkodovani tipovi grupa u korist ova tri broja/zastavice.
-  required   Boolean @default(false)
-  minSelect  Int     @default(0)
-  maxSelect  Int     @default(1)
-  sortOrder  Int     @default(0)
+  required     Boolean  @default(false)
+  minSelect    Int      @default(0)
+  maxSelect    Int      @default(1)
+  sortOrder    Int      @default(0)
   // Meka deaktivacija (specifikacija #36) — istorijski OrderItemModifier
   // snapshot redovi NIKAD ne zavise od ovog polja (imaju sopstveni snapshot
   // naziva/cene), pa deaktivacija grupe ne menja ništa u prošlim porudžbinama.
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   restaurant Restaurant              @relation(fields: [restaurantId], references: [id])
   options    ModifierOption[]
@@ -515,14 +515,14 @@ model ModifierGroup {
 }
 
 model ModifierOption {
-  id              String  @id @default(uuid())
+  id              String   @id @default(uuid())
   modifierGroupId String
   name            String
-  priceDelta      Decimal @db.Decimal(12, 2) @default(0)
-  sortOrder       Int     @default(0)
-  isActive        Boolean @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  priceDelta      Decimal  @default(0) @db.Decimal(12, 2)
+  sortOrder       Int      @default(0)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   group              ModifierGroup       @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
   orderItemModifiers OrderItemModifier[]
@@ -642,7 +642,7 @@ model Shift {
   locationId   String
   openedBy     String // employeeId
   openedAt     DateTime    @default(now())
-  openingCash  Decimal     @db.Decimal(12, 2) @default(0)
+  openingCash  Decimal     @default(0) @db.Decimal(12, 2)
   status       ShiftStatus @default(OPEN)
   closedBy     String?
   closedAt     DateTime?
@@ -660,8 +660,8 @@ model Shift {
   totalRevenue   Decimal? @db.Decimal(12, 2) // cashTotal + cardTotal
   orderCount     Int? // broj naplaćenih porudžbina u smeni
 
-  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
-  location   Location   @relation(fields: [locationId], references: [id])
+  restaurant Restaurant      @relation(fields: [restaurantId], references: [id])
+  location   Location        @relation(fields: [locationId], references: [id])
   orders     Order[]
   payments   Payment[]
   itemVoids  OrderItemVoid[]
@@ -705,27 +705,27 @@ model Order {
   // posebnog Discount modela (vidi docs/01-RCS-Plan-v2-MVP.md, tačka 9:
   // "popust je polje na Order/OrderItem, ne poseban model" dok ne preraste
   // u kupone/pravila). Default null = postojeće porudžbine nepromenjene.
-  discountAmount Decimal? @db.Decimal(12, 2)
+  discountAmount Decimal?    @db.Decimal(12, 2)
   discountReason String?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  restaurant Restaurant  @relation(fields: [restaurantId], references: [id])
-  location   Location    @relation(fields: [locationId], references: [id])
-  table      RestaurantTable @relation(fields: [tableId], references: [id])
-  shift      Shift       @relation(fields: [shiftId], references: [id])
-  items      OrderItem[]
-  events     OrderEvent[]
+  restaurant       Restaurant          @relation(fields: [restaurantId], references: [id])
+  location         Location            @relation(fields: [locationId], references: [id])
+  table            RestaurantTable     @relation(fields: [tableId], references: [id])
+  shift            Shift               @relation(fields: [shiftId], references: [id])
+  items            OrderItem[]
+  events           OrderEvent[]
   // FAZA 8 (Split Bill): jedan Order sada može imati VIŠE Payment/Receipt
   // redova (jedan po delimičnoj naplati) — vidi napomenu uz Payment/Receipt
   // modele ispod. `payment`/`receipt` (jednina) su UKLONJENI zajedno sa
   // @unique na Payment.orderId/Receipt.orderId; svaki pozivalac koji je
   // ranije čitao `order.payment`/`order.receipt` sada čita `order.payments`/
   // `order.receipts` (niz, prazan dok porudžbina nije naplaćena ni delom).
-  payments   Payment[]
-  receipts   Receipt[]
-  itemVoids  OrderItemVoid[]
-  printJobs  PrintJob[]
+  payments         Payment[]
+  receipts         Receipt[]
+  itemVoids        OrderItemVoid[]
+  printJobs        PrintJob[]
   itemTransfersOut OrderItemTransfer[] @relation("TransferSourceOrder")
   itemTransfersIn  OrderItemTransfer[] @relation("TransferDestinationOrder")
 
@@ -754,8 +754,8 @@ enum OrderStatus {
 }
 
 model OrderItem {
-  id        String          @id @default(uuid())
-  orderId   String
+  id         String  @id @default(uuid())
+  orderId    String
   // menuItemId NIJE obavezan FK-referenca za prikaz — snapshot polja ispod
   // (name/price/taxRate) su izvor istine za ovu porudžbinu zauvek, čak i
   // ako se MenuItem kasnije izmeni ili obriše. menuItemId se čuva SAMO kao
@@ -764,9 +764,9 @@ model OrderItem {
   menuItemId String?
 
   name               String // snapshot naziva u trenutku slanja
-  price              Decimal @db.Decimal(12, 2) // snapshot cene
-  taxRate            Decimal @db.Decimal(5, 2) // snapshot poreske stope
-  quantity           Int     @default(1)
+  price              Decimal            @db.Decimal(12, 2) // snapshot cene
+  taxRate            Decimal            @db.Decimal(5, 2) // snapshot poreske stope
+  quantity           Int                @default(1)
   note               String? // jedna slobodna napomena po stavci (MVP)
   preparationStation PreparationStation @default(NONE) // snapshot stanice u trenutku slanja
 
@@ -784,8 +784,8 @@ model OrderItem {
   // (quantity - paidQuantity) — nikad već naplaćenu količinu.
   paidQuantity Int @default(0)
 
-  order    Order     @relation(fields: [orderId], references: [id])
-  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  order         Order               @relation(fields: [orderId], references: [id])
+  menuItem      MenuItem?           @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
   stationStates OrderItemStation[]
   voids         OrderItemVoid[]
   modifiers     OrderItemModifier[]
@@ -896,7 +896,7 @@ model Payment {
   // trenutku plaćanja, NIKAD preuzet iz klijentskog zahteva.
   amount         Decimal       @db.Decimal(12, 2)
   tenderedAmount Decimal       @db.Decimal(12, 2) // gotovina: šta je konobar primio; kartica: = amount
-  changeAmount   Decimal       @db.Decimal(12, 2) @default(0)
+  changeAmount   Decimal       @default(0) @db.Decimal(12, 2)
   completedBy    String // employeeId
   completedAt    DateTime      @default(now())
 
@@ -920,8 +920,8 @@ model Payment {
   // (npr. "Plaćanje 1/2"), nikad korišćeno za autorizaciju/računicu.
   isSplit        Boolean  @default(false)
 
-  order   Order    @relation(fields: [orderId], references: [id])
-  shift   Shift    @relation(fields: [shiftId], references: [id])
+  order   Order         @relation(fields: [orderId], references: [id])
+  shift   Shift         @relation(fields: [shiftId], references: [id])
   receipt Receipt?
   items   PaymentItem[]
 
@@ -968,16 +968,16 @@ model PaymentItem {
 }
 
 model Receipt {
-  id             String        @id @default(uuid())
+  id             String   @id @default(uuid())
   // Globalno monoton brojač (Postgres sekvenca ispod autoincrement-a) —
   // atomski dodeljen bez posebne brojačke tabele/race-a; prikazuje se kao
   // broj računa u UI/štampi (Faza 6).
-  sequenceNumber Int           @default(autoincrement())
+  sequenceNumber Int      @default(autoincrement())
   orderId        String
-  paymentId      String        @unique
+  paymentId      String   @unique
   restaurantId   String
   locationId     String
-  issuedAt       DateTime      @default(now())
+  issuedAt       DateTime @default(now())
 
   // Snapshot polja ispod se NIKAD ne ažuriraju posle kreiranja — vidi
   // napomenu na vrhu sekcije.
@@ -986,19 +986,19 @@ model Receipt {
   tableLabel          String
   waiterName          String
   paymentMethod       PaymentMethod
-  subtotal            Decimal @db.Decimal(12, 2)
-  taxTotal            Decimal @db.Decimal(12, 2)
-  total               Decimal @db.Decimal(12, 2)
+  subtotal            Decimal       @db.Decimal(12, 2)
+  taxTotal            Decimal       @db.Decimal(12, 2)
+  total               Decimal       @db.Decimal(12, 2)
   currency            String
   // [{ name, price, taxRate, quantity, lineTotal }]
-  items        Json
+  items               Json
   // [{ taxRate, taxableAmount, taxAmount }] — grupisano po poreskoj stopi,
   // za prikaz PDV rekapitulacije na računu (Faza 6).
-  taxBreakdown Json
+  taxBreakdown        Json
   // ── FAZA 6: zamrznut snapshot popusta primenjenog na Order u trenutku
   // plaćanja (vidi Order.discountAmount) — nullable, postojeći računi
   // ostaju nepromenjeni.
-  discountAmount Decimal? @db.Decimal(12, 2)
+  discountAmount      Decimal?      @db.Decimal(12, 2)
 
   order   Order   @relation(fields: [orderId], references: [id])
   payment Payment @relation(fields: [paymentId], references: [id])
@@ -1054,7 +1054,7 @@ model OrderItemVoid {
 
   // Snapshot naziva/cene sa OrderItem-a u trenutku poništavanja — NIKAD
   // trenutna MenuItem cena (zahtev specifikacije #8).
-  itemName String
+  itemName  String
   unitPrice Decimal @db.Decimal(12, 2)
 
   quantityBefore Int
@@ -1168,7 +1168,7 @@ enum PrintJobStatus {
 }
 
 model PrintJob {
-  id            String         @id @default(uuid())
+  id            String             @id @default(uuid())
   restaurantId  String
   locationId    String
   orderId       String
@@ -1177,22 +1177,22 @@ model PrintJob {
   // pojedinačnu stanicu).
   station       ProductionStation?
   dispatchKey   String
-  status        PrintJobStatus @default(PENDING)
-  attemptCount  Int            @default(0)
+  status        PrintJobStatus     @default(PENDING)
+  attemptCount  Int                @default(0)
   // Renderovani sadržaj tiketa/računa u trenutku dispatch-a — zamrznut
   // snapshot, ista konvencija kao Receipt: reprint NIKAD ne preračunava
   // iz Order/OrderItem, samo ponovo ispisuje ovaj JSON.
   content       Json
-  isReprint     Boolean        @default(false)
+  isReprint     Boolean            @default(false)
   reprintOfId   String?
   requestedBy   String // employeeId, bez FK — ista konvencija kao Order.openedBy
   failureReason String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
   printedAt     DateTime?
 
-  order     Order     @relation(fields: [orderId], references: [id])
-  reprintOf PrintJob? @relation("PrintJobReprints", fields: [reprintOfId], references: [id])
+  order     Order      @relation(fields: [orderId], references: [id])
+  reprintOf PrintJob?  @relation("PrintJobReprints", fields: [reprintOfId], references: [id])
   reprints  PrintJob[] @relation("PrintJobReprints")
 
   @@unique([orderId, dispatchKey])
@@ -1273,22 +1273,24 @@ enum MovementType {
   SALE
   ADJUSTMENT
   WRITE_OFF
+  // Inventura (fizičko prebrojavanje) — vidi InventoryCountLine ispod.
+  INVENTORY_CORRECTION
 }
 
 model InventoryItem {
-  id           String  @id @default(uuid())
+  id           String   @id @default(uuid())
   restaurantId String
   locationId   String
   menuItemId   String
-  currentStock Decimal @db.Decimal(12, 3) @default(0)
-  unit         String  @default("kom")
+  currentStock Decimal  @default(0) @db.Decimal(12, 3)
+  unit         String   @default("kom")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  restaurant  Restaurant          @relation(fields: [restaurantId], references: [id])
-  location    Location            @relation(fields: [locationId], references: [id])
-  menuItem    MenuItem            @relation(fields: [menuItemId], references: [id])
-  movements   InventoryMovement[]
+  restaurant Restaurant          @relation(fields: [restaurantId], references: [id])
+  location   Location            @relation(fields: [locationId], references: [id])
+  menuItem   MenuItem            @relation(fields: [menuItemId], references: [id])
+  movements  InventoryMovement[]
 
   @@unique([locationId, menuItemId])
   @@index([restaurantId])
@@ -1310,6 +1312,13 @@ model InventoryMovement {
   orderId         String?
   employeeId      String?
   reason          String?
+  // Inventura: generička poveznica ka izvoru korekcije — vidi identičan,
+  // već postojeći par kolona na IngredientMovement za isti razlog
+  // (paymentId/orderId ostaju posebne, dedikovane kolone za SALE; ovaj par
+  // je za korekcije koje ne dolaze iz naplate). referenceType="INVENTORY_COUNT",
+  // referenceId=InventoryCountSession.id za sve INVENTORY_CORRECTION redove.
+  referenceType   String?
+  referenceId     String?
   createdAt       DateTime     @default(now())
 
   inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id])
@@ -1321,6 +1330,7 @@ model InventoryMovement {
   @@index([menuItemId])
   @@index([paymentId])
   @@index([createdAt])
+  @@index([referenceType, referenceId])
   @@map("inventory_movements")
 }
 
@@ -1364,18 +1374,18 @@ enum UnitOfMeasure {
 // kategorije koja ima dodeljene Ingredient/MenuItem redove bi ih osirotilo ili
 // zahtevalo kaskadno reosiromašenje; deactivate je bezbedno i vraćivo.
 model InventoryCategory {
-  id           String  @id @default(uuid())
+  id           String   @id @default(uuid())
   restaurantId String
   name         String
   parentId     String?
-  sortOrder    Int     @default(0)
-  isActive     Boolean @default(true)
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
-  parent     InventoryCategory?   @relation("InventoryCategoryChildren", fields: [parentId], references: [id], onDelete: SetNull)
-  children   InventoryCategory[]  @relation("InventoryCategoryChildren")
+  restaurant  Restaurant          @relation(fields: [restaurantId], references: [id])
+  parent      InventoryCategory?  @relation("InventoryCategoryChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children    InventoryCategory[] @relation("InventoryCategoryChildren")
   ingredients Ingredient[]
   menuItems   MenuItem[]
 
@@ -1386,26 +1396,26 @@ model InventoryCategory {
 }
 
 model Ingredient {
-  id           String  @id @default(uuid())
-  restaurantId String
-  name         String
-  unit         UnitOfMeasure
-  category     String? // slobodan tekst u MVP-u (npr. "Meso", "Povrće") — isti obrazac kao MenuItem.unit
+  id                  String        @id @default(uuid())
+  restaurantId        String
+  name                String
+  unit                UnitOfMeasure
+  category            String? // slobodan tekst u MVP-u (npr. "Meso", "Povrće") — isti obrazac kao MenuItem.unit
   // P1.5: strukturirana zamena za `category` (free-text) iznad — `category`
   // NAMERNO ostaje netaknuto polje (postojeći podaci, ako ih ima, se ne
   // dodiruju), ali nova Admin UI koristi ISKLJUČIVO inventoryCategoryId.
   // Nullable: postojeće/nove sirovine bez dodele ostaju "Nekategorisano".
   inventoryCategoryId String?
-  sku          String?
-  isActive     Boolean @default(true) // deaktivacija umesto brisanja — vidi napomenu ispod
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  sku                 String?
+  isActive            Boolean       @default(true) // deaktivacija umesto brisanja — vidi napomenu ispod
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
-  restaurant        Restaurant          @relation(fields: [restaurantId], references: [id])
-  inventoryCategory InventoryCategory?  @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
-  stocks     IngredientStock[]
-  movements  IngredientMovement[]
-  recipeLines MenuItemIngredient[]
+  restaurant        Restaurant           @relation(fields: [restaurantId], references: [id])
+  inventoryCategory InventoryCategory?   @relation(fields: [inventoryCategoryId], references: [id], onDelete: SetNull)
+  stocks            IngredientStock[]
+  movements         IngredientMovement[]
+  recipeLines       MenuItemIngredient[]
 
   // NAMERNO nema @@unique na imenu — isti obrazac kao MenuItem (slug nosi
   // jedinstvenost tamo; ovde jedinstvenost imena nije poslovni zahtev, dve
@@ -1421,7 +1431,7 @@ model IngredientStock {
   restaurantId      String
   locationId        String
   ingredientId      String
-  currentStock      Decimal  @db.Decimal(12, 3) @default(0)
+  currentStock      Decimal  @default(0) @db.Decimal(12, 3)
   lowStockThreshold Decimal? @db.Decimal(12, 3)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -1468,13 +1478,13 @@ model IngredientMovement {
   // par za OVAJ slučaj upotrebe; referenceType/referenceId ostaju za buduće
   // tipove (INVENTORY_CORRECTION/RETURN_TO_SUPPLIER) kojima dedikovane
   // kolone ne odgovaraju.
-  paymentId String?
-  orderId   String?
+  paymentId         String?
+  orderId           String?
   employeeId        String?
   reason            String?
-  referenceType String?
-  referenceId   String?
-  createdAt     DateTime @default(now())
+  referenceType     String?
+  referenceId       String?
+  createdAt         DateTime               @default(now())
 
   ingredient      Ingredient      @relation(fields: [ingredientId], references: [id])
   ingredientStock IngredientStock @relation(fields: [ingredientStockId], references: [id])
@@ -1486,6 +1496,7 @@ model IngredientMovement {
   @@index([ingredientId])
   @@index([paymentId])
   @@index([createdAt])
+  @@index([referenceType, referenceId])
   @@map("ingredient_movements")
 }
 
@@ -1509,4 +1520,154 @@ model MenuItemIngredient {
   @@index([menuItemId])
   @@index([ingredientId])
   @@map("menu_item_ingredients")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// OPERATIVNA DOSTUPNOST (Kuhinja/Šank "NIJE DOSTUPNO")
+//
+// POTPUNO NEZAVISNO od zalihe (InventoryItem/IngredientStock) — nula/
+// negativna zaliha je i dalje SAMO upozorenje, prodaja ostaje dozvoljena
+// (vidi getInventoryStockStatus). Ovaj model je JEDINI izvor tvrde blokade
+// za NOVO naručivanje: kuhinja/šank ručno označe artikal privremeno
+// nedostupnim (pokvarena oprema, nema struje/gasa, fizički nema sastojka
+// iako je zaliha "na papiru" još pozitivna, itd.) — razlog koji zaliha sama
+// po sebi ne može da izrazi.
+//
+// NIKAD se ne oslanja na staro MenuItem.isAvailable (restoran-globalno,
+// bez lokacije, iz Admin meni ekrana) — ovo je NOVA, po-lokaciji granica,
+// namerno odvojena (isti artikal može biti dostupan na jednoj lokaciji a
+// nedostupan na drugoj, npr. pokvaren friteza samo u jednoj poslovnici).
+//
+// ODSUSTVO REDA = DOSTUPAN (namerno najbezbednija podrazumevana vrednost —
+// nova lokacija/artikal kombinacija nikad nije slučajno blokirana). Red se
+// kreira SAMO kad neko eksplicitno označi nedostupnim; ponovno omogućavanje
+// BRIŠE red (vraća se na podrazumevano "odsustvo = dostupan"), ne ostavlja
+// zastareo isAvailable=true red — vidi availability-service.ts.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum AvailabilityReasonCode {
+  NEMA_PROIZVODA
+  NEMA_SIROVINE_FIZICKI
+  OPREMA_KVAR
+  NEMA_STRUJE_GASA
+  STANICA_NE_RADI
+  NIJE_MOGUCE_PRIPREMITI
+  DRUGO
+}
+
+model MenuItemAvailability {
+  id           String @id @default(uuid())
+  // Plain (bez @relation) — ista konvencija kao OrderItemTransfer.restaurantId/
+  // locationId iznad: čist scoping/target podatak, ne navigiran kroz Prisma
+  // include, pa ne zahteva izmenu MenuItem/Restaurant/Location modela.
+  restaurantId String
+  locationId   String
+  menuItemId   String
+
+  isAvailable Boolean                 @default(false) // red postoji SAMO kad je false — vidi napomenu iznad
+  reasonCode  AvailabilityReasonCode?
+  note        String?
+  updatedBy   String // employeeId, bez FK — ista konvencija kao Order.openedBy
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  @@unique([locationId, menuItemId])
+  @@index([restaurantId])
+  @@index([menuItemId])
+  @@map("menu_item_availabilities")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// INVENTURA (fizičko prebrojavanje zaliha)
+//
+// Pokriva ISKLJUČIVO Ingredient (sirovine) i DIRECT_STOCK MenuItem (gotovi
+// proizvodi na direktnoj zalihi) — RECIPE stavke (nema sopstvene zalihe,
+// samo recepturu) i NO_TRACKING stavke (zaliha se uopšte ne prati) se
+// NIKAD ne broje, odbijeno na servisu (inventura-service.ts).
+//
+// KONKURENTNOST: InventoryCountLine.systemQtySnapshot je stanje zabeleženo
+// U TRENUTKU dodavanja reda u sesiju. Pri potvrdi (confirmSession), tačna
+// trenutna (živa) zaliha se PONOVO čita I atomski upoređuje sa snapshot-om
+// KROZ JEDAN uslovni UPDATE (WHERE currentStock = snapshot) — ista TOCTOU-
+// bezbedna tehnika kao billing/void/transfer guard-ovi svuda drugde u ovom
+// projektu, ne "SELECT pa posle UPDATE" (što bi ostavilo race prozor).
+// Ako se zaliha promenila u međuvremenu (npr. konkurentna prodaja/prijem
+// robe), red se označava STALE i NE upisuje se korekcija — normalan
+// menadžer mora "Prebroj ponovo" (recountLine), OWNER/ADMIN sme eksplicitno
+// da pређe preko upozorenja (override), i tada se korekcija računa NASUPROT
+// SVEŽE pročitane žive vrednosti, nikad naslepo physicalQty upisano preko
+// stare pretpostavke.
+//
+// Potvrda cele sesije je JEDNA atomska transakcija — ako BILO KOJI red
+// naiđe na nerešen STALE, CELA transakcija se poništava (nijedan drugi red
+// iz iste potvrde ne ostaje delimično upisan), zahtev specifikacije "no
+// partial confirmation".
+// ─────────────────────────────────────────────────────────────────────────
+
+enum InventoryCountStatus {
+  OPEN
+  CONFIRMED
+}
+
+enum InventoryCountTargetType {
+  INGREDIENT
+  MENU_ITEM
+}
+
+enum InventoryCountLineStatus {
+  NOT_COUNTED // Nije prebrojano
+  MATCH // Poklapa se
+  SHORTAGE // Manjak
+  SURPLUS // Višak
+  STALE // Stanje promenjeno tokom inventure
+}
+
+model InventoryCountSession {
+  id           String               @id @default(uuid())
+  restaurantId String
+  locationId   String
+  status       InventoryCountStatus @default(OPEN)
+  startedBy    String
+  startedAt    DateTime             @default(now())
+  confirmedBy  String?
+  confirmedAt  DateTime?
+
+  lines InventoryCountLine[]
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([restaurantId, locationId, status])
+  @@map("inventory_count_sessions")
+}
+
+model InventoryCountLine {
+  id           String                   @id @default(uuid())
+  sessionId    String
+  targetType   InventoryCountTargetType
+  // Plain — vidi napomenu na vrhu MenuItemAvailability o istoj konvenciji;
+  // imena artikala/sirovina se za prikaz batch-uju posebnim upitom (isti
+  // obrazac kao resolveEmployeeDisplayNames), ne kroz Prisma include.
+  ingredientId String?
+  menuItemId   String?
+
+  systemQtySnapshot    Decimal                  @db.Decimal(12, 3)
+  physicalQty          Decimal?                 @db.Decimal(12, 3)
+  status               InventoryCountLineStatus @default(NOT_COUNTED)
+  countedBy            String?
+  countedAt            DateTime?
+  // Popunjeno TEK pri potvrdi sesije, samo za redove sa stvarnom (nenultom)
+  // korekcijom — vidi InventoryMovement/IngredientMovement referenceType/
+  // referenceId (referenceType="INVENTORY_COUNT", referenceId=sessionId) za
+  // punu, upitljivu sledljivost; ovo polje je čisto UI pogodnost (izbegava
+  // dodatni join po redu na istorijskom pregledu sesije).
+  correctionMovementId String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  session InventoryCountSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@index([ingredientId])
+  @@index([menuItemId])
+  @@map("inventory_count_lines")
 }

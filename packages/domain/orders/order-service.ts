@@ -8,6 +8,7 @@ import { stationsForPreparation } from "../production/station-state";
 import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
+import { getBlockedAvailability } from "../menu/availability-service";
 import { assertIngredientStockAvailable } from "../inventory/ingredient-service";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
 
@@ -113,6 +114,14 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
   if (!menuItem) throw new Error("Artikal nije pronađen");
   if (!menuItem.isActive || !menuItem.isAvailable) {
     throw new Error("Artikal trenutno nije dostupan za prodaju");
+  }
+
+  // Operativna dostupnost (Kuhinja/Šank "NIJE DOSTUPNO") — POTPUNO odvojeno
+  // od zalihe, vidi availability-service.ts. Tvrd blok, nikad samo upozorenje.
+  const blockedByLocation = await getBlockedAvailability(ctx.restaurantId, order.locationId, [menuItem.id]);
+  const blocked = blockedByLocation.get(menuItem.id);
+  if (blocked) {
+    throw new Error(`Artikal "${menuItem.name}" je trenutno nedostupan (${blocked.reasonLabel}) — kuhinja/šank ga je privremeno isključila.`);
   }
 
   // P1.7: DIRECT_STOCK stock level NEVER blocks add-to-cart (a normal sale
@@ -237,6 +246,15 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
   if (input.quantity !== undefined && input.quantity > item.quantity && item.menuItemId) {
     const menuItem = await prisma.menuItem.findUnique({ where: { id: item.menuItemId }, select: { id: true, name: true } });
     if (menuItem) {
+      // Operativna dostupnost — isti tvrd blok kao addItem (nikad samo
+      // upozorenje), primenjen SAMO na povećanje količine (smanjenje uvek
+      // dozvoljeno, isti duh kao ostatak ove funkcije).
+      const blockedByLocation = await getBlockedAvailability(ctx.restaurantId, order.locationId, [menuItem.id]);
+      const blocked = blockedByLocation.get(menuItem.id);
+      if (blocked) {
+        throw new Error(`Artikal "${menuItem.name}" je trenutno nedostupan (${blocked.reasonLabel}) — količina se ne može povećati.`);
+      }
+
       // P1.7: only the RecipeNotConfiguredError check remains — see addItem.
       await assertIngredientStockAvailable(prisma, {
         restaurantId: ctx.restaurantId,
@@ -380,6 +398,25 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
         const currentMenuItem = menuItemById.get(item.menuItemId!);
         return { menuItemId: item.menuItemId!, name: currentMenuItem?.name ?? item.name, quantity: item.quantity };
       });
+
+    // Operativna dostupnost — SVEŽA, ISPOD zaključane submit transakcije
+    // provera (isto mesto kao stockRequirements iznad) za SVAKU stavku u
+    // porudžbini. Konobar je mogao dodati stavku u DRAFT PRE nego što je
+    // kuhinja/šank u međuvremenu označila artikal nedostupnim — submit tada
+    // MORA odbiti CEO zahtev sa jasnom porukom (transakcija se poništava,
+    // ništa se ne šalje kuhinji/šanku), NIKAD tiho preskočiti tu stavku niti
+    // delimično poslati porudžbinu.
+    const menuItemIdsInOrder = [...new Set(stockRequirements.map((r) => r.menuItemId))];
+    const blockedByLocation = await getBlockedAvailability(ctx.restaurantId, order.locationId, menuItemIdsInOrder);
+    if (blockedByLocation.size > 0) {
+      const blockedNames = stockRequirements
+        .filter((r) => blockedByLocation.has(r.menuItemId))
+        .map((r) => `${r.name} (${blockedByLocation.get(r.menuItemId)!.reasonLabel})`);
+      throw new Error(
+        `Porudžbina sadrži artikal(e) koje je kuhinja/šank u međuvremenu označila nedostupnim: ${blockedNames.join(", ")}. Ukloni ih pre slanja.`
+      );
+    }
+
     await assertIngredientStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
 
     await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });

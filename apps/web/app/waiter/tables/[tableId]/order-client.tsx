@@ -13,6 +13,19 @@ interface Category {
   name: string;
   type: "FOOD" | "DRINK";
 }
+
+// PERF: module-scope (not component state) so it survives client-side
+// navigation between DIFFERENT tables — /waiter/tables/[tableId] fully
+// remounts this component per table, but the JS module itself stays loaded.
+// Categories are restaurant-wide (never location-scoped) and change rarely
+// (an admin editing the menu), unlike order/stock/availability data which
+// must always be fresh — so this is the one piece of this screen's data
+// that's safe to reuse across table entries within a short window.
+// Deliberately NOT applied to the item list: it carries live per-location
+// stock/availability state (see availability-service.ts) that must stay
+// accurate on every table entry, not up to a minute stale.
+let categoriesCache: { categories: Category[]; fetchedAt: number } | null = null;
+const CATEGORIES_CACHE_TTL_MS = 60_000;
 interface ModifierOption {
   id: string;
   name: string;
@@ -62,6 +75,10 @@ interface MenuItem {
   // artikal ima trackStock isključen — vidi inventory-service.ts double-
   // deduction odbranu), ali oba se čitaju nezavisno radi jasnoće.
   recipeAvailability: RecipeAvailability | null;
+  // Operativna (Kuhinja/Šank "NIJE DOSTUPNO") dostupnost — POTPUNO nezavisno
+  // od stock/recipeAvailability iznad (nikad null, uvek prisutno kad je
+  // meni zatražen sa locationId — vidi availability-service.ts).
+  availability: { isAvailable: boolean; reasonCode: string | null; reasonLabel: string | null } | null;
 }
 interface OrderItemModifier {
   id: string;
@@ -432,6 +449,17 @@ export function OrderClient({ tableId }: { tableId: string }) {
     setLoading(true);
     setError(null);
     try {
+      // PERF: categories/me depend on NEITHER the order nor its location —
+      // fire them immediately, concurrently with opening/loading the order
+      // itself, instead of waiting for that round trip to resolve first
+      // (the old code awaited openOrder, THEN started these two — a fully
+      // avoidable sequential hop on every table entry). Categories additionally
+      // reuse a short-lived cache (see categoriesCache above) — skip the
+      // network call entirely on a warm hit.
+      const freshCategories = categoriesCache && Date.now() - categoriesCache.fetchedAt < CATEGORIES_CACHE_TTL_MS ? categoriesCache.categories : null;
+      const categoriesPromise = freshCategories ? Promise.resolve({ categories: freshCategories }) : apiFetch(`/api/admin/menu/categories`);
+      const mePromise = apiFetch(`/api/pos/me`);
+
       const orderRes = await apiFetch("/api/pos/orders", {
         method: "POST",
         body: JSON.stringify({ tableId }),
@@ -444,15 +472,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
       // LOW/OK) SAMO za OVU lokaciju uz svaki artikal (specifikacija #41/#43).
       const [orderDetail, categoriesRes, itemsRes, meRes] = await Promise.all([
         apiFetch(`/api/pos/orders/${orderId}`),
-        apiFetch(`/api/admin/menu/categories`),
+        categoriesPromise,
         apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${orderLocationId}`),
-        apiFetch(`/api/pos/me`),
+        mePromise,
       ]);
 
       setOrder(orderDetail.order);
       setCategories(categoriesRes.categories);
       setItems(itemsRes.items);
       setRoles(meRes.roles ?? []);
+      if (!freshCategories) categoriesCache = { categories: categoriesRes.categories, fetchedAt: Date.now() };
       if (!activeCategoryId && categoriesRes.categories.length > 0) {
         setActiveCategoryId(categoriesRes.categories[0].id);
       }
@@ -522,6 +551,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
   // oba čitaju ISTO zastarelo stanje i oba odluče da POSTuju nov red umesto
   // da drugi PATCH-uje postojeći — otkriveno testom, ne teorijski rizik.
   const cartMutationRef = useRef(false);
+  // Per-item debounce timers for the quantity stepper — rapid +/- taps
+  // coalesce into ONE network call (the last requested quantity wins)
+  // instead of firing a request per tap, while every tap still updates the
+  // visible count instantly (see changeQuantity below). Keyed by orderItemId.
+  const quantityDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   async function withCartLock(fn: () => Promise<void>) {
     if (cartMutationRef.current) return;
@@ -543,28 +577,33 @@ export function OrderClient({ tableId }: { tableId: string }) {
    * tapa na "Burger + sir" (bez obzira na redosled biranja) inkrementiraju
    * ISTI red.
    */
+  /**
+   * PERF: mutation endpoints already return the created/updated OrderItem
+   * (see apps/web/app/api/pos/orders/[id]/items/**) — merging that response
+   * directly into local state removes the redundant second full-order GET
+   * that used to follow every single mutation (halves the network round
+   * trips per tap). The "existing item, +1" branch goes through the
+   * optimistic changeQuantity path below instead of its own PATCH, so rapid
+   * repeated taps on the same menu item ALSO benefit from its debounce.
+   */
   async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
     if (!order) return;
     setError(null);
+    const existing = order.items.find(
+      (i) => i.menuItemId === menuItemId && sameModifierSelection(i.modifiers, modifierOptionIds)
+    );
+    if (existing) {
+      if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
+      changeQuantity(existing, existing.quantity + 1);
+      return;
+    }
     await withCartLock(async () => {
-      const existing = order.items.find(
-        (i) => i.menuItemId === menuItemId && sameModifierSelection(i.modifiers, modifierOptionIds)
-      );
       try {
-        if (existing) {
-          if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
-          await apiFetch(`/api/pos/orders/${order.id}/items/${existing.id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ quantity: existing.quantity + 1 }),
-          });
-        } else {
-          await apiFetch(`/api/pos/orders/${order.id}/items`, {
-            method: "POST",
-            body: JSON.stringify({ menuItemId, quantity: 1, modifierOptionIds }),
-          });
-        }
-        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        setOrder(refreshed.order);
+        const res = await apiFetch(`/api/pos/orders/${order.id}/items`, {
+          method: "POST",
+          body: JSON.stringify({ menuItemId, quantity: 1, modifierOptionIds }),
+        });
+        setOrder((prev) => (prev ? { ...prev, items: [...prev.items, res.item] } : prev));
       } catch (e) {
         setError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
         throw e; // modal treba da prikaže grešku i ostane otvoren
@@ -598,12 +637,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
     setError(null);
     await withCartLock(async () => {
       try {
-        await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}/modifiers`, {
+        const res = await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}/modifiers`, {
           method: "PATCH",
           body: JSON.stringify({ modifierOptionIds }),
         });
-        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        setOrder(refreshed.order);
+        setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? res.item : i)) } : prev));
       } catch (e) {
         setError(e instanceof Error ? e.message : "Greška pri izmeni dodataka");
         throw e;
@@ -611,19 +649,48 @@ export function OrderClient({ tableId }: { tableId: string }) {
     });
   }
 
+  /**
+   * PERF: optimistic — the row disappears the instant the button is tapped;
+   * the DELETE happens in the background. On failure the item is restored
+   * and the error shown (server remains authoritative — this never touches
+   * a SUBMITTED item, only DRAFT rows, same as before).
+   */
   async function removeItem(itemId: string) {
     if (!order) return;
-    await withCartLock(async () => {
+    const removed = order.items.find((i) => i.id === itemId);
+    if (!removed) return;
+    setOrder((prev) => (prev ? { ...prev, items: prev.items.filter((i) => i.id !== itemId) } : prev));
+    const timers = quantityDebounceRef.current;
+    const pending = timers.get(itemId);
+    if (pending) {
+      clearTimeout(pending);
+      timers.delete(itemId);
+    }
+    try {
+      await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška — stavka nije uklonjena");
+      // Re-fetch rather than splice `removed` back in locally — the server
+      // order is authoritative for row ORDER (createdAt asc), and a manual
+      // splice would silently reshuffle the visible list on this rare
+      // failure path.
       try {
-        await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
         const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
         setOrder(refreshed.order);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Greška");
+      } catch {
+        // Pozadinsko usklađivanje nakon greške — tiho preskoči.
       }
-    });
+    }
   }
 
+  /**
+   * PERF: true optimistic UI — the visible count updates on every tap,
+   * immediately, with no network wait. Rapid repeated taps (+/- mashed a few
+   * times in a row) coalesce into ONE PATCH per item (last quantity wins,
+   * 350ms debounce) instead of one request per tap. Server remains
+   * authoritative: on failure the whole order is re-fetched to reconcile
+   * local state back to ground truth and a clear error is shown.
+   */
   async function changeQuantity(item: OrderItem, nextQuantity: number) {
     if (!order) return;
     if (nextQuantity <= 0) {
@@ -632,18 +699,33 @@ export function OrderClient({ tableId }: { tableId: string }) {
     }
     if (nextQuantity > 50) return; // isto ograničenje kao updateOrderItemSchema
     setError(null);
-    await withCartLock(async () => {
-      try {
-        await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ quantity: nextQuantity }),
-        });
-        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        setOrder(refreshed.order);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Greška pri izmeni količine");
-      }
-    });
+    setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, quantity: nextQuantity } : i)) } : prev));
+
+    const orderId = order.id;
+    const timers = quantityDebounceRef.current;
+    const existingTimer = timers.get(item.id);
+    if (existingTimer) clearTimeout(existingTimer);
+    timers.set(
+      item.id,
+      setTimeout(async () => {
+        timers.delete(item.id);
+        try {
+          await apiFetch(`/api/pos/orders/${orderId}/items/${item.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ quantity: nextQuantity }),
+          });
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "Greška pri izmeni količine — vraćeno na prethodno stanje");
+          try {
+            const refreshed = await apiFetch(`/api/pos/orders/${orderId}`);
+            setOrder(refreshed.order);
+          } catch {
+            // Pozadinsko usklađivanje nakon greške — tiho preskoči, konobar
+            // već vidi poruku o grešci iznad i može ručno da osveži.
+          }
+        }
+      }, 350)
+    );
   }
 
   async function confirmVoid(quantity: number, reasonCode: VoidReasonCode, explanation: string) {
@@ -816,6 +898,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
             // with no configured normative (handleTapMenuItem enforces
             // this server-side too).
             const notConfigured = item.recipeAvailability !== null && !item.recipeAvailability.configured;
+            // Operativna dostupnost (Kuhinja/Šank "NIJE DOSTUPNO") — tvrd
+            // blok, POTPUNO nezavisan od zalihe/normativa iznad. Vidi
+            // availability-service.ts.
+            const isUnavailable = item.availability !== null && !item.availability.isAvailable;
+            const isBlocked = notConfigured || isUnavailable;
             const level = item.stock?.stockStatus ?? item.recipeAvailability?.status ?? null;
             const isNegativeOrOut = level === "NEGATIVE" || level === "OUT";
             const isLow = level === "LOW";
@@ -828,10 +915,14 @@ export function OrderClient({ tableId }: { tableId: string }) {
               <button
                 key={item.id}
                 onClick={() => handleTapMenuItem(item)}
-                disabled={cartBusy || notConfigured}
-                aria-disabled={notConfigured}
+                disabled={cartBusy || isBlocked}
+                aria-disabled={isBlocked}
                 className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
-                  notConfigured ? "border-line bg-ink/[0.03]" : "border-line bg-white sm:hover:border-gold/60 sm:hover:shadow-card"
+                  isUnavailable
+                    ? "border-danger/50 bg-danger-soft"
+                    : notConfigured
+                      ? "border-line bg-ink/[0.03]"
+                      : "border-line bg-white sm:hover:border-gold/60 sm:hover:shadow-card"
                 }`}
               >
                 <div className="font-semibold leading-snug text-ink">
@@ -842,7 +933,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <span className="text-base font-bold tabular-nums text-gold-dark">
                     {Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
                   </span>
-                  {notConfigured && (
+                  {isUnavailable && (
+                    <span className="rounded-full bg-danger px-2 py-0.5 text-[10px] font-bold text-white">NIJE DOSTUPNO</span>
+                  )}
+                  {!isUnavailable && notConfigured && (
                     <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-semibold text-danger">
                       Normativ nije podešen
                     </span>
@@ -852,12 +946,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
                       Vizuelno namerno SEKUNDARNO (soft ton, bez pune ispune) — artikal se
                       i dalje normalno naručuje, ovo nikad ne sme izgledati kao "Normativ
                       nije podešen" (jedino stvarno blokirano stanje) iznad. */}
-                  {!notConfigured && isNegativeOrOut && (
+                  {!isBlocked && isNegativeOrOut && (
                     <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-medium text-danger">
                       {isRecipeItem ? "Proveri zalihu" : "Nema evidentirane zalihe"}
                     </span>
                   )}
-                  {!notConfigured && isLow && (
+                  {!isBlocked && isLow && (
                     <span className="text-[10px] font-medium text-warn">
                       {isRecipeItem ? `Još ${item.recipeAvailability!.availablePortions} porcija` : `Još ${formatStockQty(item.stock!.currentStock ?? "0")}`}
                     </span>
@@ -914,7 +1008,6 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity - 1)}
-                    disabled={cartBusy}
                     aria-label={`Umanji količinu — ${item.name}`}
                     className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                   >
@@ -924,7 +1017,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity + 1)}
-                    disabled={cartBusy || item.quantity >= 50}
+                    disabled={item.quantity >= 50}
                     aria-label={`Povećaj količinu — ${item.name}`}
                     className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                   >
@@ -933,7 +1026,6 @@ export function OrderClient({ tableId }: { tableId: string }) {
                 </div>
                 <button
                   onClick={() => removeItem(item.id)}
-                  disabled={cartBusy}
                   aria-label={`Ukloni — ${item.name}`}
                   className="px-2 py-2 text-xs text-danger/55 disabled:opacity-40"
                 >

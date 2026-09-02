@@ -205,13 +205,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Restoran nije aktivan" }, { status: 403 });
     }
 
-    const token = await createSessionToken({
-      userId: employee.userId ?? employee.id,
-      employeeId: employee.id,
-      restaurantId: employee.restaurantId,
-      deviceId: device.id,
-    });
-
     const minimalCtx: AuthContext = {
       userId: employee.userId ?? employee.id,
       employeeId: employee.id,
@@ -221,14 +214,26 @@ export async function POST(request: Request) {
       permissions: new Set(),
       deviceId: device.id,
     };
-    await audit.recordAuditEntry(minimalCtx, {
-      entityType: "Employee",
-      entityId: employee.id,
-      action: "auth.pin_login",
-      locationId: device.locationId ?? undefined,
-    });
-
-    const redirectTo = await resolveRedirectFor(employee.id);
+    // PERF: token signing, the audit write, and the role->redirect lookup
+    // are mutually independent (none reads another's result) — they used to
+    // run one after another for no reason. Running them concurrently cuts
+    // this tail of the login request to the slowest of the three instead of
+    // the sum of all three.
+    const [token, redirectTo] = await Promise.all([
+      createSessionToken({
+        userId: employee.userId ?? employee.id,
+        employeeId: employee.id,
+        restaurantId: employee.restaurantId,
+        deviceId: device.id,
+      }),
+      resolveRedirectFor(employee.id),
+      audit.recordAuditEntry(minimalCtx, {
+        entityType: "Employee",
+        entityId: employee.id,
+        action: "auth.pin_login",
+        locationId: device.locationId ?? undefined,
+      }),
+    ]);
 
     const response = NextResponse.json({ ok: true, redirectTo });
     response.cookies.set(sessionCookieOptions.name, token, sessionCookieOptions);
