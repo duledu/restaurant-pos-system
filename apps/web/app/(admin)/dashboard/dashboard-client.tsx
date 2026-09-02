@@ -39,8 +39,8 @@ interface RankedItem { name: string; categoryName: string | null; totalQuantity:
 interface ItemsResult { currency: string; topItems: RankedItem[]; lowItems: RankedItem[]; topByQuantity: RankedItem[]; zeroSaleItems: { id: string; name: string; categoryName: string | null }[]; basedOnCurrentMenu: true; }
 interface CategoryRow { categoryName: string; quantity: number; revenue: string; percentOfTotal: number; averageItemRevenue: string; }
 interface CategoriesResult { currency: string; categories: CategoryRow[]; isLiveCategoryName: true; }
-interface EmployeeRow { employeeId: string; employeeName: string; role: string; completedOrders: number; sales: string; cashHandled: string; cardHandled: string; averageOrderValue: string; discountTotal: string; voidCount: number; voidValue: string; shiftsClosedCount: number; cashDifference: string | null; }
-interface EmployeeNormalizedRow { employeeId: string; employeeName: string; role: string; salesPerHour: string | null; ordersPerHour: string | null; voidPercent: number | null; discountPercent: number | null; approximateHours: string | null; }
+interface EmployeeRow { employeeId: string; employeeName: string; role: string; completedPayments: number; sales: string; cashHandled: string; cardHandled: string; averagePaymentValue: string; discountTotal: string; voidCount: number; voidValue: string; shiftsClosedCount: number; cashDifference: string | null; }
+interface EmployeeNormalizedRow { employeeId: string; employeeName: string; role: string; salesPerHour: string | null; paymentsPerHour: string | null; voidPercent: number | null; discountPercent: number | null; approximateHours: string | null; }
 interface EmployeeNormalizedResult { currency: string; rows: EmployeeNormalizedRow[]; approximationNote: string; }
 interface VoidIntelligence {
   currency: string; totalVoidValue: string; voidCount: number; voidPercentOfSales: number | null;
@@ -51,11 +51,11 @@ interface VoidIntelligence {
 }
 interface DiscountIntelligence {
   currency: string; totalDiscountValue: string; discountPercentOfGross: number | null;
-  byEmployee: { employeeId: string; employeeName: string; discountTotal: string; orderCount: number }[];
+  byEmployee: { employeeId: string; employeeName: string; discountTotal: string; paymentCount: number }[];
   byReason: { reason: string; count: number; value: string }[];
   highestDiscountOrders: { orderId: string; discountAmount: string; discountReason: string | null; tableLabel: string; completedAt: string }[];
 }
-interface PaymentBreakdown { currency: string; totalSales: string; methods: { method: "CASH" | "CARD"; amount: string; percent: number; orderCount: number }[]; }
+interface PaymentBreakdown { currency: string; totalSales: string; methods: { method: "CASH" | "CARD"; amount: string; percent: number; paymentCount: number }[]; }
 interface ShiftAnalytics {
   currency: string; shiftCount: number; totalSales: string; averageSalesPerShift: string;
   totalCashExpected: string; totalCashCounted: string; averageCashVariance: string;
@@ -117,7 +117,7 @@ interface DashboardData {
   ingredientStock: IngredientStockAttentionSummary;
 }
 
-type EmployeeSortKey = "sales" | "orders" | "avgOrder";
+type EmployeeSortKey = "sales" | "payments" | "avgPayment";
 type ItemLimit = 5 | 10 | 20;
 
 const SEVERITY_ORDER: Record<Severity, number> = { HIGH: 0, WARNING: 1, INFO: 2 };
@@ -213,8 +213,8 @@ export function DashboardClient() {
     if (!data) return [];
     const rows = [...data.employees];
     if (employeeSort === "sales") return rows.sort((a, b) => Number(b.sales) - Number(a.sales));
-    if (employeeSort === "orders") return rows.sort((a, b) => b.completedOrders - a.completedOrders);
-    return rows.sort((a, b) => Number(b.averageOrderValue) - Number(a.averageOrderValue));
+    if (employeeSort === "payments") return rows.sort((a, b) => b.completedPayments - a.completedPayments);
+    return rows.sort((a, b) => Number(b.averagePaymentValue) - Number(a.averagePaymentValue));
   }, [data, employeeSort]);
 
   const trendChartData: TrendChartPoint[] = useMemo(() => {
@@ -714,7 +714,7 @@ export function DashboardClient() {
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="text-xs font-semibold uppercase tracking-widest text-inkSoft">Prodaja po zaposlenom</h2>
                   <div className="no-print flex gap-1 rounded-md bg-ink/[0.04] p-1">
-                    {([["sales", "Prodaja"], ["orders", "Porudžbine"], ["avgOrder", "Prosek"]] as [EmployeeSortKey, string][]).map(([key, label]) => (
+                    {([["sales", "Prodaja"], ["payments", "Računa"], ["avgPayment", "Prosek"]] as [EmployeeSortKey, string][]).map(([key, label]) => (
                       <button
                         key={key}
                         type="button"
@@ -736,7 +736,7 @@ export function DashboardClient() {
                         <thead>
                           <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                             <th className="px-4 py-3 font-medium">Zaposleni</th>
-                            <th className="px-4 py-3 text-right font-medium">Porudžbine</th>
+                            <th className="px-4 py-3 text-right font-medium">Računa</th>
                             <th className="px-4 py-3 text-right font-medium">Prodaja</th>
                             <th className="px-4 py-3 text-right font-medium">Prosek</th>
                             <th className="px-4 py-3 text-right font-medium">Storna</th>
@@ -746,9 +746,9 @@ export function DashboardClient() {
                           {sortedEmployees.map((e) => (
                             <tr key={e.employeeId} className="border-b border-line last:border-0">
                               <td className="px-4 py-3 text-ink">{e.employeeName} <span className="text-xs text-inkSoft">— {ROLE_LABEL[e.role] ?? e.role}</span></td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.completedOrders}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.completedPayments}</td>
                               <td className="px-4 py-3 text-right tabular-nums font-medium text-ink">{formatMoney(e.sales, currency)}</td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{formatMoney(e.averageOrderValue, currency)}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{formatMoney(e.averagePaymentValue, currency)}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.voidCount > 0 ? formatMoney(e.voidValue, currency) : "—"}</td>
                             </tr>
                           ))}
@@ -767,7 +767,7 @@ export function DashboardClient() {
                           <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                             <th className="px-4 py-3 font-medium">Zaposleni</th>
                             <th className="px-4 py-3 text-right font-medium">Prodaja/sat</th>
-                            <th className="px-4 py-3 text-right font-medium">Porudžbine/sat</th>
+                            <th className="px-4 py-3 text-right font-medium">Računa/sat</th>
                             <th className="px-4 py-3 text-right font-medium">Storno %</th>
                             <th className="px-4 py-3 text-right font-medium">Popust %</th>
                           </tr>
@@ -777,7 +777,7 @@ export function DashboardClient() {
                             <tr key={e.employeeId} className="border-b border-line last:border-0">
                               <td className="px-4 py-3 text-ink">{e.employeeName}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.salesPerHour ? formatMoney(e.salesPerHour, currency) : "—"}</td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.ordersPerHour ?? "—"}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.paymentsPerHour ?? "—"}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.voidPercent !== null ? `${e.voidPercent}%` : "—"}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.discountPercent !== null ? `${e.discountPercent}%` : "—"}</td>
                             </tr>
@@ -836,7 +836,7 @@ export function DashboardClient() {
                       {data.discounts.byEmployee.slice(0, 5).map((e) => (
                         <div key={e.employeeId} className="flex justify-between text-xs">
                           <span className="text-inkSoft">{e.employeeName}</span>
-                          <span className="font-medium text-ink">{e.orderCount}× — {formatMoney(e.discountTotal, currency)}</span>
+                          <span className="font-medium text-ink">{e.paymentCount}× — {formatMoney(e.discountTotal, currency)}</span>
                         </div>
                       ))}
                       {data.discounts.byEmployee.length === 0 && <p className="text-xs text-inkSoft">Nema popusta u periodu.</p>}

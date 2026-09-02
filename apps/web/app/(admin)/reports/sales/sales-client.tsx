@@ -28,7 +28,7 @@ interface EmployeeSales {
   employeeId: string;
   employeeName: string;
   role: string;
-  orders: number;
+  payments: number;
   sales: string;
 }
 
@@ -128,7 +128,7 @@ export function SalesClient() {
                 <thead>
                   <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                     <th className="px-4 py-3 font-medium">Zaposleni</th>
-                    <th className="px-4 py-3 font-medium">Porudžbine</th>
+                    <th className="px-4 py-3 font-medium">Računa</th>
                     <th className="px-4 py-3 text-right font-medium">Prodaja</th>
                   </tr>
                 </thead>
@@ -136,7 +136,7 @@ export function SalesClient() {
                   {byEmployee.map((row) => (
                     <tr key={row.employeeId} className="border-b border-line last:border-0">
                       <td className="px-4 py-3 text-ink">{row.employeeName}</td>
-                      <td className="px-4 py-3 text-inkSoft">{row.orders}</td>
+                      <td className="px-4 py-3 text-inkSoft">{row.payments}</td>
                       <td className="px-4 py-3 text-right font-bold tabular-nums text-ink">{formatMoney(row.sales, summary?.currency)}</td>
                     </tr>
                   ))}

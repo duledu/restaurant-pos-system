@@ -38,18 +38,50 @@ function MoreIcon() {
   );
 }
 
-const STATUS_STYLE: Record<Table["status"], string> = {
-  FREE: "bg-white border-line text-ink hover:border-success/50 hover:bg-success-soft/20",
-  OCCUPIED: "bg-graphite text-white border-graphite shadow-[0_8px_22px_rgba(10,25,49,.18)]",
-  AWAITING_BILL: "bg-white text-ink border-warn shadow-[inset_4px_0_0_#B45309]",
-  NEEDS_CLEANING: "bg-slate-100 text-ink/50 border-slate-300",
-};
+/**
+ * Premium POS tile: JEDAN vizuelni obrazac (bela/tamna površina + tanka
+ * leva akcentna traka) za sve statuse umesto po-statusu izmišljenih boja —
+ * "restrained status indicators", ne semafor. Vlasništvo (moj sto / sto
+ * kolege) je NAMERNO drugi ton iz VEĆ POSTOJEĆE graphite skale
+ * (graphite vs graphite-700), ne nova boja — konobar vidi na prvi pogled
+ * da je sto zauzet (tamna površina) I da li je njegov, bez dodatnog tapa.
+ */
+function tileStyle(table: Table, isMine: boolean): string {
+  switch (table.status) {
+    case "FREE":
+      return "bg-white border-line border-l-4 border-l-success/40 text-ink hover:border-l-success active:bg-success-soft/10";
+    case "OCCUPIED":
+      return isMine
+        ? "bg-graphite border-graphite text-white shadow-card"
+        : "bg-graphite-700 border-graphite-700 text-white/90 shadow-card";
+    case "AWAITING_BILL":
+      return "bg-white border-line border-l-4 border-l-warn text-ink";
+    case "NEEDS_CLEANING":
+    default:
+      return "bg-cream-200 border-line text-ink/45";
+  }
+}
 
-const STATUS_LABEL: Record<Table["status"], string> = {
-  FREE: "Slobodan",
-  OCCUPIED: "Zauzet",
-  AWAITING_BILL: "Čeka račun",
-  NEEDS_CLEANING: "Za čišćenje",
+function statusLabel(table: Table, isMine: boolean): string {
+  switch (table.status) {
+    case "FREE":
+      return "Slobodan";
+    case "OCCUPIED":
+      return isMine ? "Tvoj sto" : "Zauzeo kolega";
+    case "AWAITING_BILL":
+      return "Čeka račun";
+    case "NEEDS_CLEANING":
+      return "Za čišćenje";
+    default:
+      return "";
+  }
+}
+
+const STATUS_DOT: Record<Table["status"], string> = {
+  FREE: "bg-success",
+  OCCUPIED: "bg-white/70",
+  AWAITING_BILL: "bg-warn",
+  NEEDS_CLEANING: "bg-ink/25",
 };
 
 async function apiFetch(url: string, options?: RequestInit) {
@@ -251,21 +283,24 @@ export function PosClient() {
             <h2 className="text-xs font-bold uppercase tracking-[.14em] text-inkSoft">{floor.name}</h2>
             <span className="text-xs tabular-nums text-inkSoft">{floor.tables.filter((t) => t.status === "FREE").length}/{floor.tables.length} slobodno</span>
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
-            {floor.tables.map((table) => (
-              <button
-                key={table.id}
-                onClick={() => selectTable(table)}
-                className={`group relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${STATUS_STYLE[table.status]}`}
-              >
-                <span className={`absolute right-3 top-3 h-2.5 w-2.5 rounded-full ${table.status === "FREE" ? "bg-success" : table.status === "OCCUPIED" ? "bg-gold" : table.status === "AWAITING_BILL" ? "bg-warn" : "bg-slate-400"}`} aria-hidden="true" />
-                <span className="text-2xl font-bold tracking-tight">{table.label}</span>
-                <span>
-                  <span className="block text-xs font-semibold opacity-85">{STATUS_LABEL[table.status]}</span>
-                  <span className="mt-1 block text-[11px] opacity-55">Kapacitet · {table.capacity}</span>
-                </span>
-              </button>
-            ))}
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
+            {floor.tables.map((table) => {
+              const isMine = table.activeOrderOwnerId !== null && table.activeOrderOwnerId === employeeId;
+              return (
+                <button
+                  key={table.id}
+                  onClick={() => selectTable(table)}
+                  className={`relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${tileStyle(table, isMine)}`}
+                >
+                  <span className={`absolute right-3 top-3 h-2 w-2 rounded-full ${STATUS_DOT[table.status]}`} aria-hidden="true" />
+                  <span className="text-2xl font-bold tracking-tight">{table.label}</span>
+                  <span>
+                    <span className="block text-xs font-semibold opacity-80">{statusLabel(table, isMine)}</span>
+                    <span className="mt-0.5 block text-[11px] opacity-50">{table.capacity} mesta</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </section>
       ))}

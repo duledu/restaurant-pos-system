@@ -122,12 +122,10 @@ export async function requestBill(ctx: AuthContext, orderId: string) {
  * plaćanja i (za gotovinu, opciono) primljeni iznos za obračun kusura —
  * nikad sam iznos naplate.
  *
- * Zaštita od duple naplate: atomski `updateMany` sa WHERE status-guard-om
- * (isti obrazac kao production-service.advanceItemStatus) — Postgres
- * serijalizuje dva konkurentna poziva nad istim redom, samo jedan pogađa
- * WHERE klauzulu. `Payment.orderId @unique` je krajnja linija odbrane na
- * DB nivou za slučaj da guard ikad zaobiđe (npr. budući bug u pozivnom
- * kodu) — drugi INSERT puca na unique constraint umesto da tiho uspe.
+ * Zaštita od duple naplate: isti Order-row lock kao split-bill put. Cela
+ * naplata je dozvoljena samo ako nijedna živa količina još nije plaćena;
+ * zatim se paidQuantity, PaymentItem ledger, Payment/Receipt, COMPLETED i
+ * oslobađanje stola upisuju u istoj transakciji.
  */
 export async function completePayment(ctx: AuthContext, orderId: string, input: CompletePaymentInput) {
   const order = await loadOrderForBilling(ctx, orderId);
@@ -135,21 +133,6 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
   if (order.status === "CANCELLED") throw new Error("Porudžbina je otkazana");
   if (!PAYABLE_STATUSES.has(order.status)) {
     throw new Error("Porudžbina još nije poslata — nema šta da se naplati");
-  }
-
-  const payableItems = order.items.filter((item) => item.status !== "CANCELLED");
-  if (payableItems.length === 0) throw new Error("Porudžbina nema nijednu stavku za naplatu");
-
-  const { subtotal, tax, discount, total, taxBreakdown } = computeOrderTotals(payableItems, order.discountAmount ?? 0);
-
-  let tenderedAmount = total;
-  let changeAmount = new Prisma.Decimal(0);
-  if (input.method === "CASH" && input.tenderedAmount !== undefined) {
-    tenderedAmount = new Prisma.Decimal(input.tenderedAmount);
-    if (tenderedAmount.lessThan(total)) {
-      throw new Error("Primljena gotovina je manja od ukupnog iznosa računa");
-    }
-    changeAmount = tenderedAmount.sub(total);
   }
 
   // Smena AKTIVNA SADA (ne order.shiftId) — vidi napomenu na Payment.shiftId
@@ -163,33 +146,75 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
   ]);
 
   const { payment, receipt } = await prisma.$transaction(async (tx) => {
-    const guard = await tx.order.updateMany({
-      where: { id: orderId, status: { notIn: ["DRAFT", "COMPLETED", "CANCELLED"] } },
-      data: { status: "COMPLETED" },
+    await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
+    const freshOrder = await tx.order.findUniqueOrThrow({
+      where: { id: orderId },
+      include: { items: { include: { modifiers: { orderBy: { sortOrder: "asc" } } } }, table: true },
     });
-    if (guard.count !== 1) {
-      throw new Error("Porudžbina je već naplaćena ili nije u stanju za naplatu — osveži prikaz");
+    if (freshOrder.status === "COMPLETED") throw new Error("Porudžbina je već naplaćena");
+    if (freshOrder.status === "CANCELLED") throw new Error("Porudžbina je otkazana");
+    if (!PAYABLE_STATUSES.has(freshOrder.status)) throw new Error("Porudžbina još nije poslata — nema šta da se naplati");
+
+    const payableItems = freshOrder.items.filter((item) => item.status !== "CANCELLED");
+    if (payableItems.length === 0) throw new Error("Porudžbina nema nijednu stavku za naplatu");
+    if (payableItems.some((item) => item.paidQuantity !== 0)) {
+      throw new Error("Porudžbina je već delimično naplaćena — preostale stavke naplati kroz Podeli račun");
+    }
+
+    const { subtotal, tax, discount, total, taxBreakdown } = computeOrderTotals(payableItems, freshOrder.discountAmount ?? 0);
+    let tenderedAmount = total;
+    let changeAmount = new Prisma.Decimal(0);
+    if (input.method === "CASH" && input.tenderedAmount !== undefined) {
+      tenderedAmount = new Prisma.Decimal(input.tenderedAmount);
+      if (tenderedAmount.lessThan(total)) throw new Error("Primljena gotovina je manja od ukupnog iznosa računa");
+      changeAmount = tenderedAmount.sub(total);
+    }
+
+    for (const item of payableItems) {
+      const itemGuard = await tx.orderItem.updateMany({
+        where: { id: item.id, quantity: item.quantity, paidQuantity: 0, status: { not: "CANCELLED" } },
+        data: { paidQuantity: item.quantity },
+      });
+      if (itemGuard.count !== 1) throw new Error("Stavka je izmenjena u međuvremenu — osveži prikaz i pokušaj ponovo");
     }
 
     const payment = await tx.payment.create({
       data: {
         orderId,
         restaurantId: ctx.restaurantId,
-        locationId: order.locationId,
+        locationId: freshOrder.locationId,
         shiftId: shift.id,
         method: input.method,
         amount: total,
         tenderedAmount,
         changeAmount,
         completedBy: ctx.employeeId,
+        // FAZA 8: puna (jednokratna) naplata nosi CEO popust porudžbine kao
+        // svoj udeo — isto polje koje split-bill-service.ts popunjava
+        // prorata-udelom po delimičnoj naplati, tako da analytics-service.ts/
+        // reporting-service.ts mogu čitati SAMO Payment.discountAmount
+        // (nikad Order.discountAmount) bez obzira da li je porudžbina
+        // naplaćena odjednom ili podeljeno.
+        discountAmount: discount.isZero() ? null : discount,
       },
+    });
+
+    await tx.paymentItem.createMany({
+      data: payableItems.map((item) => ({
+        paymentId: payment.id,
+        orderItemId: item.id,
+        quantity: item.quantity,
+        unitPrice: item.price,
+        taxRate: item.taxRate,
+        lineTotal: new Prisma.Decimal(item.price).mul(item.quantity).toDecimalPlaces(2),
+      })),
     });
 
     await validateAndDecrementInventoryInTx(tx, {
       paymentId: payment.id,
       orderId,
       restaurantId: ctx.restaurantId,
-      locationId: order.locationId,
+      locationId: freshOrder.locationId,
       items: payableItems.map((it) => ({ menuItemId: it.menuItemId, quantity: it.quantity })),
     });
 
@@ -203,7 +228,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
       paymentId: payment.id,
       orderId,
       restaurantId: ctx.restaurantId,
-      locationId: order.locationId,
+      locationId: freshOrder.locationId,
       items: payableItems.map((it) => ({ menuItemId: it.menuItemId, quantity: it.quantity })),
     });
 
@@ -212,10 +237,10 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
         orderId,
         paymentId: payment.id,
         restaurantId: ctx.restaurantId,
-        locationId: order.locationId,
+        locationId: freshOrder.locationId,
         restaurantName: restaurant.name,
         restaurantLegalName: restaurant.legalName,
-        tableLabel: order.table.label,
+        tableLabel: freshOrder.table.label,
         waiterName: waiter ? `${waiter.firstName} ${waiter.lastName}` : "?",
         paymentMethod: input.method,
         subtotal,
@@ -247,7 +272,12 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     // Sto se oslobađa ATOMSKI sa naplatom — nikad kao odvojen, ne-transakcioni
     // korak (zahtev specifikacije: "sto ne sme postati slobodan samo zato
     // što je neko zatvorio browser").
-    await tx.restaurantTable.update({ where: { id: order.tableId }, data: { status: "FREE" } });
+    const completionGuard = await tx.order.updateMany({
+      where: { id: orderId, status: freshOrder.status },
+      data: { status: "COMPLETED" },
+    });
+    if (completionGuard.count !== 1) throw new Error("Porudžbina je izmenjena u međuvremenu — naplata nije izvršena");
+    await tx.restaurantTable.update({ where: { id: freshOrder.tableId }, data: { status: "FREE" } });
 
     await tx.orderEvent.create({
       data: {
@@ -265,7 +295,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
         entityId: orderId,
         action: "payment.completed",
         newValue: { method: input.method, amount: total.toString(), receiptId: receipt.id },
-        locationId: order.locationId,
+        locationId: freshOrder.locationId,
       },
       tx
     );
@@ -297,7 +327,12 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
 
 export async function getReceipt(ctx: AuthContext, orderId: string) {
   requireOrderOperator(ctx);
-  const receipt = await prisma.receipt.findFirst({ where: { orderId, ...scopeToRestaurant(ctx) } });
+  // Backwards-compatible order-level endpoint: with split bills there can be
+  // several receipts, so return the newest one deterministically.
+  const receipt = await prisma.receipt.findFirst({
+    where: { orderId, ...scopeToRestaurant(ctx) },
+    orderBy: [{ issuedAt: "desc" }, { sequenceNumber: "desc" }],
+  });
   if (!receipt) throw new Error("Račun nije pronađen");
   requireLocationAccess(ctx, receipt.locationId);
   return receipt;

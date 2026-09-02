@@ -716,10 +716,18 @@ model Order {
   shift      Shift       @relation(fields: [shiftId], references: [id])
   items      OrderItem[]
   events     OrderEvent[]
-  payment    Payment?
-  receipt    Receipt?
+  // FAZA 8 (Split Bill): jedan Order sada može imati VIŠE Payment/Receipt
+  // redova (jedan po delimičnoj naplati) — vidi napomenu uz Payment/Receipt
+  // modele ispod. `payment`/`receipt` (jednina) su UKLONJENI zajedno sa
+  // @unique na Payment.orderId/Receipt.orderId; svaki pozivalac koji je
+  // ranije čitao `order.payment`/`order.receipt` sada čita `order.payments`/
+  // `order.receipts` (niz, prazan dok porudžbina nije naplaćena ni delom).
+  payments   Payment[]
+  receipts   Receipt[]
   itemVoids  OrderItemVoid[]
   printJobs  PrintJob[]
+  itemTransfersOut OrderItemTransfer[] @relation("TransferSourceOrder")
+  itemTransfersIn  OrderItemTransfer[] @relation("TransferDestinationOrder")
 
   // Idempotency key je jedinstven PO RESTORANU kad je postavljen — dupli
   // submit sa istim ključem (npr. duplo-kliknuto dugme, retry mreže) pada
@@ -768,11 +776,22 @@ model OrderItem {
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
+  // FAZA 8 (Split Bill): koliko od `quantity` je VEĆ naplaćeno kroz neki
+  // PaymentItem red (vidi Payment/PaymentItem napomenu ispod). Invarijanta
+  // održavana na SVAKOM mestu koje menja `quantity` ili `paidQuantity`
+  // (splitBill, voidOrderItem, item-transfer): 0 <= paidQuantity <= quantity
+  // uvek. Void i transfer smeju dirati SAMO neplaćeni ostatak
+  // (quantity - paidQuantity) — nikad već naplaćenu količinu.
+  paidQuantity Int @default(0)
+
   order    Order     @relation(fields: [orderId], references: [id])
   menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
   stationStates OrderItemStation[]
   voids         OrderItemVoid[]
   modifiers     OrderItemModifier[]
+  paymentItems  PaymentItem[]
+  transfersOut  OrderItemTransfer[] @relation("TransferSourceItem")
+  transfersIn   OrderItemTransfer[] @relation("TransferDestinationItem")
 
   @@index([orderId])
   @@index([menuItemId])
@@ -845,6 +864,17 @@ model OrderEvent {
 // items/subtotal/tax/total/nazivi se NIKAD ne preračunavaju iz Order/
 // OrderItem/MenuItem posle kreiranja. Kasnija izmena cene artikla ili
 // naziva restorana ne sme promeniti istorijski račun.
+//
+// FAZA 8 — SPLIT BILL: `Payment.orderId @unique` je UKLONJEN (bio je
+// najavljen kao MVP-only ograničenje tačno ovde od Faze 2) — jedan Order
+// sada može imati VIŠE Payment redova, jedan po delimičnoj naplati.
+// PaymentItem (ispod) je novi model koji beleži TAČNO koje OrderItem
+// količine je pokrila koja Payment — bez njega ne bi bilo moguće znati šta
+// je već naplaćeno po stavci niti bezbedno sprečiti duplu naplatu/duplu
+// dedukciju zaliha iste količine. Receipt.orderId @unique je iz istog
+// razloga uklonjen (jedan Receipt po Payment-u ostaje, @unique na
+// paymentId ostaje netaknut) — svaka delimična naplata dobija svoj
+// zaseban, i dalje potpuno zamrznut, račun koji prikazuje SAMO tu uplatu.
 // ─────────────────────────────────────────────────────────────────────────
 
 enum PaymentMethod {
@@ -854,7 +884,7 @@ enum PaymentMethod {
 
 model Payment {
   id             String        @id @default(uuid())
-  orderId        String        @unique
+  orderId        String
   restaurantId   String
   locationId     String
   // Smena AKTIVNA U TRENUTKU PLAĆANJA (ne nužno order.shiftId) — gotovina
@@ -870,10 +900,33 @@ model Payment {
   completedBy    String // employeeId
   completedAt    DateTime      @default(now())
 
+  // FAZA 8: klijent generiše UUID PRE prvog pokušaja split-plaćanja i šalje
+  // isti ključ na svaki retry — isti idempotency obrazac kao
+  // Order.idempotencyKey/submitOrder. Nullable jer stariji (pre-Faza 8)
+  // Payment redovi i dalje-jedno-plaćanje pozivi nemaju/ne moraju imati
+  // ključ; `@@unique([orderId, idempotencyKey])` zamenjuje staro
+  // `orderId @unique` kao odbrana od duple naplate NA DB NIVOU (Postgres
+  // dozvoljava više NULL vrednosti u unique indeksu, pa se ne-idempotentni
+  // pozivi međusobno ne blokiraju ovim).
+  idempotencyKey String?
+  // FAZA 8: prorata udela Order.discountAmount koji OVA konkretna uplata
+  // nosi — vidi split-bill-service.ts za tačnu formulu (poslednja uplata
+  // koja zatvara porudžbinu uvek preuzima tačan ostatak, bez zaokruživanja
+  // koje bi "procurilo"). Null za porudžbine bez popusta ILI za plaćanja
+  // pre Faze 8 (nema retroaktivnog popunjavanja).
+  discountAmount Decimal? @db.Decimal(12, 2)
+  // FAZA 8: true kad je ovo JEDNA od VIŠE uplata za istu porudžbinu (bilo
+  // koja strana Split Bill toka) — čisto informativno polje za UI/izveštaj
+  // (npr. "Plaćanje 1/2"), nikad korišćeno za autorizaciju/računicu.
+  isSplit        Boolean  @default(false)
+
   order   Order    @relation(fields: [orderId], references: [id])
   shift   Shift    @relation(fields: [shiftId], references: [id])
   receipt Receipt?
+  items   PaymentItem[]
 
+  @@unique([orderId, idempotencyKey])
+  @@index([orderId])
   @@index([restaurantId])
   @@index([locationId])
   @@index([shiftId])
@@ -885,13 +938,42 @@ model Payment {
   @@map("payments")
 }
 
+// FAZA 8 — SPLIT BILL: alokacija — TAČNO koju količinu jedne OrderItem
+// stavke je pokrila jedna Payment. Zbir PaymentItem.quantity preko SVIH
+// Payment redova za dati orderItemId MORA uvek biti jednak
+// OrderItem.paidQuantity (održavano atomski u istoj transakciji u
+// split-bill-service.ts) — ovo je izvor istine za "šta je već plaćeno po
+// stavci", OrderItem.paidQuantity je samo denormalizovan zbir radi brzih
+// provera bez agregacije pri svakom čitanju. unitPrice/taxRate su
+// SNAPSHOT sa OrderItem-a u trenutku TE naplate (ista filozofija kao
+// Receipt/OrderItemVoid) — kasnija izmena cene artikla ne menja prošle
+// alokacije.
+model PaymentItem {
+  id          String   @id @default(uuid())
+  paymentId   String
+  orderItemId String
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  taxRate     Decimal  @db.Decimal(5, 2)
+  lineTotal   Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+
+  payment   Payment   @relation(fields: [paymentId], references: [id])
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id])
+
+  @@unique([paymentId, orderItemId])
+  @@index([paymentId])
+  @@index([orderItemId])
+  @@map("payment_items")
+}
+
 model Receipt {
   id             String        @id @default(uuid())
   // Globalno monoton brojač (Postgres sekvenca ispod autoincrement-a) —
   // atomski dodeljen bez posebne brojačke tabele/race-a; prikazuje se kao
   // broj računa u UI/štampi (Faza 6).
   sequenceNumber Int           @default(autoincrement())
-  orderId        String        @unique
+  orderId        String
   paymentId      String        @unique
   restaurantId   String
   locationId     String
@@ -921,6 +1003,7 @@ model Receipt {
   order   Order   @relation(fields: [orderId], references: [id])
   payment Payment @relation(fields: [paymentId], references: [id])
 
+  @@index([orderId])
   @@index([restaurantId])
   @@index([locationId])
   @@index([issuedAt])
@@ -1000,6 +1083,56 @@ model OrderItemVoid {
   // ── FAZA 6: kompozitni indeks za istorijski void izveštaj po periodu.
   @@index([restaurantId, locationId, voidedAt])
   @@map("order_item_voids")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 8 — TRANSFER STAVKI IZMEĐU STOLOVA
+//
+// Audit trag za svaki transfer (potpun ili delimičan) neplaćene količine
+// jedne OrderItem stavke sa jedne (izvorne) na drugu (odredišnu) porudžbinu.
+// Transfer NIJE prodaja niti storno — nikad ne kreira Payment/Receipt/
+// InventoryMovement/IngredientMovement red (transfer-service.ts). Poseban
+// model (ne samo OrderEvent) iz istog razloga kao OrderItemVoid: efikasna
+// agregacija/pretraga po izvoru/odredištu/stavci bez parsiranja JSON
+// payload-a, sa sopstvenim FK-ovima ka obe porudžbine i obe (izvorna i
+// odredišna, moguće nova) OrderItem stavke.
+// ─────────────────────────────────────────────────────────────────────────
+
+model OrderItemTransfer {
+  id           String @id @default(uuid())
+  restaurantId String
+  locationId   String
+
+  sourceOrderId          String
+  sourceOrderItemId      String
+  destinationOrderId     String
+  destinationOrderItemId String
+
+  // Snapshot (String, ne FK) — ista konvencija kao OrderItemVoid.tableLabel:
+  // sto se može kasnije preimenovati, istorijski zapis ostaje čitljiv kakav
+  // je bio u trenutku transfera.
+  sourceTableLabel      String
+  destinationTableLabel String
+  itemName              String
+  quantity              Int
+
+  transferredBy     String // employeeId — ista konvencija kao Order.openedBy (bez FK)
+  transferredByRole String // snapshot uloge u trenutku radnje
+  transferredAt     DateTime @default(now())
+
+  sourceOrder          Order     @relation("TransferSourceOrder", fields: [sourceOrderId], references: [id])
+  destinationOrder     Order     @relation("TransferDestinationOrder", fields: [destinationOrderId], references: [id])
+  sourceOrderItem      OrderItem @relation("TransferSourceItem", fields: [sourceOrderItemId], references: [id])
+  destinationOrderItem OrderItem @relation("TransferDestinationItem", fields: [destinationOrderItemId], references: [id])
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([sourceOrderId])
+  @@index([destinationOrderId])
+  @@index([sourceOrderItemId])
+  @@index([destinationOrderItemId])
+  @@index([transferredAt])
+  @@map("order_item_transfers")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

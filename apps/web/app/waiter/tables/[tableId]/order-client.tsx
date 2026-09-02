@@ -662,10 +662,15 @@ export function OrderClient({ tableId }: { tableId: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      await apiFetch(`/api/pos/orders/${order.id}/submit`, {
+      const res = await apiFetch(`/api/pos/orders/${order.id}/submit`, {
         method: "POST",
         body: JSON.stringify({ idempotencyKey: idempotencyKeyRef.current }),
       });
+      // Bez ovoga `order` ostaje zamrznut na pred-slanje DRAFT snapshot
+      // (sve stavke, status), pa se poll-ovanje ispod (koje zavisi od
+      // order.status !== "DRAFT") nikad ne pokreće — konobar bi zauvek
+      // video "Nacrt" umesto stvarnog statusa kuhinje/šanka.
+      setOrder(res.order);
       setSubmitted(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri slanju porudžbine");
@@ -681,12 +686,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
     const allServed = order.items.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
     return (
       <div className="flex min-h-screen flex-col p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <button onClick={() => router.push("/waiter/tables")} className="inline-flex min-h-11 items-center text-sm font-medium text-gold-dark">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <button onClick={() => router.push("/waiter/tables")} className="inline-flex min-h-11 shrink-0 items-center whitespace-nowrap text-sm font-medium text-gold-dark">
             ← Stolovi
           </button>
-          <h1 className="text-lg font-semibold text-ink">{order.table.label}</h1>
-          <div className="flex items-center gap-1">
+          <h1 className="min-w-0 flex-1 truncate text-center text-lg font-semibold text-ink">{order.table.label}</h1>
+          <div className="flex shrink-0 items-center gap-1">
             <QuickLockButton />
             <LogoutButton />
           </div>
@@ -739,6 +744,20 @@ export function OrderClient({ tableId }: { tableId: string }) {
         >
           Račun / Naplata
         </button>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            onClick={() => router.push(`/waiter/tables/${tableId}/split-bill`)}
+            className="rounded-md border-2 border-gold/60 bg-white py-3 text-sm font-semibold text-gold-dark transition-colors hover:bg-gold-soft"
+          >
+            Podeli račun
+          </button>
+          <button
+            onClick={() => router.push(`/waiter/tables/${tableId}/transfer`)}
+            className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink transition-colors hover:border-gold/50"
+          >
+            Prebaci stavke
+          </button>
+        </div>
         <button
           onClick={() => router.push("/waiter/tables")}
           className="mt-3 w-full rounded-md bg-graphite py-3 text-base font-medium text-cream-100 transition-colors hover:bg-graphite-700"
@@ -780,8 +799,8 @@ export function OrderClient({ tableId }: { tableId: string }) {
               <button
                 key={c.id}
                 onClick={() => setActiveCategoryId(c.id)}
-                className={`min-h-10 whitespace-nowrap rounded-md px-4 py-2 text-sm font-semibold transition-all ${
-                  activeCategoryId === c.id ? "bg-graphite text-white shadow-sm" : "border border-line bg-white text-ink/75 hover:border-gold/50"
+                className={`min-h-11 whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-semibold transition-all ${
+                  activeCategoryId === c.id ? "bg-graphite text-white shadow-card" : "border border-line bg-white text-ink/75 hover:border-gold/50"
                 }`}
               >
                 {c.name}
@@ -829,14 +848,17 @@ export function OrderClient({ tableId }: { tableId: string }) {
                     </span>
                   )}
                   {/* P1.7 §20: simple advisory for the waiter, never quantities/negative
-                      jargon — OWNER/ADMIN/MANAGER get the full picture on Zalihe/Sirovine. */}
+                      jargon — OWNER/ADMIN/MANAGER get the full picture on Zalihe/Sirovine.
+                      Vizuelno namerno SEKUNDARNO (soft ton, bez pune ispune) — artikal se
+                      i dalje normalno naručuje, ovo nikad ne sme izgledati kao "Normativ
+                      nije podešen" (jedino stvarno blokirano stanje) iznad. */}
                   {!notConfigured && isNegativeOrOut && (
-                    <span className="rounded-full bg-danger px-2 py-0.5 text-[10px] font-semibold text-white">
+                    <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-medium text-danger">
                       {isRecipeItem ? "Proveri zalihu" : "Nema evidentirane zalihe"}
                     </span>
                   )}
                   {!notConfigured && isLow && (
-                    <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[10px] font-semibold text-warn">
+                    <span className="text-[10px] font-medium text-warn">
                       {isRecipeItem ? `Još ${item.recipeAvailability!.availablePortions} porcija` : `Još ${formatStockQty(item.stock!.currentStock ?? "0")}`}
                     </span>
                   )}
@@ -864,63 +886,67 @@ export function OrderClient({ tableId }: { tableId: string }) {
           {order.items.map((item) => {
             const canEditModifiers = (items.find((mi) => mi.id === item.menuItemId)?.modifierGroups.length ?? 0) > 0;
             return (
-            <div key={item.id} className="flex items-center gap-2 border-b border-line/50 py-2 text-sm last:border-0">
-              <div className="min-w-0 flex-1">
-                {canEditModifiers ? (
+            <div key={item.id} className="border-b border-line/50 py-2.5 text-sm last:border-0">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  {canEditModifiers ? (
+                    <button
+                      type="button"
+                      onClick={() => setEditingModifiersFor(item)}
+                      disabled={cartBusy}
+                      className="block text-left font-medium text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
+                    >
+                      {item.name}
+                    </button>
+                  ) : (
+                    <span className="block font-medium text-ink">{item.name}</span>
+                  )}
+                  {item.modifiers.length > 0 && (
+                    <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                  )}
+                </div>
+                <span className="shrink-0 pt-0.5 text-right font-semibold tabular-nums text-ink">
+                  {(Number(item.price) * item.quantity).toFixed(2)} <span className="text-xs font-normal text-inkSoft">RSD</span>
+                </span>
+              </div>
+              <div className="mt-1.5 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => setEditingModifiersFor(item)}
+                    onClick={() => changeQuantity(item, item.quantity - 1)}
                     disabled={cartBusy}
-                    className="block w-full truncate text-left text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
-                    title={item.name}
+                    aria-label={`Umanji količinu — ${item.name}`}
+                    className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                   >
-                    {item.name}
+                    −
                   </button>
-                ) : (
-                  <span className="block truncate text-ink" title={item.name}>
-                    {item.name}
-                  </span>
-                )}
-                {item.modifiers.length > 0 && (
-                  <div className="truncate text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
+                  <span className="w-6 text-center font-medium text-ink">{item.quantity}</span>
+                  <button
+                    type="button"
+                    onClick={() => changeQuantity(item, item.quantity + 1)}
+                    disabled={cartBusy || item.quantity >= 50}
+                    aria-label={`Povećaj količinu — ${item.name}`}
+                    className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
+                  >
+                    +
+                  </button>
+                </div>
                 <button
-                  type="button"
-                  onClick={() => changeQuantity(item, item.quantity - 1)}
+                  onClick={() => removeItem(item.id)}
                   disabled={cartBusy}
-                  aria-label={`Umanji količinu — ${item.name}`}
-                  className="flex h-9 w-9 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
+                  aria-label={`Ukloni — ${item.name}`}
+                  className="px-2 py-2 text-xs text-danger/55 disabled:opacity-40"
                 >
-                  −
-                </button>
-                <span className="w-6 text-center font-medium text-ink">{item.quantity}</span>
-                <button
-                  type="button"
-                  onClick={() => changeQuantity(item, item.quantity + 1)}
-                  disabled={cartBusy || item.quantity >= 50}
-                  aria-label={`Povećaj količinu — ${item.name}`}
-                  className="flex h-9 w-9 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
-                >
-                  +
+                  Ukloni
                 </button>
               </div>
-              <span className="w-20 shrink-0 text-right tabular-nums text-ink/70">{(Number(item.price) * item.quantity).toFixed(2)} RSD</span>
-              <button
-                onClick={() => removeItem(item.id)}
-                disabled={cartBusy}
-                className="shrink-0 text-xs text-danger/60 disabled:opacity-40"
-              >
-                Ukloni
-              </button>
             </div>
             );
           })}
         </div>
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-t border-line px-3 py-2">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-t border-line px-3 py-2.5">
           <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
-          <span className="text-xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs text-inkSoft">RSD</span>
+          <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
           </span>
         </div>
         <div className="mx-auto w-full max-w-5xl px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
