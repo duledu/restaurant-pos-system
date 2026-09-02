@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "../../../components/ui/Card";
 import { Badge } from "../../../components/ui/Badge";
 import { EmptyState } from "../../../components/ui/EmptyState";
@@ -16,7 +16,6 @@ interface Employee {
   username: string | null;
   status: "ACTIVE" | "SUSPENDED" | "TERMINATED";
   hasPin: boolean;
-  hasEncryptedPin: boolean;
   pinLoginEnabled: boolean;
   hasLoginCredentials: boolean;
   createdAt: string;
@@ -344,43 +343,6 @@ function ChangePinModal({ employee, onCancel, onDone }: { employee: Employee; on
   );
 }
 
-function RevealPinModal({ employee, onCancel }: { employee: Employee; onCancel: () => void }) {
-  const [pin, setPin] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    apiFetch(`/api/admin/employees/${employee.id}/pin`)
-      .then((body: { pin: string }) => setPin(body.pin))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Greška pri otkrivanju PIN-a"))
-      .finally(() => setLoading(false));
-  }, [employee.id]);
-
-  return (
-    <ModalShell title={`PIN — ${employee.firstName} ${employee.lastName}`} onCancel={onCancel}>
-      <div className="space-y-4">
-        <p className="text-sm text-inkSoft">
-          Ova radnja je zabeležena u evidenciji aktivnosti.
-        </p>
-        {loading && <div className="py-4 text-center text-sm text-inkSoft">Učitavanje…</div>}
-        {error && <div className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
-        {pin !== null && (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-center">
-            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-700">PIN</p>
-            <p className="text-3xl font-bold tracking-[0.3em] text-amber-900">{pin}</p>
-          </div>
-        )}
-        <button
-          onClick={onCancel}
-          className="w-full rounded-md border border-line py-3 text-base font-medium text-ink"
-        >
-          Zatvori
-        </button>
-      </div>
-    </ModalShell>
-  );
-}
-
 function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Employee; onCancel: () => void; onDone: () => void }) {
   const [username, setUsername] = useState(employee.username ?? "");
   const [password, setPassword] = useState("");
@@ -498,11 +460,11 @@ export function StaffClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [changingPin, setChangingPin] = useState<Employee | null>(null);
-  const [revealingPin, setRevealingPin] = useState<Employee | null>(null);
   const [settingCredentials, setSettingCredentials] = useState<Employee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -557,6 +519,20 @@ export function StaffClient() {
     }
   }
 
+  // Klijentska pretraga po imenu/prezimenu/korisničkom imenu, case-insensitive
+  // — lista je već skopirana na restoran (listEmployees/scopeToRestaurant),
+  // filtriranje ovde je samo prikaz, ne nova autorizaciona granica.
+  const filteredStaff = useMemo(() => {
+    if (!staff) return staff;
+    const q = search.trim().toLowerCase();
+    if (!q) return staff;
+    return staff.filter((emp) => {
+      const fullName = `${emp.firstName} ${emp.lastName}`.toLowerCase();
+      const username = (emp.username ?? "").toLowerCase();
+      return fullName.includes(q) || username.includes(q);
+    });
+  }, [staff, search]);
+
   return (
     <div className="mx-auto max-w-5xl">
       <PageHeader
@@ -576,9 +552,23 @@ export function StaffClient() {
         </Card>
       ) : (
         <>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Pretraga po imenu ili korisničkom imenu…"
+            className="mb-4 w-full max-w-sm rounded-md border border-line px-3 py-2.5 text-base placeholder:text-ink/35 sm:text-sm"
+          />
+
+          {filteredStaff && filteredStaff.length === 0 ? (
+            <Card className="p-5">
+              <EmptyState title="Nema rezultata pretrage" description="Pokušaj drugo ime ili korisničko ime." />
+            </Card>
+          ) : (
+          <>
           {/* ── Mobile: stacked cards ─────────────────────────────────────── */}
           <div className="space-y-3 md:hidden">
-            {staff.map((emp) => (
+            {filteredStaff?.map((emp) => (
               <Card key={emp.id} className="overflow-hidden border-l-[3px] border-l-gold p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-3">
@@ -605,14 +595,7 @@ export function StaffClient() {
                   <p className="flex items-center gap-1.5">
                     <span className="text-inkSoft/60">PIN prijava: </span>
                     {emp.hasPin ? (
-                      <>
-                        <span className="font-mono tracking-[0.2em]">••••</span>
-                        {emp.hasEncryptedPin && (
-                          <button onClick={() => setRevealingPin(emp)} title="Otkrij PIN" className="rounded p-0.5 text-inkSoft hover:text-ink">
-                            <EyeIcon />
-                          </button>
-                        )}
-                      </>
+                      <span className="font-mono tracking-[0.2em]">••••</span>
                     ) : (
                       <Badge tone="neutral">Nema PIN</Badge>
                     )}
@@ -666,7 +649,7 @@ export function StaffClient() {
                 </tr>
               </thead>
               <tbody>
-                {staff.map((emp) => (
+                {filteredStaff?.map((emp) => (
                   <tr key={emp.id} className="border-b border-line last:border-0">
                     <td className="px-4 py-3 font-medium text-ink">
                       <div className="flex items-center gap-2.5"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-graphite text-[10px] font-bold text-white">{emp.firstName[0]}{emp.lastName[0]}</span><span className="font-semibold">{emp.firstName} {emp.lastName}</span></div>
@@ -682,18 +665,7 @@ export function StaffClient() {
                     <td className="px-4 py-3 text-inkSoft">{emp.locations.map((l) => l.location.name).join(", ") || "—"}</td>
                     <td className="px-4 py-3">
                       {emp.hasPin ? (
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-sm tracking-[0.2em] text-inkSoft">••••</span>
-                          {emp.hasEncryptedPin && (
-                            <button
-                              onClick={() => setRevealingPin(emp)}
-                              title="Otkrij PIN"
-                              className="rounded p-0.5 text-inkSoft hover:text-ink"
-                            >
-                              <EyeIcon />
-                            </button>
-                          )}
-                        </div>
+                        <span className="font-mono text-sm tracking-[0.2em] text-inkSoft">••••</span>
                       ) : (
                         <Badge tone="neutral">Nema PIN</Badge>
                       )}
@@ -735,6 +707,8 @@ export function StaffClient() {
             </table>
           </div>
           </Card>
+          </>
+          )}
         </>
       )}
 
@@ -772,12 +746,6 @@ export function StaffClient() {
           }}
         />
       )}
-      {revealingPin && (
-        <RevealPinModal
-          employee={revealingPin}
-          onCancel={() => setRevealingPin(null)}
-        />
-      )}
       {settingCredentials && (
         <SetLoginCredentialsModal
           employee={settingCredentials}
@@ -790,14 +758,5 @@ export function StaffClient() {
         />
       )}
     </div>
-  );
-}
-
-function EyeIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
   );
 }

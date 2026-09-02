@@ -8,7 +8,7 @@ import { stationsForPreparation } from "../production/station-state";
 import { dispatchStationPrintJobs } from "../printing/print-service";
 import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
-import { assertStockAvailable } from "../inventory/inventory-service";
+import { assertIngredientStockAvailable } from "../inventory/ingredient-service";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
 
 const ORDER_ITEM_INCLUDE = {
@@ -115,12 +115,14 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
     throw new Error("Artikal trenutno nije dostupan za prodaju");
   }
 
-  // P3.3: sveža provera dostupnosti u trenutku dodavanja — SAMO validacija,
-  // NIKAD ne menja currentStock (to ostaje isključivo posao Payment-a, vidi
-  // assertStockAvailable). Ne tretira postojeće draft redove (ni ovog ni
-  // drugih konobara) kao "rezervisanu" zalihu (specifikacija #8/#9/#10/#20)
-  // — ovo je samo trenutna provera "da li je OVAJ zahtev razuman SADA".
-  await assertStockAvailable(prisma, {
+  // P1.7: DIRECT_STOCK stock level NEVER blocks add-to-cart (a normal sale
+  // must never be rejected because recorded stock is behind physical
+  // reality) — the old assertStockAvailable check is gone. The ONLY
+  // remaining pre-check is assertIngredientStockAvailable's
+  // RecipeNotConfiguredError ("Normativ nije podešen") — a missing
+  // NORMATIVE is a configuration failure TableCore genuinely cannot deduct
+  // against, not a stock shortage, and that block stays (audit §3/§4).
+  await assertIngredientStockAvailable(prisma, {
     restaurantId: ctx.restaurantId,
     locationId: order.locationId,
     requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
@@ -235,7 +237,8 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
   if (input.quantity !== undefined && input.quantity > item.quantity && item.menuItemId) {
     const menuItem = await prisma.menuItem.findUnique({ where: { id: item.menuItemId }, select: { id: true, name: true } });
     if (menuItem) {
-      await assertStockAvailable(prisma, {
+      // P1.7: only the RecipeNotConfiguredError check remains — see addItem.
+      await assertIngredientStockAvailable(prisma, {
         restaurantId: ctx.restaurantId,
         locationId: order.locationId,
         requirements: [{ menuItemId: menuItem.id, name: menuItem.name, quantity: input.quantity }],
@@ -361,21 +364,23 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       }
     }
 
-    // P3.3: sveža agregatna provera dostupnosti PRE slanja kuhinji/šanku —
-    // VALIDACIJA SAMO, nikad ne menja currentStock (specifikacija #21/#22 —
-    // Payment ostaje jedini autoritet za stvarni odbitak). Agregira SVE
-    // linije po menuItemId (specifikacija #51/#63): dve linije istog
-    // artikla sa različitim P3.2 modifikatorima (npr. Burger+sir ×2 i
-    // Burger+slanina ×2) se sabiraju u JEDAN zahtev od 4 komada pre provere
-    // — ne proveravaju se nezavisno, što bi pogrešno dozvolilo obe linije
-    // kad zaliha ima samo 3.
+    // P1.7: DIRECT_STOCK stock level never blocks submit — the old
+    // assertStockAvailable aggregate check is gone (see addItem). The only
+    // remaining pre-send check is assertIngredientStockAvailable's
+    // RecipeNotConfiguredError ("Normativ nije podešen"), still aggregated
+    // by menuItemId across the WHOLE order first (two lines of the same
+    // item with different P3.2 modifiers, e.g. Burger+sir ×2 and
+    // Burger+slanina ×2, must be summed — kept for correctness even though
+    // the aggregate no longer feeds a stock check) — internally
+    // assertIngredientStockAvailable re-aggregates PO SIROVINI across every
+    // recipe-governed line, the "Omlet + Omlet sa sirom share eggs" case.
     const stockRequirements = items
       .filter((item) => item.menuItemId)
       .map((item) => {
         const currentMenuItem = menuItemById.get(item.menuItemId!);
         return { menuItemId: item.menuItemId!, name: currentMenuItem?.name ?? item.name, quantity: item.quantity };
       });
-    await assertStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
+    await assertIngredientStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
 
     await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });
     await tx.orderItem.updateMany({

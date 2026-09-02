@@ -1,21 +1,22 @@
 /**
  * P3.3 — Out-of-Stock Operational Synchronization integration tests.
  *
- * Payment-time atomic decrement, concurrency (two competing payments),
- * idempotent retry, and rollback-on-insufficient-stock are ALREADY
- * comprehensively covered by tests/integration/inventory.test.ts — not
- * duplicated here. This file covers only the NEW P3.3 surface: waiter menu
- * availability composition, addItem/updateItem pre-submit rejection,
- * submit-time re-validation (including P3.2 duplicate-modifier-line
- * aggregation), replenish/adjust/write-off sync, and location isolation
- * for the new menu-availability query.
+ * Payment-time atomic decrement, concurrency (two competing payments), and
+ * idempotent retry are ALREADY comprehensively covered by
+ * tests/integration/inventory.test.ts — not duplicated here. This file
+ * covers the NEW P3.3 surface: waiter menu availability composition
+ * (advisory NEGATIVE/OUT/LOW/OK status, never a sales gate — P1.7),
+ * addItem/updateItem/submit ALWAYS succeeding regardless of recorded stock
+ * level (P1.7 audit "Allow negative inventory instead of blocking sales"),
+ * replenish/adjust/write-off status sync, and location isolation for the
+ * menu-availability query.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
 import { ForbiddenError } from "@rcs/auth";
-import { orders, menu, inventory, modifiers, reporting } from "@rcs/domain";
+import { orders, menu, inventory, modifiers, reporting, billing } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -158,28 +159,30 @@ describe("waiter menu availability composition", () => {
 });
 
 describe("backend add-to-order validation", () => {
-  it("rejects adding an OUT tracked item", async () => {
+  it("P1.7: allows adding an OUT tracked item — recorded stock level never blocks a normal sale", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 0 });
 
     const waiter = waiterCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    await expect(
-      orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] })
-    ).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] });
+    expect(item).toBeDefined();
+
+    // addItem never mutates currentStock — that stays exclusively Payment's job.
+    const invItem = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.trackedItemId, locationId: fixture.locationId } });
+    expect(Number(invItem.currentStock)).toBe(0);
   });
 
-  it("rejects a requested quantity above currently available stock", async () => {
+  it("P1.7: allows a requested quantity above currently recorded stock", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 2 });
 
     const waiter = waiterCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    await expect(
-      orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 3, modifierOptionIds: [] })
-    ).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 3, modifierOptionIds: [] });
+    expect(item.quantity).toBe(3);
   });
 
   it("allows adding a LOW-stock item (still sellable)", async () => {
@@ -202,7 +205,7 @@ describe("backend add-to-order validation", () => {
     expect(item.quantity).toBe(50);
   });
 
-  it("updateItem rejects increasing quantity beyond available stock, but always allows decreasing", async () => {
+  it("P1.7: updateItem allows increasing quantity beyond recorded stock (never blocked), and always allows decreasing", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 3 });
@@ -211,13 +214,13 @@ describe("backend add-to-order validation", () => {
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
     const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 2, modifierOptionIds: [] });
 
-    await expect(orders.updateItem(waiter, order.id, item.id, { quantity: 10 })).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    await expect(orders.updateItem(waiter, order.id, item.id, { quantity: 10 })).resolves.toBeDefined();
     await expect(orders.updateItem(waiter, order.id, item.id, { quantity: 1 })).resolves.toBeDefined(); // smanjenje uvek dozvoljeno
   });
 });
 
 describe("submit-time validation (recheck, not decrement)", () => {
-  it("rejects submit when stock became insufficient after the item was added to the draft", async () => {
+  it("P1.7: submit succeeds even when recorded stock became insufficient after the item was added to the draft — Payment remains the only decrement point", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     const invItem = await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 2 });
@@ -229,27 +232,27 @@ describe("submit-time validation (recheck, not decrement)", () => {
     // Zaliha se u međuvremenu smanjuje (npr. druga porudžbina je naplaćena).
     await inventory.adjustStock(manager, invItem.id, { delta: -1, reason: "Test: simulacija konkurentne prodaje" });
 
-    await expect(orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() })).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    expect(submitted.status).toBe("SUBMITTED");
 
-    // Validacija SAMO — nema pokreta zaliha, porudžbina ostaje DRAFT.
+    // Submit i dalje NIKAD ne dekrementira — to ostaje isključivo posao Payment-a.
     const movements = await prisma.inventoryMovement.findMany({ where: { menuItemId: fixture.trackedItemId, type: "SALE" } });
     expect(movements).toHaveLength(0);
-    const refreshedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(refreshedOrder.status).toBe("DRAFT");
   });
 
-  it("critical: aggregates quantity across duplicate MenuItem lines with different P3.2 modifiers before checking stock", async () => {
+  it("P1.7: duplicate MenuItem lines with different P3.2 modifiers still aggregate correctly, but the aggregate no longer feeds any stock block — submit always succeeds", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 3 });
 
     const waiter = waiterCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    // Dve linije ISTOG artikla, različiti dodaci (P3.2 line-identity) — 2 + 2 = 4, zaliha je 3.
+    // Dve linije ISTOG artikla, različiti dodaci (P3.2 line-identity) — 2 + 2 = 4, zaliha je (namerno nedovoljna) 3.
     await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 2, modifierOptionIds: [fixture.kackavaljOptionId] });
     await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 2, modifierOptionIds: [] });
 
-    await expect(orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() })).rejects.toBeInstanceOf(inventory.InsufficientStockError);
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    expect(submitted.status).toBe("SUBMITTED");
   });
 
   it("succeeds and does not decrement stock when availability holds — Payment remains the only decrement point", async () => {
@@ -271,16 +274,26 @@ describe("submit-time validation (recheck, not decrement)", () => {
 });
 
 describe("replenish/adjust/write-off synchronization", () => {
-  it("0 -> Receive +10 makes the item sellable again without touching MenuItem.isActive", async () => {
+  it("P1.7: item is ALREADY addable at stock=0 (never blocked); 0 -> Receive +10 correctly clears the advisory OUT status, without touching MenuItem.isActive", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     const invItem = await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 0 });
 
     const waiter = waiterCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    await expect(orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] })).rejects.toThrow();
+    // P1.7: never blocked, even before any receipt.
+    const firstItem = await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] });
+    expect(firstItem).toBeDefined();
+
+    let items = await menu.listMenuItems(waiter, { locationId: fixture.locationId });
+    let tracked = items.find((i) => i.id === fixture.trackedItemId) as unknown as { stock: { stockStatus: string } };
+    expect(tracked.stock.stockStatus).toBe("OUT"); // advisory status still correctly reflects 0
 
     await inventory.receiveStock(manager, invItem.id, { quantity: 10 });
+
+    items = await menu.listMenuItems(waiter, { locationId: fixture.locationId });
+    tracked = items.find((i) => i.id === fixture.trackedItemId) as unknown as { stock: { stockStatus: string } };
+    expect(tracked.stock.stockStatus).toBe("OK"); // advisory status correctly clears after receipt
 
     const item = await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] });
     expect(item).toBeDefined();
@@ -302,19 +315,24 @@ describe("replenish/adjust/write-off synchronization", () => {
   });
 });
 
-describe("reporting integrity: rejected attempts are never counted as sales", () => {
-  it("a rejected addItem/submit leaves revenue at zero for the period", async () => {
+describe("reporting integrity: a completed sale is counted normally even when it drove stock negative", () => {
+  it("P1.7: a sale of an OUT (stock=0) item completes normally and IS counted as revenue — reporting is not broken by negative stock", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     await inventory.initializeTracking(manager, { menuItemId: fixture.trackedItemId, locationId: fixture.locationId, initialStock: 0 });
 
     const waiter = waiterCtx(fixture);
     const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    await expect(orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] })).rejects.toThrow();
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.trackedItemId, quantity: 1, modifierOptionIds: [] });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await billing.completePayment(waiter, submitted.id, { method: "CASH" });
 
     const summary = await reporting.getSalesSummary(manager, { locationId: "ALL", preset: "today" });
-    expect(summary.totalSales).toBe("0");
-    expect(summary.completedOrders).toBe(0);
+    expect(Number(summary.totalSales)).toBeGreaterThan(0);
+    expect(summary.completedOrders).toBe(1);
+
+    const invItem = await prisma.inventoryItem.findFirstOrThrow({ where: { menuItemId: fixture.trackedItemId, locationId: fixture.locationId } });
+    expect(Number(invItem.currentStock)).toBe(-1); // negative, and still counted correctly in reporting
   });
 });
 

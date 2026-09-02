@@ -83,6 +83,13 @@ interface TrendRawRow {
   orders: unknown;
 }
 
+// FAZA 8: `COUNT(DISTINCT "orderId")` (ne `COUNT(*)`) u sve tri "orders po
+// periodu" agregacije ispod (queryTrend, getSalesByHour, getSalesByWeekday) —
+// split naplata znači da jedan Payment red više nije garantovano jedna
+// porudžbina, pa bi COUNT(*) precenio broj porudžbina (i posledično
+// zaniželio averageOrderValue) svaki put kad se ista porudžbina pojavi kao
+// više Payment redova u istom periodu/bucket-u. Isti razlog kao
+// reporting-service.ts computeSalesSummaryForRange (completedOrders).
 async function queryTrend(
   restaurantId: string,
   locationIds: string[],
@@ -94,7 +101,7 @@ async function queryTrend(
     SELECT
       date_trunc(${granularity}, "completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timeZone}) AS bucket,
       COALESCE(SUM("amount"), 0) AS sales,
-      COUNT(*)::bigint AS orders
+      COUNT(DISTINCT "orderId")::bigint AS orders
     FROM "payments"
     WHERE "restaurantId" = ${restaurantId}
       AND "locationId" IN (${Prisma.join(locationIds)})
@@ -158,7 +165,7 @@ export async function getSalesByHour(ctx: AuthContext, filters: ReportFilters): 
     SELECT
       EXTRACT(HOUR FROM ("completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}))::int AS hour,
       COALESCE(SUM("amount"), 0) AS sales,
-      COUNT(*)::bigint AS orders
+      COUNT(DISTINCT "orderId")::bigint AS orders
     FROM "payments"
     WHERE "restaurantId" = ${ctx.restaurantId}
       AND "locationId" IN (${Prisma.join(locationIds)})
@@ -243,7 +250,7 @@ export async function getSalesByWeekday(ctx: AuthContext, filters: ReportFilters
     SELECT
       EXTRACT(ISODOW FROM ("completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}))::int AS isodow,
       COALESCE(SUM("amount"), 0) AS sales,
-      COUNT(*)::bigint AS orders
+      COUNT(DISTINCT "orderId")::bigint AS orders
     FROM "payments"
     WHERE "restaurantId" = ${ctx.restaurantId}
       AND "locationId" IN (${Prisma.join(locationIds)})
@@ -450,7 +457,9 @@ export interface EmployeeNormalizedRow {
   employeeName: string;
   role: string;
   salesPerHour: string | null;
-  ordersPerHour: string | null;
+  // FAZA 8: uplate (Payment redovi) po satu koje je zaposleni ZAVRŠIO — ne
+  // porudžbine (vidi EmployeeActivityRow.completedPayments).
+  paymentsPerHour: string | null;
   voidPercent: number | null;
   discountPercent: number | null;
   approximateHours: string | null;
@@ -505,7 +514,7 @@ export async function getEmployeeNormalizedMetrics(ctx: AuthContext, filters: Re
       employeeName: a.employeeName,
       role: a.role,
       salesPerHour: hours && hours > 0 ? round2(sales / hours).toString() : null,
-      ordersPerHour: hours && hours > 0 ? round2(a.completedOrders / hours).toString() : null,
+      paymentsPerHour: hours && hours > 0 ? round2(a.completedPayments / hours).toString() : null,
       voidPercent: voidPercentRaw !== null ? round2(voidPercentRaw * 100) : null,
       discountPercent: discountPercentRaw !== null ? round2(discountPercentRaw * 100) : null,
       approximateHours: hours ? round2(hours).toString() : null,
@@ -640,7 +649,10 @@ export interface DiscountByEmployeeRow {
   employeeId: string;
   employeeName: string;
   discountTotal: string;
-  orderCount: number;
+  // FAZA 8: broj Payment redova sa popustom (ne broj RAZLIČITIH porudžbina)
+  // — jedna porudžbina podeljena na 2 delimične naplate sa popustom broji se
+  // kao 2 ovde, ista konvencija kao EmployeeSales.payments.
+  paymentCount: number;
 }
 export interface DiscountByReasonRow {
   reason: string;
@@ -673,47 +685,56 @@ interface DiscountHourRawRow {
 export async function getDiscountIntelligence(ctx: AuthContext, filters: ReportFilters): Promise<DiscountIntelligenceResult> {
   const { locationIds, range, currency, timezone } = await reporting.resolveContext(ctx, filters);
 
-  const [salesSummary, reasonGroups, discountedOrders, hourRows, highestOrders] = await Promise.all([
+  // FAZA 8: sve niže upiti idu DIREKTNO nad Payment (ne više nad
+  // Order.payment, koje je uklonjeno zajedno sa @unique — vidi
+  // schema.prisma). Svaki Payment nosi SVOJ prorata udeo popusta
+  // (Payment.discountAmount) — ovo je JEDINI ispravan izvor za "koliko je
+  // popusta dato KADA/KO/ZAŠTO" otkad jedna porudžbina može imati više
+  // delimičnih naplata, svaka sa sopstvenim (mogućim) popustom. Grupisanje
+  // po `discountReason` (polje na Order, ne na Payment) se radi u JS-u
+  // preko `order.discountReason` iz include-a, ne preko Prisma groupBy
+  // (koji ne ume da grupiše po relaciji).
+  const [salesSummary, discountedPayments, hourRows] = await Promise.all([
     reporting.getSalesSummary(ctx, filters),
-    prisma.order.groupBy({
-      by: ["discountReason"],
-      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, discountAmount: { not: null }, payment: { completedAt: { gte: range.from, lt: range.to } } },
-      _count: { _all: true },
-      _sum: { discountAmount: true },
-    }),
-    prisma.order.findMany({
-      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, discountAmount: { not: null }, payment: { completedAt: { gte: range.from, lt: range.to } } },
-      select: { discountAmount: true, payment: { select: { completedBy: true } } },
+    prisma.payment.findMany({
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, discountAmount: { not: null }, completedAt: { gte: range.from, lt: range.to } },
+      select: {
+        discountAmount: true,
+        completedBy: true,
+        completedAt: true,
+        orderId: true,
+        order: { select: { discountReason: true, table: { select: { label: true } } } },
+      },
     }),
     prisma.$queryRaw<DiscountHourRawRow[]>(Prisma.sql`
       SELECT
         EXTRACT(HOUR FROM (p."completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}))::int AS hour,
-        COALESCE(SUM(o."discountAmount"), 0) AS value
-      FROM "orders" o
-      JOIN "payments" p ON p."orderId" = o.id
-      WHERE o."restaurantId" = ${ctx.restaurantId}
-        AND o."locationId" IN (${Prisma.join(locationIds)})
-        AND o."discountAmount" IS NOT NULL
+        COALESCE(SUM(p."discountAmount"), 0) AS value
+      FROM "payments" p
+      WHERE p."restaurantId" = ${ctx.restaurantId}
+        AND p."locationId" IN (${Prisma.join(locationIds)})
+        AND p."discountAmount" IS NOT NULL
         AND p."completedAt" >= ${range.from}
         AND p."completedAt" < ${range.to}
       GROUP BY hour
     `),
-    prisma.order.findMany({
-      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, discountAmount: { not: null }, payment: { completedAt: { gte: range.from, lt: range.to } } },
-      orderBy: { discountAmount: "desc" },
-      take: 10,
-      select: { id: true, discountAmount: true, discountReason: true, table: { select: { label: true } }, payment: { select: { completedAt: true } } },
-    }),
   ]);
 
   const byEmployeeMap = new Map<string, { total: number; count: number }>();
-  for (const o of discountedOrders) {
-    const employeeId = o.payment?.completedBy;
-    if (!employeeId) continue;
-    const bucket = byEmployeeMap.get(employeeId) ?? { total: 0, count: 0 };
-    bucket.total += decimalToNumber(o.discountAmount);
-    bucket.count += 1;
-    byEmployeeMap.set(employeeId, bucket);
+  const byReasonMap = new Map<string, { total: number; count: number }>();
+  for (const p of discountedPayments) {
+    const amount = decimalToNumber(p.discountAmount);
+
+    const employeeBucket = byEmployeeMap.get(p.completedBy) ?? { total: 0, count: 0 };
+    employeeBucket.total += amount;
+    employeeBucket.count += 1;
+    byEmployeeMap.set(p.completedBy, employeeBucket);
+
+    const reason = p.order.discountReason ?? "Bez razloga";
+    const reasonBucket = byReasonMap.get(reason) ?? { total: 0, count: 0 };
+    reasonBucket.total += amount;
+    reasonBucket.count += 1;
+    byReasonMap.set(reason, reasonBucket);
   }
   const nameById = await resolveEmployeeDisplayNames(ctx.restaurantId, Array.from(byEmployeeMap.keys()));
   const byEmployee: DiscountByEmployeeRow[] = Array.from(byEmployeeMap.entries())
@@ -721,9 +742,13 @@ export async function getDiscountIntelligence(ctx: AuthContext, filters: ReportF
       employeeId,
       employeeName: nameById.get(employeeId)?.name ?? "?",
       discountTotal: round2(b.total).toString(),
-      orderCount: b.count,
+      paymentCount: b.count,
     }))
     .sort((a, b) => Number(b.discountTotal) - Number(a.discountTotal));
+
+  const byReason: DiscountByReasonRow[] = Array.from(byReasonMap.entries())
+    .map(([reason, b]) => ({ reason, count: b.count, value: round2(b.total).toFixed(2) }))
+    .sort((a, b) => Number(b.value) - Number(a.value));
 
   const byHourMap = new Map(hourRows.map((r) => [Number(r.hour), r]));
   const byHour = Array.from({ length: 24 }, (_, h) => {
@@ -733,23 +758,23 @@ export async function getDiscountIntelligence(ctx: AuthContext, filters: ReportF
 
   const discountPercentRaw = safeDiv(decimalToNumber(salesSummary.discountTotal), decimalToNumber(salesSummary.grossSales));
 
+  const highestDiscountPayments = [...discountedPayments]
+    .sort((a, b) => decimalToNumber(b.discountAmount) - decimalToNumber(a.discountAmount))
+    .slice(0, 10);
+
   return {
     currency,
     totalDiscountValue: salesSummary.discountTotal,
     discountPercentOfGross: discountPercentRaw !== null ? round2(discountPercentRaw * 100) : null,
     byEmployee,
-    byReason: reasonGroups.map((g) => ({
-      reason: g.discountReason ?? "Bez razloga",
-      count: g._count._all,
-      value: decimalToNumber(g._sum.discountAmount).toFixed(2),
-    })),
+    byReason,
     byHour,
-    highestDiscountOrders: highestOrders.map((o) => ({
-      orderId: o.id,
-      discountAmount: decimalToNumber(o.discountAmount).toFixed(2),
-      discountReason: o.discountReason,
-      tableLabel: o.table.label,
-      completedAt: (o.payment?.completedAt ?? new Date()).toISOString(),
+    highestDiscountOrders: highestDiscountPayments.map((p) => ({
+      orderId: p.orderId,
+      discountAmount: decimalToNumber(p.discountAmount).toFixed(2),
+      discountReason: p.order.discountReason,
+      tableLabel: p.order.table.label,
+      completedAt: p.completedAt.toISOString(),
     })),
   };
 }
@@ -760,7 +785,9 @@ export interface PaymentMethodRow {
   method: "CASH" | "CARD";
   amount: string;
   percent: number;
-  orderCount: number;
+  // FAZA 8: broj Payment redova ovom metodom (ne broj RAZLIČITIH porudžbina)
+  // — vidi napomenu uz DiscountByEmployeeRow.paymentCount.
+  paymentCount: number;
 }
 
 export interface PaymentBreakdownResult {
@@ -782,7 +809,7 @@ export async function getPaymentBreakdown(ctx: AuthContext, filters: ReportFilte
     method: g.method,
     amount: decimalToNumber(g._sum.amount).toFixed(2),
     percent: total > 0 ? round2((decimalToNumber(g._sum.amount) / total) * 100) : 0,
-    orderCount: g._count._all,
+    paymentCount: g._count._all,
   }));
   return { currency, totalSales: total.toFixed(2), methods };
 }

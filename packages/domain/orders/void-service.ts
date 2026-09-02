@@ -77,8 +77,17 @@ export async function voidOrderItem(
   if (NON_VOIDABLE_ITEM_STATUSES.has(item.status)) {
     throw new Error(item.status === "CANCELLED" ? "Stavka je već poništena" : "Stavka još nije poslata");
   }
-  if (input.quantity > item.quantity) {
-    throw new Error(`Tražena količina (${input.quantity}) je veća od preostale količine (${item.quantity})`);
+  // FAZA 8: već NAPLAĆENA količina (kroz split-bill-service.ts) se ne sme
+  // poništiti — samo neplaćen ostatak (quantity - paidQuantity) je dostupan
+  // za void. Za stavke bez ijedne delimične naplate (paidQuantity === 0,
+  // uobičajen slučaj) ovo je identično staroj proveri.
+  const availableToVoid = item.quantity - item.paidQuantity;
+  if (input.quantity > availableToVoid) {
+    throw new Error(
+      item.paidQuantity > 0
+        ? `Tražena količina (${input.quantity}) je veća od neplaćenog ostatka (${availableToVoid}) — ${item.paidQuantity} je već naplaćeno i ne može se poništiti`
+        : `Tražena količina (${input.quantity}) je veća od preostale količine (${item.quantity})`
+    );
   }
 
   const quantityBefore = item.quantity;
@@ -97,12 +106,17 @@ export async function voidOrderItem(
       throw new Error("Porudžbina je u međuvremenu zatvorena — poništavanje nije moguće");
     }
 
-    // Atomski guard na TRENUTNU (upravo pročitanu) količinu — isti obrazac
-    // kao billing.completePayment/production.advanceItemStatus. Dva
-    // konkurentna void zahteva nad istom stavkom: samo jedan pogađa WHERE
-    // klauzulu, drugi dobija jasnu grešku umesto nemoguće (negativne) količine.
+    // Atomski guard na TRENUTNU (upravo pročitanu) količinu I paidQuantity —
+    // isti obrazac kao billing.completePayment/production.advanceItemStatus.
+    // Dva konkurentna void zahteva nad istom stavkom: samo jedan pogađa
+    // WHERE klauzulu, drugi dobija jasnu grešku umesto nemoguće (negativne)
+    // količine. FAZA 8: paidQuantity je DEO guard-a — ako konkurentna
+    // split-bill naplata (split-bill-service.ts) upravo naplati deo ove
+    // stavke između gornje provere i ove tranzakcije, paidQuantity se
+    // promenio i ovaj guard promašuje umesto da tiho poništi upravo
+    // naplaćenu količinu.
     const guard = await tx.orderItem.updateMany({
-      where: { id: itemId, quantity: quantityBefore },
+      where: { id: itemId, quantity: quantityBefore, paidQuantity: item.paidQuantity },
       data: { quantity: quantityAfter, status: isFullVoid ? "CANCELLED" : item.status },
     });
     if (guard.count !== 1) {

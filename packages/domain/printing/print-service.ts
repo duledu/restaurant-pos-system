@@ -334,7 +334,12 @@ export async function reprintReceipt(ctx: AuthContext, orderId: string, idempote
   requirePermission(ctx, ORDERS_PRINT);
   await loadOwnedOrder(ctx, orderId);
 
-  const receipt = await prisma.receipt.findFirst({ where: { orderId, ...scopeToRestaurant(ctx) } });
+  // The legacy order-level reprint action targets the newest receipt. Split
+  // payments each have their own receipt, so the ordering must be explicit.
+  const receipt = await prisma.receipt.findFirst({
+    where: { orderId, ...scopeToRestaurant(ctx) },
+    orderBy: [{ issuedAt: "desc" }, { sequenceNumber: "desc" }],
+  });
   if (!receipt) throw new Error("Račun nije pronađen — porudžbina još nije naplaćena");
 
   const dispatchKey = `receipt-reprint:${receipt.paymentId}:${idempotencyKey}`;

@@ -140,12 +140,23 @@ export async function computeSalesSummaryForRange(
   range: { from: Date; to: Date },
   currency: string
 ): Promise<SalesSummary> {
-  const [grouped, receiptAgg, voidAgg] = await Promise.all([
+  const [grouped, distinctOrders, receiptAgg, voidAgg] = await Promise.all([
     prisma.payment.groupBy({
       by: ["method"],
       where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, completedAt: { gte: range.from, lt: range.to } },
       _sum: { amount: true },
       _count: { _all: true },
+    }),
+    // FAZA 8: "completedOrders" mora ostati broj RAZLIČITIH porudžbina, ne
+    // broj Payment redova — split naplata znači da jedna porudžbina može
+    // imati VIŠE Payment redova (vidi schema.prisma), pa bi prosto brojanje
+    // Payment redova precenilo broj porudžbina i vodilo pogrešnom
+    // averageOrderValue. Suma po metodu plaćanja (grouped, iznad) OSTAJE
+    // tačna bez izmene — to je zbir Payment.amount, ne broj porudžbina.
+    prisma.payment.findMany({
+      where: { restaurantId: ctx.restaurantId, locationId: { in: locationIds }, completedAt: { gte: range.from, lt: range.to } },
+      distinct: ["orderId"],
+      select: { orderId: true },
     }),
     prisma.receipt.aggregate({
       where: {
@@ -163,12 +174,11 @@ export async function computeSalesSummaryForRange(
 
   let cashSales = new Prisma.Decimal(0);
   let cardSales = new Prisma.Decimal(0);
-  let completedOrders = 0;
   for (const g of grouped) {
-    completedOrders += g._count._all;
     if (g.method === "CASH") cashSales = cashSales.add(g._sum.amount ?? 0);
     else cardSales = cardSales.add(g._sum.amount ?? 0);
   }
+  const completedOrders = distinctOrders.length;
   const totalSales = cashSales.add(cardSales);
   const averageOrderValue = completedOrders > 0 ? totalSales.div(completedOrders).toDecimalPlaces(2) : new Prisma.Decimal(0);
   const cashPercent = totalSales.isZero() ? 0 : cashSales.div(totalSales).mul(100).toDecimalPlaces(1).toNumber();
@@ -202,7 +212,12 @@ export interface EmployeeSales {
   employeeId: string;
   employeeName: string;
   role: string;
-  orders: number;
+  // FAZA 8: broj Payment redova (računa/uplata) ovaj zaposleni je ZAVRŠIO —
+  // NIKAD broj različitih porudžbina (vidi napomenu uz EmployeeActivityRow.
+  // completedPayments). Jedna porudžbina podeljena preko 2 delimične naplate
+  // koje je zatvorio isti zaposleni broji se kao 2 ovde — tačno, jer je
+  // zaposleni stvarno obradio 2 zasebne naplatne transakcije.
+  payments: number;
   sales: string;
 }
 
@@ -222,7 +237,7 @@ export async function getSalesByEmployee(ctx: AuthContext, filters: ReportFilter
       employeeId: g.completedBy,
       employeeName: nameById.get(g.completedBy)?.name ?? "?",
       role: nameById.get(g.completedBy)?.role ?? "?",
-      orders: g._count._all,
+      payments: g._count._all,
       sales: decimalToString(g._sum.amount),
     }))
     .sort((a, b) => Number(b.sales) - Number(a.sales));
@@ -464,11 +479,22 @@ export interface EmployeeActivityRow {
   employeeId: string;
   employeeName: string;
   role: string;
-  completedOrders: number;
+  // FAZA 8: PLAĆANJA (Payment redova) koje je ovaj zaposleni ZAVRŠIO u periodu
+  // — NIKAD broj RAZLIČITIH porudžbina. Split naplata znači da jedna
+  // porudžbina može imati više Payment redova (moguće završenih od strane
+  // različitih zaposlenih) — ranije (pre Faze 8) je payment==order uvek
+  // važilo, pa je staro ime "completedOrders" bilo slučajno tačno; sada bi
+  // bilo tiha neistina. Ime je namerno "completedPayments" (koliko računa/
+  // uplata je OVAJ zaposleni lično zatvorio), ista logika koju
+  // antifraud-service.ts već primenjuje (paidChecks).
+  completedPayments: number;
   sales: string;
   cashHandled: string;
   cardHandled: string;
-  averageOrderValue: string;
+  // Prosečna vrednost JEDNE uplate koju je zaposleni zatvorio (sales /
+  // completedPayments) — ne "prosečna porudžbina" (jedna porudžbina
+  // podeljena na 2 uplate bi bila brojana kao 2 manje "porudžbine").
+  averagePaymentValue: string;
   discountTotal: string;
   voidCount: number;
   voidValue: string;
@@ -500,19 +526,27 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
     // (Payment.completedBy) — Order sam po sebi nema svog "ko je odobrio
     // popust" agregatno polje van AuditLog-a, a naplata je trenutak kad
     // popust postaje deo istorijskog prometa.
-    prisma.order.findMany({
+    //
+    // FAZA 8: upit direktno nad Payment (ne više nad Order.payment, koje je
+    // uklonjeno zajedno sa @unique — vidi schema.prisma) — svaki Payment
+    // nosi SVOJ prorata udeo popusta (Payment.discountAmount), pa se ovaj
+    // upit prirodno generalizuje na split naplate: ako je popust bio
+    // podeljen preko 2 delimične naplate koje su ZAVRŠILA 2 RAZLIČITA
+    // zaposlena, svaki dobija tačno svoj udeo — ne (pogrešno) ceo
+    // Order.discountAmount pripisan samo poslednjem.
+    prisma.payment.findMany({
       where: {
         restaurantId: ctx.restaurantId,
         locationId: { in: locationIds },
         discountAmount: { not: null },
-        payment: { completedAt: { gte: range.from, lt: range.to } },
+        completedAt: { gte: range.from, lt: range.to },
       },
-      select: { discountAmount: true, payment: { select: { completedBy: true } } },
+      select: { discountAmount: true, completedBy: true },
     }),
   ]);
 
   interface Bucket {
-    orders: number;
+    payments: number;
     sales: Prisma.Decimal;
     cash: Prisma.Decimal;
     card: Prisma.Decimal;
@@ -527,7 +561,7 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
     let b = byEmployee.get(id);
     if (!b) {
       b = {
-        orders: 0,
+        payments: 0,
         sales: new Prisma.Decimal(0),
         cash: new Prisma.Decimal(0),
         card: new Prisma.Decimal(0),
@@ -544,7 +578,7 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
 
   for (const g of salesGroups) {
     const b = bucketFor(g.completedBy);
-    b.orders += g._count._all;
+    b.payments += g._count._all;
     const amount = new Prisma.Decimal(g._sum.amount ?? 0);
     b.sales = b.sales.add(amount);
     if (g.method === "CASH") b.cash = b.cash.add(amount);
@@ -561,10 +595,9 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
     b.cashDifference = b.cashDifference.add(s.cashDifference ?? 0);
     b.shiftsClosedCount += 1;
   }
-  for (const o of discountedOrders) {
-    if (!o.payment?.completedBy) continue;
-    const b = bucketFor(o.payment.completedBy);
-    b.discountTotal = b.discountTotal.add(o.discountAmount ?? 0);
+  for (const p of discountedOrders) {
+    const b = bucketFor(p.completedBy);
+    b.discountTotal = b.discountTotal.add(p.discountAmount ?? 0);
   }
 
   const employeeIds = Array.from(byEmployee.keys());
@@ -573,16 +606,16 @@ export async function getEmployeeActivity(ctx: AuthContext, filters: ReportFilte
   return employeeIds
     .map((id) => {
       const b = byEmployee.get(id) as Bucket;
-      const averageOrderValue = b.orders > 0 ? b.sales.div(b.orders).toDecimalPlaces(2) : new Prisma.Decimal(0);
+      const averagePaymentValue = b.payments > 0 ? b.sales.div(b.payments).toDecimalPlaces(2) : new Prisma.Decimal(0);
       return {
         employeeId: id,
         employeeName: nameById.get(id)?.name ?? "?",
         role: nameById.get(id)?.role ?? "?",
-        completedOrders: b.orders,
+        completedPayments: b.payments,
         sales: b.sales.toString(),
         cashHandled: b.cash.toString(),
         cardHandled: b.card.toString(),
-        averageOrderValue: averageOrderValue.toString(),
+        averagePaymentValue: averagePaymentValue.toString(),
         discountTotal: b.discountTotal.toString(),
         voidCount: b.voidCount,
         voidValue: b.voidValue.toString(),

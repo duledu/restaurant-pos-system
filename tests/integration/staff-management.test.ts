@@ -240,6 +240,53 @@ describe("staff management: PIN rules", () => {
   });
 });
 
+describe("staff management: PIN reveal is removed, reset still works", () => {
+  it("employees.revealEmployeePin no longer exists on the domain module", async () => {
+    // Namerno pristupljeno bez tipa (dinamički) — cilj testa je da dokaže da
+    // je funkcija UKLONJENA iz modula, ne samo da TypeScript ne bi dozvolio
+    // tipiziran poziv. Ako neko slučajno vrati revealEmployeePin, ovaj test
+    // pada.
+    expect((employees as unknown as Record<string, unknown>).revealEmployeePin).toBeUndefined();
+  });
+
+  it("GET /api/admin/employees/[id]/pin no longer exists — the route module exports only POST", async () => {
+    const pinRouteModule: Record<string, unknown> = await import("../../apps/web/app/api/admin/employees/[id]/pin/route");
+    expect(pinRouteModule.GET).toBeUndefined();
+    expect(typeof pinRouteModule.POST).toBe("function");
+  });
+
+  it("PIN reset still works end-to-end through the real HTTP route with an authenticated OWNER session", async () => {
+    const fixture = await createFixture();
+    const owner = await createOwner(fixture);
+    const waiter = await employees.createEmployee(owner, {
+      firstName: "Marko",
+      lastName: "M",
+      pin: "1234",
+      roleNames: ["WAITER"],
+      locationIds: [fixture.locationId],
+    });
+
+    const ownerUser = await prisma.user.create({ data: { username: `${randomUUID()}@test.local`, isActive: true } });
+    await prisma.employee.update({ where: { id: owner.employeeId }, data: { userId: ownerUser.id } });
+    const token = await createSessionToken({ userId: ownerUser.id, employeeId: owner.employeeId, restaurantId: fixture.restaurantId });
+
+    const { POST: resetPinRoute } = await import("../../apps/web/app/api/admin/employees/[id]/pin/route");
+    const response = await resetPinRoute(
+      new Request(`http://localhost/api/admin/employees/${waiter.id}/pin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie: `rcs_session=${token}` },
+        body: JSON.stringify({ pin: "8888" }),
+      }),
+      { params: Promise.resolve({ id: waiter.id }) }
+    );
+    expect(response.status).toBe(200);
+
+    const updated = await prisma.employee.findUniqueOrThrow({ where: { id: waiter.id } });
+    expect(await verifyPin("8888", updated.pinHash as string)).toBe(true);
+    expect(await verifyPin("1234", updated.pinHash as string)).toBe(false);
+  });
+});
+
 describe("staff management: role changes affect authorization immediately", () => {
   it("revokes employees.manage on the SAME session token as soon as the role is downgraded", async () => {
     const fixture = await createFixture();

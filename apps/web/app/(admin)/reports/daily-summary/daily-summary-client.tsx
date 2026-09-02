@@ -31,7 +31,7 @@ interface EmployeeRow {
   employeeId: string;
   employeeName: string;
   sales: string;
-  completedOrders: number;
+  completedPayments: number;
 }
 interface DailySummary {
   label: string;
@@ -179,7 +179,7 @@ export function DailySummaryClient() {
                   <thead>
                     <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                       <th className="px-4 py-3 font-medium">Zaposleni</th>
-                      <th className="px-4 py-3 font-medium">Porudžbine</th>
+                      <th className="px-4 py-3 font-medium">Računa</th>
                       <th className="px-4 py-3 text-right font-medium">Prodaja</th>
                     </tr>
                   </thead>
@@ -187,7 +187,7 @@ export function DailySummaryClient() {
                     {(report?.employees ?? []).map((row) => (
                       <tr key={row.employeeId} className="border-b border-line last:border-0">
                         <td className="px-4 py-3 text-ink">{row.employeeName}</td>
-                        <td className="px-4 py-3 text-inkSoft">{row.completedOrders}</td>
+                        <td className="px-4 py-3 text-inkSoft">{row.completedPayments}</td>
                         <td className="px-4 py-3 text-right font-medium text-ink">{formatMoney(row.sales, s.currency)}</td>
                       </tr>
                     ))}

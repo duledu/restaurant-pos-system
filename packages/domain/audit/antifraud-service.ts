@@ -65,10 +65,9 @@ export interface VoidEventRow {
   explanation: string;
   voidedAt: string;
   orderId: string;
-  /** Ljudski čitljiv broj računa (Receipt.sequenceNumber) — postoji SAMO ako
-   * je porudžbina u međuvremenu naplaćena (za neke stavke ta porudžbina
-   * možda nikad ne bude naplaćena — receiptNumber ostaje null, ne izmišljamo
-   * broj). Prikazuje se umesto "sirovog" orderId (specifikacija #18). */
+  /** Broj računa samo kada sam void događaj ima vezu sa naplatom. Trenutni
+   * unpaid-only void tok nema paymentId, pa se kasniji račun druge, zadržane
+   * stavke ne pripisuje ovom stornu. */
   receiptNumber: number | null;
   isFullVoid: boolean;
   /** true SAMO za potpun storno gde je stavka VEĆ bila servirana (SERVED) u
@@ -88,21 +87,14 @@ export async function getVoidEvents(ctx: AuthContext, filters: ReportFilters): P
   if (rows.length === 0) return [];
 
   const orderItemIds = rows.map((r) => r.orderItemId);
-  const orderIds = Array.from(new Set(rows.map((r) => r.orderId)));
-
-  const [nameById, servedStations, receipts] = await Promise.all([
+  const [nameById, servedStations] = await Promise.all([
     resolveEmployeeDisplayNames(ctx.restaurantId, rows.map((r) => r.voidedBy)),
     prisma.orderItemStation.findMany({
       where: { orderItemId: { in: orderItemIds }, status: "SERVED" },
       select: { orderItemId: true },
     }),
-    prisma.receipt.findMany({
-      where: { orderId: { in: orderIds } },
-      select: { orderId: true, sequenceNumber: true },
-    }),
   ]);
   const servedItemIds = new Set(servedStations.map((s) => s.orderItemId));
-  const receiptByOrderId = new Map(receipts.map((r) => [r.orderId, r.sequenceNumber]));
 
   return rows.map((r) => {
     const isFullVoid = r.quantityAfter === 0;
@@ -121,7 +113,7 @@ export async function getVoidEvents(ctx: AuthContext, filters: ReportFilters): P
       explanation: r.explanation,
       voidedAt: r.voidedAt.toISOString(),
       orderId: r.orderId,
-      receiptNumber: receiptByOrderId.get(r.orderId) ?? null,
+      receiptNumber: null,
       isFullVoid,
       producedBeforeVoid: isFullVoid && servedItemIds.has(r.orderItemId),
     };
@@ -308,10 +300,10 @@ export async function getEmployeeAntiFraudSummary(ctx: AuthContext, filters: Rep
       employeeName: row.employeeName,
       role: row.role,
       paidSales: row.sales,
-      paidChecks: row.completedOrders,
+      paidChecks: row.completedPayments,
       voidCount: row.voidCount,
       voidValue: row.voidValue,
-      voidRateByChecks: safeRate(row.voidCount, row.completedOrders),
+      voidRateByChecks: safeRate(row.voidCount, row.completedPayments),
       voidRateByValue: safeRate(decimalToNumber(row.voidValue), decimalToNumber(row.sales)),
       shiftsClosedCount: row.shiftsClosedCount,
       netCashDifference: row.cashDifference,

@@ -371,8 +371,8 @@ describe("financial integrity: voids are not counted as paid revenue", () => {
   });
 });
 
-describe("order number on void events", () => {
-  it("exposes the human-readable receipt number once the order is paid, not the raw order UUID", async () => {
+describe("receipt semantics on void events", () => {
+  it("does not attach a later receipt for retained items to a pre-payment void", async () => {
     const fixture = await createFixture();
     const manager = managerCtx(fixture);
     const order = await orders.openOrder(manager, { tableId: fixture.tableId });
@@ -384,8 +384,7 @@ describe("order number on void events", () => {
 
     const rows = await antifraud.getVoidEvents(manager, { locationId: "ALL", preset: "today" });
     expect(rows).toHaveLength(1);
-    expect(rows[0].receiptNumber).not.toBeNull();
-    expect(typeof rows[0].receiptNumber).toBe("number");
+    expect(rows[0].receiptNumber).toBeNull();
     void keptItem;
   });
 

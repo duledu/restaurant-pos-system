@@ -77,6 +77,31 @@ export const confirmPrintResultSchema = z.object({
 });
 export type ConfirmPrintResultInput = z.infer<typeof confirmPrintResultSchema>;
 
+// ── FAZA 8: SPLIT BILL / TRANSFER STAVKI ─────────────────────────────────
+
+export const splitBillLineSchema = z.object({
+  orderItemId: z.string().uuid(),
+  quantity: z.number().int().min(1),
+});
+
+export const splitBillPaySchema = z.object({
+  // Isti idempotency obrazac kao submitOrderSchema/completePaymentSchema —
+  // klijent generiše UUID pre prvog pokušaja i šalje isti ključ na svaki
+  // retry (server garantuje da isti ključ nikad ne naplati dvaput, vidi
+  // Payment.@@unique([orderId, idempotencyKey])).
+  idempotencyKey: z.string().uuid(),
+  method: z.enum(["CASH", "CARD"]),
+  tenderedAmount: z.number().nonnegative().optional(),
+  lines: z.array(splitBillLineSchema).min(1).max(100),
+});
+export type SplitBillPayInput = z.infer<typeof splitBillPaySchema>;
+
+export const transferOrderItemsSchema = z.object({
+  destinationTableId: z.string().uuid(),
+  lines: z.array(splitBillLineSchema).min(1).max(100),
+});
+export type TransferOrderItemsInput = z.infer<typeof transferOrderItemsSchema>;
+
 export const voidOrderItemSchema = z.object({
   quantity: z.number().int().min(1),
   reasonCode: z.enum(VOID_REASON_CODES),

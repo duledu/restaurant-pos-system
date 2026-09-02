@@ -30,9 +30,25 @@ interface InventoryItem {
     quantity: number | null;
     minimumStock: number | null;
     trackStock: boolean;
+    // P1.3: da li artikal TRENUTNO ima konfigurisan normativ (bar jedna
+    // MenuItemIngredient linija) — kad je true, sirovinski model UVEK
+    // pobeđuje bez obzira na trackStock (isti obrazac kao
+    // inventory-service.ts double-deduction odbrana). UI mora tretirati
+    // stavku kao "efektivno praćenu" samo kad je trackStock && !hasRecipe.
+    hasRecipe: boolean;
     categoryId: string | null;
+    // P1.5: fizička kategorija ZALIHE (KUHINJA/ŠANK -> podkategorija) — samo
+    // za organizaciju ove liste, NIKAD za odbitak (i dalje isključivo
+    // trackStock/InventoryItem). Odvojeno od `categoryId` (MenuCategory).
+    inventoryCategoryId: string | null;
+    inventoryCategory: { id: string; name: string; parent: { id: string; name: string } | null } | null;
   };
   location: { id: string; name: string };
+}
+
+/** trackStock && !hasRecipe — jedina ispravna definicija "aktivno praćeno" (P1.3). */
+function isEffectivelyTracked(item: InventoryItem) {
+  return item.menuItem.trackStock && !item.menuItem.hasRecipe;
 }
 
 interface Movement {
@@ -65,8 +81,12 @@ function fmtQty(n: number) {
   return n % 1 === 0 ? n.toString() : n.toFixed(3).replace(/\.?0+$/, "");
 }
 
-function stockStatus(item: InventoryItem): "out" | "low" | "ok" {
-  if (item.currentStock <= 0) return "out";
+// P1.7: NEGATIVE (currentStock < 0) je NAJJAČI status — evidentiran manjak,
+// odvojen od običnog OUT (currentStock == 0) — MORA odgovarati
+// inventory-service.ts getInventoryStockStatus tačno (ista granica).
+function stockStatus(item: InventoryItem): "negative" | "out" | "low" | "ok" {
+  if (item.currentStock < 0) return "negative";
+  if (item.currentStock === 0) return "out";
   const min = item.menuItem.minimumStock;
   if (min != null && item.currentStock <= Number(min)) return "low";
   return "ok";
@@ -231,6 +251,120 @@ function AdjustModal({ item, onClose, onDone }: { item: InventoryItem; onClose: 
   );
 }
 
+function ThresholdModal({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: () => void }) {
+  const current = item.menuItem.minimumStock;
+  const [value, setValue] = useState(current != null ? fmtQty(Number(current)) : "");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function save(minimumStock: number | null) {
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch(`/api/admin/inventory/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minimumStock }),
+      });
+      if (!res.ok) { const j = await res.json(); setErr(j.error ?? "Greška"); return; }
+      onDone();
+    } finally { setLoading(false); }
+  }
+
+  function submit() {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      // Namerno se prazno polje NE tretira kao "ukloni prag" — to mora biti
+      // eksplicitna akcija (dugme ispod), da slučajno brisanje sadržaja
+      // polja ne bi tiho izbrisalo prag.
+      setErr('Unesite vrednost praga, ili koristite "Ukloni prag" ispod.');
+      return;
+    }
+    const n = parseFloat(trimmed);
+    if (isNaN(n) || n < 0) { setErr("Prag mora biti broj ≥ 0"); return; }
+    save(n);
+  }
+
+  return (
+    <Modal title={`Prag niske zalihe — ${item.menuItem.name}`} onClose={onClose}>
+      <p className="mb-4 text-sm text-inkSoft">
+        Trenutno stanje: <strong className="text-ink">{fmtQty(item.currentStock)} {item.unit}</strong>
+        {" · "}
+        Trenutni prag: <strong className="text-ink">{current != null ? `${fmtQty(Number(current))} ${item.unit}` : "Prag nije podešen"}</strong>
+      </p>
+      <label className="mb-1 block text-sm font-medium text-ink">Novi prag ({item.unit})</label>
+      <input type="number" min={0} step="any" value={value} onChange={e => setValue(e.target.value)} className={`mb-4 ${inputClass}`} placeholder="npr. 5" />
+      {err && <p className="mb-3 text-sm text-danger">{err}</p>}
+      <div className="flex gap-2">
+        <Button variant="dangerGhost" onClick={() => save(null)} loading={loading} className="flex-1">
+          Ukloni prag
+        </Button>
+        <Button onClick={submit} loading={loading} className="flex-1">
+          {loading ? "Čuvanje…" : "Sačuvaj"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * P1.5: dodeljuje INVENTORY (fizičku, KUHINJA/ŠANK) kategoriju direct-stock
+ * artiklu (npr. Coca-Cola -> ŠANK -> Sokovi) — čisto organizaciono, NIKAD
+ * ne utiče na trackStock/currentStock/odbitak (i dalje isključivo
+ * InventoryItem, nepromenjeno).
+ */
+function CategoryAssignModal({
+  item,
+  categories,
+  onClose,
+  onDone,
+}: {
+  item: InventoryItem;
+  categories: { id: string; name: string; parentId: string | null; isActive: boolean }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState(item.menuItem.inventoryCategoryId ?? "");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const active = categories.filter((c) => c.isActive);
+  const byId = new Map(active.map((c) => [c.id, c]));
+
+  async function save() {
+    setLoading(true); setErr("");
+    try {
+      const res = await fetch(`/api/admin/menu/items/${item.menuItem.id}/inventory-category`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inventoryCategoryId: value || null }),
+      });
+      if (!res.ok) { const j = await res.json(); setErr(j.error ?? "Greška"); return; }
+      onDone();
+    } finally { setLoading(false); }
+  }
+
+  return (
+    <Modal title={`Kategorija zaliha — ${item.menuItem.name}`} onClose={onClose}>
+      <p className="mb-3 text-xs text-inkSoft">Organizuje ovaj artikal pod KUHINJA/ŠANK na listi zaliha — ne menja stanje niti odbitak pri prodaji.</p>
+      <select className={`mb-4 ${inputClass}`} value={value} onChange={(e) => setValue(e.target.value)}>
+        <option value="">Nekategorisano</option>
+        {active
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((c) => {
+            const parent = c.parentId ? byId.get(c.parentId) : null;
+            return (
+              <option key={c.id} value={c.id}>
+                {parent ? `${parent.name} / ${c.name}` : c.name}
+              </option>
+            );
+          })}
+      </select>
+      {err && <p className="mb-3 text-sm text-danger">{err}</p>}
+      <Button onClick={save} loading={loading} className="w-full">{loading ? "Čuvanje…" : "Sačuvaj"}</Button>
+    </Modal>
+  );
+}
+
 function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () => void }) {
   const [movements, setMovements] = useState<Movement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -290,8 +424,24 @@ function MovementsModal({ item, onClose }: { item: InventoryItem; onClose: () =>
 
 // ─── Initialize modal ─────────────────────────────────────────────────────────
 
-interface MenuItemOption { id: string; name: string; unit: string | null }
+interface MenuItemOption { id: string; name: string; unit: string | null; inventoryTrackingMethod?: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE" }
 interface LocationOption { id: string; name: string }
+
+/**
+ * P1.6: RECIPE-mod artikli se upravljaju kroz Sirovine + Normativi, ne
+ * inicijalizuju kao gotov-proizvod zaliha — isključuje ih iz liste
+ * kandidata na osnovu TRENUTNE inventoryTrackingMethod (ne na osnovu
+ * "ima linija recepture", jer artikal može zadržati stare linije posle
+ * RECIPE -> DIRECT_STOCK prelaska i i dalje je legitiman kandidat). Čisto
+ * UX filter nad skupom kandidata; nikad ne dira postojeći InventoryItem/
+ * InventoryMovement red (zastareo/istorijski, ako postoji, ostaje potpuno
+ * netaknut i vidljiv preko "Prikaži isključene" + "Historija" dugmeta na
+ * glavnoj Zalihe listi).
+ */
+async function fetchDirectStockCandidates(): Promise<MenuItemOption[]> {
+  const itemsRes = await fetch("/api/admin/menu/items").then((r) => r.json());
+  return (itemsRes.items ?? []).filter((m: MenuItemOption) => m.inventoryTrackingMethod !== "RECIPE");
+}
 
 function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [menuItems, setMenuItems] = useState<MenuItemOption[]>([]);
@@ -304,7 +454,7 @@ function InitModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch("/api/admin/menu/items").then(r => r.json()).then(j => setMenuItems(j.items ?? []));
+    fetchDirectStockCandidates().then(setMenuItems);
     fetch("/api/admin/locations").then(r => r.json()).then(j => setLocations(j.locations ?? []));
   }, []);
 
@@ -381,7 +531,7 @@ function OpeningStockModal({ onClose, onDone }: { onClose: () => void; onDone: (
   const [result, setResult] = useState<OpeningStockResult | null>(null);
 
   useEffect(() => {
-    fetch("/api/admin/menu/items").then(r => r.json()).then(j => setMenuItems(j.items ?? []));
+    fetchDirectStockCandidates().then(setMenuItems);
     fetch("/api/admin/locations").then(r => r.json()).then(j => {
       const locs: LocationOption[] = j.locations ?? [];
       setLocations(locs);
@@ -607,21 +757,33 @@ type ModalState =
   | { type: "receive"; item: InventoryItem }
   | { type: "adjust"; item: InventoryItem }
   | { type: "movements"; item: InventoryItem }
+  | { type: "threshold"; item: InventoryItem }
+  | { type: "category"; item: InventoryItem }
   | { type: "init" }
   | { type: "opening-stock" }
   | { type: "zero-all" }
   | null;
+
+type StatusFilter = "all" | "low" | "out" | "negative";
 
 const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
 
 export function InventoryClient() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  // P1.5: fizička (KUHINJA/ŠANK) kategorija zaliha — NAMERNO odvojena
+  // promenljiva od `categories` (MenuCategory) iznad, da se ne pomešaju.
+  const [inventoryCategoryOptions, setInventoryCategoryOptions] = useState<{ id: string; name: string; parentId: string | null; isActive: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
   const [search, setSearch] = useState("");
   const [activeCategoryTab, setActiveCategoryTab] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [roles, setRoles] = useState<string[]>([]);
+  // P1.3: podrazumevano SAKRIVA recepturisane/isključene stavke (više nisu
+  // "prodajna" zaliha) — istorija ostaje potpuno dostupna preko ovog
+  // prekidača + "Historija" dugmeta po redu, nikad se ne briše.
+  const [showInactive, setShowInactive] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -637,6 +799,10 @@ export function InventoryClient() {
     fetch("/api/admin/menu/categories")
       .then(r => r.json())
       .then(j => setCategories(j.categories ?? []))
+      .catch(() => {});
+    fetch("/api/admin/inventory-categories")
+      .then(r => r.json())
+      .then(j => setInventoryCategoryOptions(j.categories ?? []))
       .catch(() => {});
   }, []);
 
@@ -662,7 +828,10 @@ export function InventoryClient() {
 
   const uncategorizedCount = categoryCount.get(UNCAT) ?? 0;
 
-  // Combined search + category filter
+  // Combined search + category + status + tracking filter (AND). P1.3: a
+  // recipe-produced (or otherwise disabled) item is hidden from the default
+  // view — it no longer represents sellable finished stock, only historical
+  // record — unless "Prikaži isključene" is explicitly toggled on.
   const filtered = useMemo(() => {
     return items.filter(it => {
       const matchesSearch =
@@ -673,12 +842,18 @@ export function InventoryClient() {
         (activeCategoryTab === UNCAT
           ? it.menuItem.categoryId === null
           : it.menuItem.categoryId === activeCategoryTab);
-      return matchesSearch && matchesCategory;
+      const matchesTracking = showInactive || isEffectivelyTracked(it);
+      const matchesStatus =
+        statusFilter === "all" || (isEffectivelyTracked(it) && stockStatus(it) === statusFilter);
+      return matchesSearch && matchesCategory && matchesTracking && matchesStatus;
     });
-  }, [items, search, activeCategoryTab]);
+  }, [items, search, activeCategoryTab, statusFilter, showInactive]);
 
-  const outOfStockCount = items.filter(i => stockStatus(i) === "out").length;
-  const lowStockCount = items.filter(i => stockStatus(i) === "low").length;
+  const trackedItems = items.filter(isEffectivelyTracked);
+  const negativeStockCount = trackedItems.filter(i => stockStatus(i) === "negative").length;
+  const outOfStockCount = trackedItems.filter(i => stockStatus(i) === "out").length;
+  const lowStockCount = trackedItems.filter(i => stockStatus(i) === "low").length;
+  const inactiveCount = items.length - trackedItems.length;
 
   function selectTab(id: string | null) {
     setActiveCategoryTab(prev => (prev === id ? null : id));
@@ -718,12 +893,20 @@ export function InventoryClient() {
         }
       />
 
-      {/* ── Search + low-stock badge ─────────────────────────────────────────── */}
+      {/* ── Search + status filter ───────────────────────────────────────────── */}
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
-        {outOfStockCount > 0 && <Badge tone="danger">{outOfStockCount} {outOfStockCount === 1 ? "artikal nema" : "artikala nema"} zalihe</Badge>}
-        {lowStockCount > 0 && <Badge tone="warn">{lowStockCount} {lowStockCount === 1 ? "artikal ima" : "artikala ima"} nisku zalihu</Badge>}
+        <div className="flex gap-1.5">
+          <TabPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")} label="Sve" />
+          <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowStockCount} />
+          <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outOfStockCount} />
+          <TabPill active={statusFilter === "negative"} onClick={() => setStatusFilter("negative")} label="Negativna zaliha" count={negativeStockCount} />
+        </div>
+        <label className="ml-auto flex items-center gap-1.5 text-xs font-medium text-inkSoft">
+          <input type="checkbox" checked={showInactive} onChange={e => setShowInactive(e.target.checked)} />
+          Prikaži isključene/istorijske stavke ({inactiveCount})
+        </label>
       </div>
 
       {/* ── Category tab strip (same pattern as Menu) ────────────────────────── */}
@@ -777,13 +960,17 @@ export function InventoryClient() {
               </thead>
               <tbody className="divide-y divide-line/60">
                 {filtered.map(item => {
-                  const status = stockStatus(item);
+                  const effectivelyTracked = isEffectivelyTracked(item);
+                  const status = effectivelyTracked ? stockStatus(item) : null;
                   const min = item.menuItem.minimumStock;
                   const rowCls =
+                    status === "negative" ? "bg-danger/10 shadow-[inset_3px_0_0_#B91C1C]" :
                     status === "out" ? "bg-danger-soft/60 shadow-[inset_3px_0_0_#B91C1C]" :
                     status === "low" ? "bg-warn-soft/40 shadow-[inset_3px_0_0_#B45309]" :
+                    !effectivelyTracked ? "opacity-60 hover:bg-cream-200/40" :
                     "hover:bg-cream-200/60";
                   const stockCls =
+                    status === "negative" ? "text-danger" :
                     status === "out" ? "text-danger" :
                     status === "low" ? "text-warn" :
                     "text-ink";
@@ -791,19 +978,27 @@ export function InventoryClient() {
                     <tr key={item.id} className={rowCls}>
                       <td className="px-4 py-3">
                         <span className="block font-semibold text-ink">{item.menuItem.name}</span>
+                        {status === "negative" && <Badge tone="dangerSolid">Negativna zaliha</Badge>}
                         {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
                         {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
+                        {!effectivelyTracked && item.menuItem.hasRecipe && <Badge tone="gold">Normativ aktivan</Badge>}
+                        {item.menuItem.inventoryCategory ? (
+                          <Badge tone="neutral">
+                            {item.menuItem.inventoryCategory.parent ? `${item.menuItem.inventoryCategory.parent.name} / ${item.menuItem.inventoryCategory.name}` : item.menuItem.inventoryCategory.name}
+                          </Badge>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3 text-inkSoft">{item.location.name}</td>
                       <td className={`px-4 py-3 text-right text-base font-bold tabular-nums ${stockCls}`}>
                         {fmtQty(item.currentStock)} {item.unit}
+                        {!effectivelyTracked && <span className="ml-1 text-xs font-normal text-ink/40">(istorijsko)</span>}
                       </td>
                       <td className="px-4 py-3 text-right font-mono tabular-nums text-inkSoft">
                         {min != null ? `${fmtQty(Number(min))} ${item.unit}` : "—"}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <Badge tone={item.menuItem.trackStock ? "success" : "neutral"}>
-                          {item.menuItem.trackStock ? "Aktivno" : "Isključeno"}
+                        <Badge tone={effectivelyTracked ? "success" : "neutral"}>
+                          {effectivelyTracked ? "Aktivno" : item.menuItem.hasRecipe ? "Normativ (sirovine)" : "Isključeno"}
                         </Badge>
                       </td>
                       <td className="px-4 py-3">
@@ -816,6 +1011,12 @@ export function InventoryClient() {
                           </button>
                           <button onClick={() => setModal({ type: "movements", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">
                             Historija
+                          </button>
+                          <button onClick={() => setModal({ type: "threshold", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
+                            Prag
+                          </button>
+                          <button onClick={() => setModal({ type: "category", item })} className="min-h-11 rounded-md px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">
+                            Kategorija
                           </button>
                         </div>
                       </td>
@@ -831,6 +1032,8 @@ export function InventoryClient() {
       {modal?.type === "receive"    && <ReceiveModal   item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "adjust"     && <AdjustModal    item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "movements"  && <MovementsModal item={modal.item} onClose={() => setModal(null)} />}
+      {modal?.type === "threshold"  && <ThresholdModal  item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
+      {modal?.type === "category"   && <CategoryAssignModal item={modal.item} categories={inventoryCategoryOptions} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "init"       && <InitModal               onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "opening-stock" && canOpeningStock && <OpeningStockModal onClose={() => setModal(null)} onDone={closeAndRefresh} />}
       {modal?.type === "zero-all"      && canOpeningStock && <ZeroAllModal      onClose={() => setModal(null)} onDone={closeAndRefresh} />}

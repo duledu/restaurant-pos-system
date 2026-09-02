@@ -259,12 +259,12 @@ export function BillClient({ tableId }: { tableId: string }) {
 
   return (
     <div className="flex min-h-screen flex-col p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <button onClick={() => router.push(`/waiter/tables/${tableId}`)} className="text-sm font-medium text-gold-dark">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <button onClick={() => router.push(`/waiter/tables/${tableId}`)} className="shrink-0 whitespace-nowrap text-sm font-medium text-gold-dark">
           ← Porudžbina
         </button>
-        <h1 className="text-lg font-semibold text-ink">{bill.order.table.label} — Račun</h1>
-        <div className="flex items-center gap-1">
+        <h1 className="min-w-0 flex-1 truncate text-center text-base font-semibold text-ink">{bill.order.table.label} — Račun</h1>
+        <div className="flex shrink-0 items-center gap-1">
           <QuickLockButton />
           <LogoutButton />
         </div>
@@ -348,6 +348,13 @@ export function BillClient({ tableId }: { tableId: string }) {
         className="mt-6 w-full rounded-md bg-graphite py-4 text-lg font-semibold text-cream-100 disabled:opacity-40 transition-colors hover:bg-graphite-700"
       >
         {paying ? "Naplata…" : `Potvrdi plaćanje — ${Number(bill.total).toFixed(2)} RSD`}
+      </button>
+
+      <button
+        onClick={() => router.push(`/waiter/tables/${tableId}/split-bill`)}
+        className="mt-3 min-h-11 w-full text-center text-sm font-medium text-inkSoft underline decoration-line underline-offset-4 transition-colors hover:text-gold-dark"
+      >
+        Gost plaća samo deo — Podeli račun
       </button>
     </div>
   );

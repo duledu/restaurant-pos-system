@@ -27,6 +27,16 @@ export const registerDeviceSchema = z.object({
 });
 export type RegisterDeviceInput = z.infer<typeof registerDeviceSchema>;
 
+export const renameDeviceSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+});
+export type RenameDeviceInput = z.infer<typeof renameDeviceSchema>;
+
+export const setDeviceStatusSchema = z.object({
+  isActive: z.boolean(),
+});
+export type SetDeviceStatusInput = z.infer<typeof setDeviceStatusSchema>;
+
 export const createEmployeeSchema = z.object({
   firstName: z.string().trim().min(1).max(100),
   lastName: z.string().trim().min(1).max(100),

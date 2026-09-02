@@ -12,11 +12,11 @@ interface EmployeeRow {
   employeeId: string;
   employeeName: string;
   role: string;
-  completedOrders: number;
+  completedPayments: number;
   sales: string;
   cashHandled: string;
   cardHandled: string;
-  averageOrderValue: string;
+  averagePaymentValue: string;
   discountTotal: string;
   voidCount: number;
   voidValue: string;
@@ -90,8 +90,8 @@ export function EmployeesClient() {
               </div>
               <div className="grid grid-cols-2 gap-2 border-t border-line pt-3 text-sm">
                 <div>
-                  <p className="text-inkSoft">Porudžbine</p>
-                  <p className="font-medium text-ink">{r.completedOrders}</p>
+                  <p className="text-inkSoft">Zatvoreni računi</p>
+                  <p className="font-medium text-ink">{r.completedPayments}</p>
                 </div>
                 <div>
                   <p className="text-inkSoft">Gotovina / Kartica</p>
@@ -106,8 +106,8 @@ export function EmployeesClient() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-inkSoft">Pros. porudžbina</p>
-                  <p className="font-medium text-ink">{formatMoney(r.averageOrderValue)}</p>
+                  <p className="text-inkSoft">Pros. iznos računa</p>
+                  <p className="font-medium text-ink">{formatMoney(r.averagePaymentValue)}</p>
                 </div>
                 {Number(r.discountTotal) > 0 && (
                   <div>

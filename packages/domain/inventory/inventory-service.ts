@@ -2,40 +2,96 @@ import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+export type InventoryTrackingMethod = "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
 
-export class InsufficientStockError extends Error {
-  readonly stockItems: Array<{ name: string; available: number; required: number }>;
+/**
+ * P1.6: jedina autoritativna kapija za odluku o odbitku/dostupnosti —
+ * zamenjuje raniju dinamičku trackStock+hasRecipe-postoji proveru
+ * (getMenuItemIdsWithRecipes). Struktuurno garantuje "tačno jedan put":
+ * kolona ne može istovremeno biti DIRECT_STOCK i RECIPE.
+ *
+ * P1.7: fires whenever the recorded quantity is nonzero — POSITIVE (real
+ * physical goods that would silently stop being tracked) OR NEGATIVE (a
+ * known, recorded discrepancy the manager should see before it becomes
+ * invisible) — never just the positive case (audit §17: "Switch-away
+ * warnings should correctly show positive or negative recorded quantities
+ * if relevant").
+ */
+export class DirectStockStillPresentError extends Error {
+  readonly remaining: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>;
 
-  constructor(items: Array<{ name: string; available: number; required: number }>) {
-    // P3.3: poruka je NAMERNO kontekstualno neutralna ("Nema dovoljno
-    // zaliha za:", ne "...za završetak prodaje") jer se ista klasa sada
-    // baca i pri dodavanju u porudžbinu i pri slanju, ne samo pri naplati
-    // (specifikacija #47 — ponovo koristi POSTOJEĆU grešku, ne izmišljaj novu).
-    const names = items.map((i) => i.name).join(", ");
-    const lines = items
-      .map((i) => `${i.name} — dostupno: ${i.available}, traženo: ${i.required}`)
-      .join("\n");
-    super(`Nema dovoljno zaliha za: ${names}\n${lines}`);
-    this.name = "InsufficientStockError";
-    this.stockItems = items;
+  constructor(itemName: string, remaining: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>) {
+    const lines = remaining.map((r) => `${r.locationName}: ${r.quantity} ${r.unit}`).join("\n");
+    const anyNegative = remaining.some((r) => Number(r.quantity) < 0);
+    const anyPositive = remaining.some((r) => Number(r.quantity) > 0);
+    const description =
+      anyNegative && anyPositive
+        ? "i dalje ima zabeleženu zalihu gotovog proizvoda (na nekim lokacijama i negativnu — zabeležen manjak)"
+        : anyNegative
+          ? "ima zabeležen NEGATIVAN manjak gotovog proizvoda"
+          : "i dalje ima zalihu gotovog proizvoda na stanju";
+    super(
+      `Artikal "${itemName}" ${description}:\n${lines}\nAko nastavite, praćenje ove zalihe se isključuje ali ISTORIJA (InventoryMovement) i tekuće stanje OSTAJU sačuvani, samo se više ne koriste za buduće prodaje. Potvrdite da želite da nastavite.`
+    );
+    this.name = "DirectStockStillPresentError";
+    this.remaining = remaining;
   }
 }
 
+/**
+ * Symmetric to DirectStockStillPresentError — fires on the OPPOSITE
+ * direction (entering DIRECT_STOCK, from ANY previous method), when a
+ * pre-existing InventoryItem row with a non-zero (positive OR negative —
+ * P1.7: negative recorded stock is a real discrepancy worth surfacing too,
+ * not just a positive quantity) quantity already exists for this MenuItem
+ * (e.g. it was DIRECT_STOCK long ago, switched away, and is now being
+ * switched back — or went DIRECT_STOCK -> RECIPE -> DIRECT_STOCK). That
+ * frozen number was never verified as CURRENT physical reality and must
+ * never be silently trusted again — see audit §19.
+ */
+export class StaleDirectStockQuantityError extends Error {
+  readonly existing: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>;
+
+  constructor(itemName: string, existing: Array<{ locationId: string; locationName: string; quantity: string; unit: string }>) {
+    const lines = existing.map((r) => `${r.locationName}: ${r.quantity} ${r.unit}`).join("\n");
+    super(
+      `Artikal "${itemName}" već ima zapis gotov-proizvod zalihe iz ranijeg perioda (možda zastareo ili negativan — zabeležen manjak):\n${lines}\nOva količina NIJE potvrđena kao trenutno tačna fizička zaliha i NEĆE se automatski koristiti. Ako nastavite, zaliha će biti nulirana (auditovano) i artikal će biti "nema na stanju" dok ne unesete stvarno fizičko stanje preko Zaliha. Potvrdite da želite da nastavite.`
+    );
+    this.name = "StaleDirectStockQuantityError";
+    this.existing = existing;
+  }
+}
+
+// ─── P1.7: NEGATIVE inventory (control/discrepancy detection, not a sales gate) ─
+//
+// TableCore inventory must NEVER block a normal restaurant sale because
+// RECORDED stock is insufficient — the restaurant may physically have the
+// goods while the manager simply hasn't entered today's delivery yet.
+// InsufficientStockError/InsufficientIngredientStockError (which used to be
+// thrown for exactly that case) are REMOVED — negative stock is now an
+// intentionally valid, fully-auditable system state, not an error. See
+// StockStatus below for the resulting NEGATIVE/OUT/LOW/OK precedence.
+
 // ─── P3.3: jedinstvena definicija statusa zalihe ──────────────────────────────
 
-export type StockStatus = "OUT" | "LOW" | "OK";
+export type StockStatus = "NEGATIVE" | "OUT" | "LOW" | "OK";
 
 /**
- * JEDINA autoritativna definicija OUT/LOW/OK — ISTA granica kao P1.1
- * Inventory UI (inventory-client.tsx stockStatus) i P2.3 Owner Control
+ * JEDINA autoritativna definicija NEGATIVE/OUT/LOW/OK — ISTA granica kao
+ * P1.1 Inventory UI (inventory-client.tsx stockStatus) i P2.3 Owner Control
  * Center (getStockAttention ispod, sada refaktorisano da koristi OVU
  * funkciju umesto sopstvene kopije logike — specifikacija #36). Nijedan
  * drugi sloj (React, order-service, dashboard) ne sme ponovo definisati
  * ovu granicu.
+ *
+ * P1.7: NEGATIVE (currentStock < 0) je najjači status — evidentiran manjak,
+ * NIKAD tretiran kao obično "OUT" (currentStock == 0 tačno). Ni jedan ni
+ * drugi status više ne blokira prodaju (vidi napomenu iznad) — ovo je čisto
+ * informativna/alarmna klasifikacija.
  */
 export function getInventoryStockStatus(currentStock: number, minimumStock: number | null): StockStatus {
-  if (currentStock <= 0) return "OUT";
+  if (currentStock < 0) return "NEGATIVE";
+  if (currentStock === 0) return "OUT";
   if (minimumStock != null && currentStock <= minimumStock) return "LOW";
   return "OK";
 }
@@ -67,9 +123,9 @@ export async function getStockStatusForMenuItems(
 
   const menuItems = await prisma.menuItem.findMany({
     where: { id: { in: menuItemIds }, restaurantId },
-    select: { id: true, trackStock: true, minimumStock: true },
+    select: { id: true, inventoryTrackingMethod: true, minimumStock: true },
   });
-  const trackedIds = menuItems.filter((m) => m.trackStock).map((m) => m.id);
+  const trackedIds = menuItems.filter((m) => m.inventoryTrackingMethod === "DIRECT_STOCK").map((m) => m.id);
 
   const invItems =
     trackedIds.length > 0
@@ -81,7 +137,7 @@ export async function getStockStatusForMenuItems(
   const stockByMenuItem = new Map(invItems.map((i) => [i.menuItemId, i.currentStock]));
 
   for (const mi of menuItems) {
-    if (!mi.trackStock) {
+    if (mi.inventoryTrackingMethod !== "DIRECT_STOCK") {
       result.set(mi.id, { trackingEnabled: false, currentStock: null, minimumStock: null, stockStatus: null });
       continue;
     }
@@ -103,6 +159,14 @@ export async function getStockStatusForMenuItems(
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
+/**
+ * `menuItem.hasRecipe` je DODATO (P1.3) uz postojeći `trackStock` — UI treba
+ * da tretira stavku kao "efektivno praćenu" (Aktivno/OUT/LOW prikaz) samo
+ * kad je `trackStock && !hasRecipe` (isti obrazac kao double-deduction
+ * odbrana u validateAndDecrementInventoryInTx/assertStockAvailable ispod).
+ * Ni ovo ni ijedna druga funkcija u ovom fajlu NIKAD ne briše InventoryItem/
+ * InventoryMovement redove — istorija ostaje potpuno dostupna zauvek.
+ */
 export async function listInventory(ctx: AuthContext, locationId?: string) {
   requirePermission(ctx, "inventory.view");
   if (locationId) requireLocationAccess(ctx, locationId);
@@ -110,16 +174,26 @@ export async function listInventory(ctx: AuthContext, locationId?: string) {
     restaurantId: ctx.restaurantId,
     locationId: locationId ?? { in: ctx.locationIds },
   };
-  return prisma.inventoryItem.findMany({
+  const items = await prisma.inventoryItem.findMany({
     where,
     include: {
       menuItem: {
-        select: { id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true },
+        select: {
+          id: true, name: true, slug: true, unit: true, quantity: true, isActive: true, minimumStock: true, trackStock: true, categoryId: true,
+          inventoryTrackingMethod: true,
+          inventoryCategoryId: true,
+          inventoryCategory: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+        },
       },
       location: { select: { id: true, name: true } },
     },
     orderBy: [{ location: { name: "asc" } }, { menuItem: { name: "asc" } }],
   });
+
+  return items.map((item) => ({
+    ...item,
+    menuItem: { ...item.menuItem, hasRecipe: item.menuItem.inventoryTrackingMethod === "RECIPE" },
+  }));
 }
 
 export interface StockAttentionItem {
@@ -128,10 +202,11 @@ export interface StockAttentionItem {
   currentStock: string;
   minimumStock: number | null;
   unit: string;
-  status: "out" | "low";
+  status: "negative" | "out" | "low";
 }
 
 export interface StockAttentionSummary {
+  negativeStockCount: number;
   outOfStockCount: number;
   lowStockCount: number;
   worstItems: StockAttentionItem[];
@@ -142,37 +217,43 @@ const WORST_ITEMS_LIMIT = 5;
 /**
  * P2.3 Owner Control Center — kompaktan pregled zaliha koje zahtevaju pažnju.
  * NAMERNO ponovo koristi listInventory (ISTA lista koju vidi Zalihe stranica)
- * i ISTU stockStatus definiciju kao inventory-client.tsx (P1.1: OUT kad je
- * currentStock <= 0; LOW kad je currentStock > 0 i <= minimumStock) — ne
- * izmišlja se druga granica za Dashboard (specifikacija P2.3 #11). Vraća
- * SAMO brojeve + najgorih 5 stavki, ne kompletnu istoriju zaliha (#10/#26).
+ * i ISTU stockStatus definiciju kao inventory-client.tsx — ne izmišlja se
+ * druga granica za Dashboard (specifikacija P2.3 #11). Vraća SAMO brojeve +
+ * najgorih 5 stavki, ne kompletnu istoriju zaliha (#10/#26).
+ *
+ * P1.7: NEGATIVE (currentStock < 0) je NAJJAČI status — evidentiran manjak,
+ * prikazuje se PRE običnog OUT-a (currentStock == 0) u worstItems, i ima
+ * sopstveni brojač (negativeStockCount) tako da OWNER/ADMIN/MANAGER odmah
+ * vidi koliko artikala ima stvarni zabeleženi manjak, ne samo "nema na
+ * stanju". Ovo je čisto informativno — više NE blokira prodaju.
  */
 export async function getStockAttention(ctx: AuthContext, locationId: string): Promise<StockAttentionSummary> {
   const items = await listInventory(ctx, locationId === "ALL" ? undefined : locationId);
-  const tracked = items.filter((i) => i.menuItem.trackStock);
+  const tracked = items.filter((i) => i.menuItem.trackStock && !i.menuItem.hasRecipe);
 
   const classified = tracked.map((i) => {
     const current = Number(i.currentStock);
     const min = i.menuItem.minimumStock != null ? Number(i.menuItem.minimumStock) : null;
-    const status = getInventoryStockStatus(current, min).toLowerCase() as "out" | "low" | "ok";
+    const status = getInventoryStockStatus(current, min).toLowerCase() as "negative" | "out" | "low" | "ok";
     return { item: i, status, current, min };
   });
 
-  const outItems = classified.filter((c) => c.status === "out").sort((a, b) => a.current - b.current);
+  const negativeItems = classified.filter((c) => c.status === "negative").sort((a, b) => a.current - b.current); // najveći manjak prvo
+  const outItems = classified.filter((c) => c.status === "out");
   const lowItems = classified
     .filter((c) => c.status === "low")
     .sort((a, b) => (b.min! - b.current) - (a.min! - a.current)); // najveći deficit prvo
 
-  const worstItems: StockAttentionItem[] = [...outItems, ...lowItems].slice(0, WORST_ITEMS_LIMIT).map((c) => ({
+  const worstItems: StockAttentionItem[] = [...negativeItems, ...outItems, ...lowItems].slice(0, WORST_ITEMS_LIMIT).map((c) => ({
     id: c.item.id,
     name: c.item.menuItem.name,
     currentStock: c.item.currentStock.toString(),
     minimumStock: c.min,
     unit: c.item.unit,
-    status: c.status as "out" | "low",
+    status: c.status as "negative" | "out" | "low",
   }));
 
-  return { outOfStockCount: outItems.length, lowStockCount: lowItems.length, worstItems };
+  return { negativeStockCount: negativeItems.length, outOfStockCount: outItems.length, lowStockCount: lowItems.length, worstItems };
 }
 
 export async function getInventoryItem(ctx: AuthContext, id: string) {
@@ -180,7 +261,7 @@ export async function getInventoryItem(ctx: AuthContext, id: string) {
   const item = await prisma.inventoryItem.findFirst({
     where: { id, restaurantId: ctx.restaurantId },
     include: {
-      menuItem: { select: { id: true, name: true, slug: true, unit: true, quantity: true, minimumStock: true, trackStock: true } },
+      menuItem: { select: { id: true, name: true, slug: true, unit: true, quantity: true, minimumStock: true, trackStock: true, inventoryTrackingMethod: true } },
       location: { select: { id: true, name: true } },
     },
   });
@@ -231,6 +312,11 @@ export async function initializeTracking(
     where: { id: input.menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
+  if (menuItem.inventoryTrackingMethod === "RECIPE") {
+    throw new Error(
+      `Artikal "${menuItem.name}" ima konfigurisan normativ (receptura od sirovina) — promenite metodu praćenja zaliha na "Gotov proizvod" pre inicijalizacije ove zalihe.`
+    );
+  }
 
   const location = await prisma.location.findFirst({
     where: { id: input.locationId, restaurantId: ctx.restaurantId },
@@ -246,8 +332,21 @@ export async function initializeTracking(
     const existing = await tx.inventoryItem.findUnique({
       where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: input.menuItemId } },
     });
+    // Reconcile to the ENTERED value even when a row already exists — the
+    // admin explicitly typed this number in the "inicijalizacija" form, it
+    // must never be silently discarded (that would let a stale/frozen
+    // number from a past DIRECT_STOCK period keep being treated as current
+    // physical reality, exactly what the audit forbids). Same reconcile
+    // pattern (before/after + auditable movement) as bulkSetOpeningStock.
+    const before = existing ? Number(existing.currentStock) : 0;
+    const after = input.initialStock;
+    const delta = after - before;
+
     const item = existing
-      ? await tx.inventoryItem.update({ where: { id: existing.id }, data: { unit } })
+      ? await tx.inventoryItem.update({
+          where: { id: existing.id },
+          data: delta !== 0 ? { unit, currentStock: after } : { unit },
+        })
       : await tx.inventoryItem.create({
           data: {
         restaurantId: ctx.restaurantId,
@@ -258,26 +357,26 @@ export async function initializeTracking(
           },
         });
 
-    if (!existing && input.initialStock > 0) {
+    if (delta !== 0) {
       await tx.inventoryMovement.create({
         data: {
           restaurantId: ctx.restaurantId,
           locationId: input.locationId,
           menuItemId: input.menuItemId,
           inventoryItemId: item.id,
-          type: "INITIAL",
-          quantityDelta: input.initialStock,
-          quantityBefore: 0,
-          quantityAfter: input.initialStock,
+          type: existing ? "OPENING_STOCK" : "INITIAL",
+          quantityDelta: delta,
+          quantityBefore: before,
+          quantityAfter: after,
           employeeId: ctx.employeeId,
-          reason: "Inicijalizacija praćenja zaliha",
+          reason: existing ? "Ponovna inicijalizacija/korekcija zalihe pri (re)aktivaciji praćenja" : "Inicijalizacija praćenja zaliha",
         },
       });
     }
 
     await tx.menuItem.update({
       where: { id: input.menuItemId },
-      data: { trackStock: true },
+      data: { trackStock: true, inventoryTrackingMethod: "DIRECT_STOCK" },
     });
 
     return item;
@@ -293,29 +392,166 @@ export async function initializeTracking(
   return invItem;
 }
 
-export async function setTrackingEnabled(ctx: AuthContext, menuItemId: string, enabled: boolean) {
+/**
+ * Legacy toggle (P1.1) — zadržan zbog postojećeg Zalihe UI checkbox-a i API
+ * rute. Od P1.6 samo tanak omotač oko setInventoryTrackingMethod (DIRECT_STOCK
+ * <-> NO_TRACKING), tako da postoji TAČNO JEDNA autoritativna implementacija
+ * prelaska metode — ne dve paralelne.
+ */
+export async function setTrackingEnabled(
+  ctx: AuthContext,
+  menuItemId: string,
+  enabled: boolean,
+  options?: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean }
+) {
+  return setInventoryTrackingMethod(ctx, menuItemId, enabled ? "DIRECT_STOCK" : "NO_TRACKING", options);
+}
+
+/**
+ * P1.6: JEDINA autoritativna funkcija za promenu MenuItem.inventoryTrackingMethod.
+ * Nikad ne briše InventoryItem/InventoryMovement/MenuItemIngredient/
+ * IngredientMovement — ni istoriju, ni tekuće stanje. Nikad ne izmišlja
+ * količinu (ne kreira InventoryItem/recepturu pri prelasku NA DIRECT_STOCK/
+ * RECIPE — to ostaje eksplicitna, posebna akcija: initializeTracking odn.
+ * addRecipeLine).
+ *
+ * Bezbednosno pravilo (jedino koje ova funkcija primenjuje): prelazak SA
+ * DIRECT_STOCK na bilo šta drugo dok InventoryItem još ima currentStock > 0
+ * na BILO KOJOJ lokaciji baca DirectStockStillPresentError osim ako je
+ * `confirmSwitchAwayFromDirectStock: true` eksplicitno prosleđeno (UI ovo
+ * koristi za potvrdni dijalog). Nijedan drugi pravac prelaska (RECIPE ->
+ * bilo šta, NO_TRACKING -> bilo šta, bilo šta -> RECIPE/NO_TRACKING) nema
+ * analognu proveru — sirovinsko stanje (IngredientStock) je DELJENO preko
+ * više artikala, pa ne pripada pojedinačnom MenuItem-u na način koji bi
+ * "upozorenje o gubitku" imalo smisla.
+ */
+export async function setInventoryTrackingMethod(
+  ctx: AuthContext,
+  menuItemId: string,
+  method: InventoryTrackingMethod,
+  options?: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean }
+) {
   requirePermission(ctx, "inventory.manage");
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
-  await prisma.menuItem.update({ where: { id: menuItemId }, data: { trackStock: enabled } });
+
+  const previous = menuItem.inventoryTrackingMethod as InventoryTrackingMethod;
+  if (previous === method) return menuItem; // no-op, ništa se ne menja niti audituje
+
+  if (previous === "DIRECT_STOCK" && !options?.confirmSwitchAwayFromDirectStock) {
+    const invItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: ctx.restaurantId, menuItemId, currentStock: { not: 0 } },
+      include: { location: { select: { id: true, name: true } } },
+    });
+    if (invItems.length > 0) {
+      throw new DirectStockStillPresentError(
+        menuItem.name,
+        invItems.map((i) => ({
+          locationId: i.locationId,
+          locationName: i.location.name,
+          quantity: i.currentStock.toString(),
+          unit: i.unit,
+        }))
+      );
+    }
+  }
+
+  // §19: entering DIRECT_STOCK (from ANY previous method) while an existing
+  // InventoryItem row already carries a non-zero quantity — positive OR
+  // negative (P1.7: a recorded deficit is just as much "not verified as
+  // current physical reality" as a recorded surplus) — that number was
+  // frozen from whenever this item last used finished-goods tracking and is
+  // never auto-trusted again.
+  let staleItems: Array<{ id: string; locationId: string; location: { id: string; name: string }; currentStock: Prisma.Decimal; unit: string }> = [];
+  if (method === "DIRECT_STOCK") {
+    staleItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: ctx.restaurantId, menuItemId, currentStock: { not: 0 } },
+      include: { location: { select: { id: true, name: true } } },
+    });
+    if (staleItems.length > 0 && !options?.confirmReactivateDirectStock) {
+      throw new StaleDirectStockQuantityError(
+        menuItem.name,
+        staleItems.map((i) => ({
+          locationId: i.locationId,
+          locationName: i.location.name,
+          quantity: i.currentStock.toString(),
+          unit: i.unit,
+        }))
+      );
+    }
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.menuItem.update({
+      where: { id: menuItemId },
+      data: { inventoryTrackingMethod: method, trackStock: method === "DIRECT_STOCK" },
+    });
+
+    // Confirmed reactivation with a stale nonzero row: never let that old
+    // number go straight back to being sellable — zero it out (audited),
+    // so the item is DIRECT_STOCK but OUT until the manager explicitly
+    // re-enters the REAL physical count via Zalihe (initializeTracking/
+    // receiveStock). This is a deliberate, auditable WRITE-OFF-style
+    // reconciliation, never a silent mutation.
+    for (const stale of staleItems) {
+      const before = Number(stale.currentStock);
+      await tx.inventoryItem.update({ where: { id: stale.id }, data: { currentStock: 0 } });
+      await tx.inventoryMovement.create({
+        data: {
+          restaurantId: ctx.restaurantId,
+          locationId: stale.locationId,
+          menuItemId,
+          inventoryItemId: stale.id,
+          type: "ADJUSTMENT",
+          quantityDelta: -before,
+          quantityBefore: before,
+          quantityAfter: 0,
+          employeeId: ctx.employeeId,
+          reason: "Nulirano pri ponovnoj aktivaciji direktnog praćenja zaliha — potrebna nova fizička provera pre prodaje",
+        },
+      });
+    }
+
+    return result;
+  });
+
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
     entityId: menuItemId,
-    action: enabled ? "inventory.tracking_enabled" : "inventory.tracking_disabled",
-    newValue: { trackStock: enabled },
+    action: "menu_item.inventory_tracking_method_changed",
+    previousValue: { inventoryTrackingMethod: previous },
+    newValue: { inventoryTrackingMethod: method },
   });
+
+  return updated;
 }
 
-export async function setMinimumStock(ctx: AuthContext, menuItemId: string, minimumStock: number) {
+/**
+ * `minimumStock: null` NAMERNO znači "prag nije podešen" (isključuje LOW
+ * status u getInventoryStockStatus, nikad se ne tretira kao 0) — brisanje
+ * praga je legitimna, eksplicitna operacija, ne slučajno stanje. Menja
+ * ISKLJUČIVO MenuItem.minimumStock: nema InventoryMovement, ne dira
+ * currentStock/price/isActive/isAvailable niti bilo šta drugo.
+ */
+export async function setMinimumStock(ctx: AuthContext, menuItemId: string, minimumStock: number | null) {
   requirePermission(ctx, "inventory.manage");
-  if (minimumStock < 0) throw new Error("Minimalna zaliha ne može biti negativna");
+  if (minimumStock != null && minimumStock < 0) throw new Error("Minimalna zaliha ne može biti negativna");
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: menuItemId, ...scopeToRestaurant(ctx) },
   });
   if (!menuItem) throw new Error("Artikal nije pronađen");
+
   await prisma.menuItem.update({ where: { id: menuItemId }, data: { minimumStock } });
+
+  await recordAuditEntry(ctx, {
+    entityType: "MenuItem",
+    entityId: menuItemId,
+    action: "inventory.minimum_stock_changed",
+    previousValue: { minimumStock: menuItem.minimumStock != null ? Number(menuItem.minimumStock) : null },
+    newValue: { minimumStock },
+  });
 }
 
 // ─── Mutations ────────────────────────────────────────────────────────────────
@@ -391,19 +627,29 @@ export async function writeOffStock(
 // ─── Transactional sale decrement (called from billing inside $transaction) ───
 
 /**
- * Atomically validates and decrements stock for all tracked items in a sale.
- * Must be called INSIDE an existing prisma.$transaction so the entire
- * payment + inventory change is a single atomic unit.
+ * Atomically decrements stock for all DIRECT_STOCK items in a sale. Must be
+ * called INSIDE an existing prisma.$transaction so the entire payment +
+ * inventory change is a single atomic unit.
  *
- * Throws InsufficientStockError if any tracked item lacks sufficient stock.
- * The caller's transaction will roll back on error — payment is never persisted.
+ * P1.7: NEVER blocks/throws for insufficient (or missing) recorded stock —
+ * "TableCore inventory must not block a normal sale because recorded stock
+ * is insufficient" is now a core business rule (the restaurant may
+ * physically have the goods; the record is just behind). A menuItemId with
+ * no InventoryItem row yet at this location is atomically upserted into
+ * existence starting from an implicit 0 (never "unlimited", never a block)
+ * — see audit §12's DIRECT_STOCK-symmetric case. The only remaining failure
+ * mode is a genuine database/system error, which still rolls back the
+ * whole payment transaction exactly as before.
  *
  * Idempotent: if a SALE movement for paymentId+menuItemId already exists,
  * that item is skipped (safe for payment retries).
  *
- * Concurrency: uses an atomic conditional UPDATE (WHERE currentStock >= qty)
- * so two concurrent transactions for the same item serialize correctly via
- * PostgreSQL's row-level locking — the second sees the post-commit stock.
+ * Concurrency: `tx.inventoryItem.upsert` compiles to a single atomic
+ * `INSERT ... ON CONFLICT (locationId, menuItemId) DO UPDATE` on
+ * PostgreSQL — two concurrent transactions for the same (even
+ * not-yet-existing) row serialize correctly via row-level locking, so both
+ * legitimate concurrent sales succeed and are reflected exactly once each
+ * (no lost update), the final stock can legitimately go negative.
  */
 export async function validateAndDecrementInventoryInTx(
   tx: Prisma.TransactionClient,
@@ -424,86 +670,56 @@ export async function validateAndDecrementInventoryInTx(
 
   const menuItemIds = [...byItem.keys()];
 
+  // P1.6: inventoryTrackingMethod je JEDINI gate — struktuurno garantuje da
+  // istovremeno nikad ne postoji i DIRECT_STOCK i RECIPE odbitak za isti
+  // artikal (jedna kolona ne može imati dve vrednosti). RECIPE artikli su
+  // isključivi domen validateAndDecrementIngredientsInTx-a (poziva se
+  // odvojeno, u ISTOJ transakciji).
   const trackedMenuItems = await tx.menuItem.findMany({
     where: {
       id: { in: menuItemIds },
       restaurantId: input.restaurantId,
-      trackStock: true,
+      inventoryTrackingMethod: "DIRECT_STOCK",
     },
-    select: { id: true, name: true },
+    select: { id: true, unit: true },
   });
   if (trackedMenuItems.length === 0) return;
 
-  const invItems = await tx.inventoryItem.findMany({
-    where: {
-      restaurantId: input.restaurantId,
-      locationId: input.locationId,
-      menuItemId: { in: trackedMenuItems.map((item) => item.id) },
-    },
-    select: {
-      id: true,
-      menuItemId: true,
-      currentStock: true,
-      menuItem: { select: { name: true } },
-    },
-  });
-
-  const inventoryByMenuItem = new Map(invItems.map((item) => [item.menuItemId, item]));
-  const missing = trackedMenuItems.filter((item) => !inventoryByMenuItem.has(item.id));
-  if (missing.length > 0) {
-    throw new InsufficientStockError(
-      missing.map((item) => ({
-        name: item.name,
-        available: 0,
-        required: byItem.get(item.id) ?? 0,
-      }))
-    );
-  }
-
-  for (const invItem of invItems) {
-    const qty = byItem.get(invItem.menuItemId) ?? 0;
+  for (const menuItem of trackedMenuItems) {
+    const qty = byItem.get(menuItem.id) ?? 0;
     if (qty === 0) continue;
 
     // Idempotency: if a SALE movement for this payment+item already exists,
     // this is a payment retry — do not decrement again.
-    const existing = await tx.inventoryMovement.findUnique({
-      where: { paymentId_menuItemId: { paymentId: input.paymentId, menuItemId: invItem.menuItemId } },
+    const existingMovement = await tx.inventoryMovement.findUnique({
+      where: { paymentId_menuItemId: { paymentId: input.paymentId, menuItemId: menuItem.id } },
     });
-    if (existing) continue;
+    if (existingMovement) continue;
 
-    // Atomic conditional decrement. READ COMMITTED isolation means the WHERE
-    // clause sees the latest committed value, so concurrent transactions on the
-    // same row serialize correctly: if A decrements first and B then evaluates
-    // the WHERE, B sees A's committed result and fails if stock is insufficient.
-    type Row = { currentStock: string };
-    const rows = await tx.$queryRaw<Row[]>`
-      UPDATE inventory_items
-      SET "currentStock" = "currentStock" - ${qty}::numeric
-      WHERE id = ${invItem.id}
-        AND "currentStock" >= ${qty}::numeric
-      RETURNING "currentStock"
-    `;
+    const invItem = await tx.inventoryItem.upsert({
+      where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: menuItem.id } },
+      create: {
+        restaurantId: input.restaurantId,
+        locationId: input.locationId,
+        menuItemId: menuItem.id,
+        currentStock: -qty,
+        unit: menuItem.unit ?? "kom",
+      },
+      update: { currentStock: { decrement: qty } },
+    });
 
-    if (rows.length === 0) {
-      const current = await tx.inventoryItem.findUnique({
-        where: { id: invItem.id },
-        select: { currentStock: true },
-      });
-      throw new InsufficientStockError([{
-        name: invItem.menuItem.name,
-        available: Number(current?.currentStock ?? 0),
-        required: qty,
-      }]);
-    }
-
-    const afterStock = Number(rows[0].currentStock);
+    // Derived, not read separately — mathematically correct regardless of
+    // whether the row was just created or already existed, and immune to
+    // any concurrent modification between an earlier SELECT and this
+    // upsert (there isn't one — this IS the atomic operation).
+    const afterStock = Number(invItem.currentStock);
     const beforeStock = afterStock + qty;
 
     await tx.inventoryMovement.create({
       data: {
         restaurantId: input.restaurantId,
         locationId: input.locationId,
-        menuItemId: invItem.menuItemId,
+        menuItemId: menuItem.id,
         inventoryItemId: invItem.id,
         type: "SALE",
         quantityDelta: -qty,
@@ -515,64 +731,6 @@ export async function validateAndDecrementInventoryInTx(
       },
     });
   }
-}
-
-// ─── P3.3: read-only fresh-availability validation (add-item/submit) ─────────
-
-export interface StockRequirement {
-  menuItemId: string;
-  name: string;
-  quantity: number;
-}
-
-/**
- * Read-only "da li je ovo trenutno dostupno" provera — NIKAD ne menja
- * currentStock (to ostaje isključivo posao validateAndDecrementInventoryInTx
- * pri Payment-u, koji ostaje krajnji autoritet — specifikacija #12/#22).
- * Koristi se iz order-service.ts (addItem/updateItem — pojedinačna stavka;
- * submitOrder — ceo agregirani zahtev porudžbine).
- *
- * Agregira po menuItemId PRE provere (specifikacija #51/#63 — kritično: dve
- * linije istog artikla sa različitim P3.2 modifikatorima moraju se sabrati,
- * ne proveravati nezavisno, inače bi "Burger+sir ×2" i "Burger+slanina ×2"
- * sa zalihom 3 obe prošle iako je stvarno potrebno 4). Baca ISTU
- * InsufficientStockError klasu kao Payment (specifikacija #47), sa SVIM
- * nedovoljnim artiklima odjednom (specifikacija #48), u DVA upita ukupno
- * bez obzira na broj linija (specifikacija #50).
- */
-export async function assertStockAvailable(
-  db: Prisma.TransactionClient | typeof prisma,
-  input: { restaurantId: string; locationId: string; requirements: StockRequirement[] }
-): Promise<void> {
-  const byItem = new Map<string, { name: string; quantity: number }>();
-  for (const r of input.requirements) {
-    const existing = byItem.get(r.menuItemId);
-    byItem.set(r.menuItemId, { name: r.name, quantity: (existing?.quantity ?? 0) + r.quantity });
-  }
-  if (byItem.size === 0) return;
-
-  const menuItemIds = [...byItem.keys()];
-  const trackedMenuItems = await db.menuItem.findMany({
-    where: { id: { in: menuItemIds }, restaurantId: input.restaurantId, trackStock: true },
-    select: { id: true, name: true },
-  });
-  if (trackedMenuItems.length === 0) return;
-
-  const invItems = await db.inventoryItem.findMany({
-    where: { restaurantId: input.restaurantId, locationId: input.locationId, menuItemId: { in: trackedMenuItems.map((i) => i.id) } },
-    select: { menuItemId: true, currentStock: true },
-  });
-  const stockByMenuItem = new Map(invItems.map((i) => [i.menuItemId, Number(i.currentStock)]));
-
-  const insufficient: Array<{ name: string; available: number; required: number }> = [];
-  for (const mi of trackedMenuItems) {
-    const required = byItem.get(mi.id)!.quantity;
-    const available = stockByMenuItem.get(mi.id) ?? 0; // praćeno ali bez InventoryItem reda na ovoj lokaciji = OUT
-    if (available < required) {
-      insufficient.push({ name: mi.name, available, required });
-    }
-  }
-  if (insufficient.length > 0) throw new InsufficientStockError(insufficient);
 }
 
 // ─── Bulk opening-stock initialization / reset (go-live workflow) ─────────────
@@ -623,12 +781,28 @@ export async function bulkSetOpeningStock(
   const menuItemIds = input.lines.map((l) => l.menuItemId);
   const menuItems = await prisma.menuItem.findMany({
     where: { id: { in: menuItemIds }, restaurantId: ctx.restaurantId },
-    select: { id: true, name: true, unit: true },
+    select: { id: true, name: true, unit: true, inventoryTrackingMethod: true },
   });
   const menuItemById = new Map(menuItems.map((m) => [m.id, m]));
   const missing = menuItemIds.filter((id) => !menuItemById.has(id));
   if (missing.length > 0) {
     throw new Error(`Artikli ne pripadaju ovom restoranu ili ne postoje: ${missing.join(", ")}`);
+  }
+
+  // P1.6: this function force-sets inventoryTrackingMethod=DIRECT_STOCK on
+  // every line it touches (see below) — reject the WHOLE batch outright if
+  // any line targets a RECIPE-governed item, rather than silently
+  // reactivating the exact dual-stock state addRecipeLine's atomic
+  // transition exists to prevent. Same "reject the whole batch" precedent
+  // as the "foreign menu item" check above — the client-side candidate
+  // lists (InitModal/OpeningStockModal) already exclude these, so this is a
+  // server-side backstop, not the primary UX.
+  const recipeGoverned = menuItems.filter((m) => m.inventoryTrackingMethod === "RECIPE").map((m) => m.id);
+  if (recipeGoverned.length > 0) {
+    const names = recipeGoverned.map((id) => menuItemById.get(id)?.name ?? id).join(", ");
+    throw new Error(
+      `Sledeći artikli imaju konfigurisan normativ i ne mogu se inicijalizovati kao gotov-artikal zaliha: ${names}`
+    );
   }
 
   const reason = input.reason?.trim() || "Postavljanje početnog stanja zaliha";
@@ -684,7 +858,7 @@ export async function bulkSetOpeningStock(
           movementId = mov.id;
         }
 
-        await tx.menuItem.update({ where: { id: line.menuItemId }, data: { trackStock: true } });
+        await tx.menuItem.update({ where: { id: line.menuItemId }, data: { trackStock: true, inventoryTrackingMethod: "DIRECT_STOCK" } });
 
         out.push({ menuItemId: line.menuItemId, menuItemName: menuItem.name, before, after, movementId });
       }
@@ -736,9 +910,24 @@ export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId
     return { itemsAffected: 0, itemsUnchanged: 0, results: [] };
   }
 
+  // P1.6: never reconcile a RECIPE-governed item's frozen historical stock —
+  // it's no longer sellable finished-goods, only a preserved historical
+  // record. "Postavi sve na 0" must skip it entirely, not silently zero it.
+  const methodByMenuItem = await prisma.menuItem.findMany({
+    where: { id: { in: tracked.map((t) => t.menuItemId) } },
+    select: { id: true, inventoryTrackingMethod: true },
+  });
+  const recipeMenuItemIds = new Set(
+    methodByMenuItem.filter((m) => m.inventoryTrackingMethod === "RECIPE").map((m) => m.id)
+  );
+  const directStockOnly = tracked.filter((t) => !recipeMenuItemIds.has(t.menuItemId));
+  if (directStockOnly.length === 0) {
+    return { itemsAffected: 0, itemsUnchanged: 0, results: [] };
+  }
+
   return bulkSetOpeningStock(ctx, {
     locationId: input.locationId,
-    lines: tracked.map((t) => ({ menuItemId: t.menuItemId, quantity: 0 })),
+    lines: directStockOnly.map((t) => ({ menuItemId: t.menuItemId, quantity: 0 })),
     reason: "Resetovanje zaliha na 0 pre unosa stvarnog početnog stanja",
   });
 }
@@ -747,8 +936,8 @@ export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId
 
 /**
  * Standalone version of sale decrement — starts its own transaction.
- * Kept for backward compatibility and non-billing use cases.
- * Throws InsufficientStockError on insufficient stock.
+ * Kept for backward compatibility and non-billing use cases. P1.7: never
+ * throws for insufficient/missing stock — see validateAndDecrementInventoryInTx.
  */
 export async function decrementOnSale(input: {
   paymentId: string;
@@ -764,6 +953,20 @@ export async function decrementOnSale(input: {
 
 // ─── Internal helper ──────────────────────────────────────────────────────────
 
+/**
+ * P1.7: this manual-operation guard is DELIBERATELY NOT the same rule as
+ * SALE deduction (validateAndDecrementInventoryInTx above, which never
+ * blocks). A manual RECEIPT (delta >= 0) always succeeds regardless of
+ * starting balance — even from an already-negative stock (audit §18: "must
+ * continue to work when current stock is negative"; §10's reconciliation
+ * example, e.g. -0.050 + RECEIPT 2.000 = 1.950, requires this). A manual
+ * ADJUSTMENT/WRITE_OFF (delta < 0) still cannot push stock BELOW its
+ * current value into more negative territory — that guardrail against a
+ * fat-finger typo is a deliberately separate, narrower concern than "can a
+ * sale be blocked", and audit §11 ("never auto-correct negative stock")
+ * only forbids the SYSTEM inventing a correction, not a human's own
+ * intentional, reasoned adjustment being sanity-checked.
+ */
 async function _applyDelta(
   ctx: AuthContext,
   inventoryItemId: string,

@@ -32,6 +32,11 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: "#0A1931",
+  // "cover" nateruje stranicu da se renderuje ispod notch-a/home-indicator
+  // trake — bez ovoga env(safe-area-inset-*) ostaje 0 na iPhone uređajima
+  // sa notch-om, čak i kad je korišćen u CSS-u (npr. order-client.tsx
+  // bottom padding). Nema uticaja na Android/desktop.
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

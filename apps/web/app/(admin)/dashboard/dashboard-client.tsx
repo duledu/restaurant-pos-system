@@ -39,8 +39,8 @@ interface RankedItem { name: string; categoryName: string | null; totalQuantity:
 interface ItemsResult { currency: string; topItems: RankedItem[]; lowItems: RankedItem[]; topByQuantity: RankedItem[]; zeroSaleItems: { id: string; name: string; categoryName: string | null }[]; basedOnCurrentMenu: true; }
 interface CategoryRow { categoryName: string; quantity: number; revenue: string; percentOfTotal: number; averageItemRevenue: string; }
 interface CategoriesResult { currency: string; categories: CategoryRow[]; isLiveCategoryName: true; }
-interface EmployeeRow { employeeId: string; employeeName: string; role: string; completedOrders: number; sales: string; cashHandled: string; cardHandled: string; averageOrderValue: string; discountTotal: string; voidCount: number; voidValue: string; shiftsClosedCount: number; cashDifference: string | null; }
-interface EmployeeNormalizedRow { employeeId: string; employeeName: string; role: string; salesPerHour: string | null; ordersPerHour: string | null; voidPercent: number | null; discountPercent: number | null; approximateHours: string | null; }
+interface EmployeeRow { employeeId: string; employeeName: string; role: string; completedPayments: number; sales: string; cashHandled: string; cardHandled: string; averagePaymentValue: string; discountTotal: string; voidCount: number; voidValue: string; shiftsClosedCount: number; cashDifference: string | null; }
+interface EmployeeNormalizedRow { employeeId: string; employeeName: string; role: string; salesPerHour: string | null; paymentsPerHour: string | null; voidPercent: number | null; discountPercent: number | null; approximateHours: string | null; }
 interface EmployeeNormalizedResult { currency: string; rows: EmployeeNormalizedRow[]; approximationNote: string; }
 interface VoidIntelligence {
   currency: string; totalVoidValue: string; voidCount: number; voidPercentOfSales: number | null;
@@ -51,11 +51,11 @@ interface VoidIntelligence {
 }
 interface DiscountIntelligence {
   currency: string; totalDiscountValue: string; discountPercentOfGross: number | null;
-  byEmployee: { employeeId: string; employeeName: string; discountTotal: string; orderCount: number }[];
+  byEmployee: { employeeId: string; employeeName: string; discountTotal: string; paymentCount: number }[];
   byReason: { reason: string; count: number; value: string }[];
   highestDiscountOrders: { orderId: string; discountAmount: string; discountReason: string | null; tableLabel: string; completedAt: string }[];
 }
-interface PaymentBreakdown { currency: string; totalSales: string; methods: { method: "CASH" | "CARD"; amount: string; percent: number; orderCount: number }[]; }
+interface PaymentBreakdown { currency: string; totalSales: string; methods: { method: "CASH" | "CARD"; amount: string; percent: number; paymentCount: number }[]; }
 interface ShiftAnalytics {
   currency: string; shiftCount: number; totalSales: string; averageSalesPerShift: string;
   totalCashExpected: string; totalCashCounted: string; averageCashVariance: string;
@@ -90,8 +90,10 @@ interface AntiFraudOverview {
   cashDiscrepancyShiftsCount: number;
   inventoryCorrectionsCount: number;
 }
-interface StockAttentionItem { id: string; name: string; currentStock: string; minimumStock: number | null; unit: string; status: "out" | "low" }
-interface StockAttentionSummary { outOfStockCount: number; lowStockCount: number; worstItems: StockAttentionItem[] }
+interface StockAttentionItem { id: string; name: string; currentStock: string; minimumStock: number | null; unit: string; status: "negative" | "out" | "low" }
+interface StockAttentionSummary { negativeStockCount: number; outOfStockCount: number; lowStockCount: number; worstItems: StockAttentionItem[] }
+interface IngredientStockAttentionItem { id: string; ingredientName: string; currentStock: string; unit: string; locationId: string; locationName: string }
+interface IngredientStockAttentionSummary { negativeStockCount: number; worstItems: IngredientStockAttentionItem[] }
 
 interface DashboardData {
   kpi: KpiComparison;
@@ -112,9 +114,10 @@ interface DashboardData {
   signals: AntiFraudSignal[];
   antifraud: AntiFraudOverview;
   stock: StockAttentionSummary;
+  ingredientStock: IngredientStockAttentionSummary;
 }
 
-type EmployeeSortKey = "sales" | "orders" | "avgOrder";
+type EmployeeSortKey = "sales" | "payments" | "avgPayment";
 type ItemLimit = 5 | 10 | 20;
 
 const SEVERITY_ORDER: Record<Severity, number> = { HIGH: 0, WARNING: 1, INFO: 2 };
@@ -150,7 +153,7 @@ export function DashboardClient() {
       const [
         kpi, trend, hourly, weekdaysRes, stations, items, categories, employees,
         employeesNormalized, voids, discounts, payments, shifts, insightsRes,
-        statusRes, signalsRes, antifraudRes, stockRes,
+        statusRes, signalsRes, antifraudRes, stockRes, ingredientStockRes,
       ] = await Promise.all([
         apiFetch(`/api/admin/analytics/kpi?${query}`),
         apiFetch(`/api/admin/analytics/trend?${query}`),
@@ -173,12 +176,13 @@ export function DashboardClient() {
         apiFetch(`/api/admin/antifraud/signals?${query}`),
         apiFetch(`/api/admin/antifraud/overview?${query}`),
         apiFetch(`/api/admin/inventory/attention?locationId=${filters.locationId}`),
+        apiFetch(`/api/admin/ingredients/attention?locationId=${filters.locationId}`),
       ]);
       setData({
         kpi, trend, hourly, weekdays: weekdaysRes.weekdays, stations, items, categories,
         employees: employees.rows, employeesNormalized, voids, discounts, payments, shifts,
         insights: insightsRes.insights, status: statusRes, signals: signalsRes.signals,
-        antifraud: antifraudRes, stock: stockRes,
+        antifraud: antifraudRes, stock: stockRes, ingredientStock: ingredientStockRes,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju kontrolne table");
@@ -209,8 +213,8 @@ export function DashboardClient() {
     if (!data) return [];
     const rows = [...data.employees];
     if (employeeSort === "sales") return rows.sort((a, b) => Number(b.sales) - Number(a.sales));
-    if (employeeSort === "orders") return rows.sort((a, b) => b.completedOrders - a.completedOrders);
-    return rows.sort((a, b) => Number(b.averageOrderValue) - Number(a.averageOrderValue));
+    if (employeeSort === "payments") return rows.sort((a, b) => b.completedPayments - a.completedPayments);
+    return rows.sort((a, b) => Number(b.averagePaymentValue) - Number(a.averagePaymentValue));
   }, [data, employeeSort]);
 
   const trendChartData: TrendChartPoint[] = useMemo(() => {
@@ -408,11 +412,15 @@ export function DashboardClient() {
             <section>
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-inkSoft">Zalihe</h2>
               <Card className="p-5">
-                {data.stock.outOfStockCount === 0 && data.stock.lowStockCount === 0 ? (
+                {data.stock.negativeStockCount === 0 && data.stock.outOfStockCount === 0 && data.stock.lowStockCount === 0 && data.ingredientStock.negativeStockCount === 0 ? (
                   <EmptyState title="Nema artikala sa niskom zalihom." compact />
                 ) : (
                   <>
-                    <div className="mb-3 grid grid-cols-2 gap-3 text-center">
+                    <div className="mb-3 grid grid-cols-3 gap-3 text-center">
+                      <div>
+                        <p className="text-lg font-bold text-danger">{data.stock.negativeStockCount}</p>
+                        <p className="text-xs text-inkSoft">negativna zaliha</p>
+                      </div>
                       <div>
                         <p className="text-lg font-bold text-danger">{data.stock.outOfStockCount}</p>
                         <p className="text-xs text-inkSoft">nema na zalihama</p>
@@ -422,19 +430,44 @@ export function DashboardClient() {
                         <p className="text-xs text-inkSoft">niska zaliha</p>
                       </div>
                     </div>
+                    {data.stock.worstItems.length > 0 && (
+                      <ul className="space-y-1.5 border-t border-line pt-3">
+                        {data.stock.worstItems.map((it) => (
+                          <li key={it.id} className="flex items-center justify-between text-xs">
+                            <span className="text-ink">{it.name}</span>
+                            <Badge tone={it.status === "negative" ? "dangerSolid" : it.status === "out" ? "danger" : "warn"}>
+                              {it.currentStock} {it.unit}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+                <Link href="/inventory" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na zalihe →</Link>
+              </Card>
+
+              <h2 className="mb-3 mt-4 text-xs font-semibold uppercase tracking-widest text-inkSoft">Sirovine — negativna zaliha</h2>
+              <Card className={data.ingredientStock.negativeStockCount > 0 ? "p-5 shadow-[inset_3px_0_0_#B91C1C]" : "p-5"}>
+                {data.ingredientStock.negativeStockCount === 0 ? (
+                  <EmptyState title="Nema sirovina sa negativnom zalihom." compact />
+                ) : (
+                  <>
+                    <p className="mb-3 text-sm text-ink">
+                      <span className="text-lg font-bold text-danger">{data.ingredientStock.negativeStockCount}</span>{" "}
+                      {data.ingredientStock.negativeStockCount === 1 ? "sirovina ima" : "sirovine imaju"} negativnu zalihu.
+                    </p>
                     <ul className="space-y-1.5 border-t border-line pt-3">
-                      {data.stock.worstItems.map((it) => (
+                      {data.ingredientStock.worstItems.map((it) => (
                         <li key={it.id} className="flex items-center justify-between text-xs">
-                          <span className="text-ink">{it.name}</span>
-                          <Badge tone={it.status === "out" ? "danger" : "warn"}>
-                            {it.currentStock} {it.unit}
-                          </Badge>
+                          <span className="text-ink">{it.ingredientName} <span className="text-inkSoft">· {it.locationName}</span></span>
+                          <Badge tone="dangerSolid">{it.currentStock} {it.unit}</Badge>
                         </li>
                       ))}
                     </ul>
                   </>
                 )}
-                <Link href="/inventory" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na zalihe →</Link>
+                <Link href="/ingredients" className="mt-3 inline-block text-xs font-medium text-gold-dark hover:underline">Idi na sirovine →</Link>
               </Card>
             </section>
           </div>
@@ -681,7 +714,7 @@ export function DashboardClient() {
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="text-xs font-semibold uppercase tracking-widest text-inkSoft">Prodaja po zaposlenom</h2>
                   <div className="no-print flex gap-1 rounded-md bg-ink/[0.04] p-1">
-                    {([["sales", "Prodaja"], ["orders", "Porudžbine"], ["avgOrder", "Prosek"]] as [EmployeeSortKey, string][]).map(([key, label]) => (
+                    {([["sales", "Prodaja"], ["payments", "Računa"], ["avgPayment", "Prosek"]] as [EmployeeSortKey, string][]).map(([key, label]) => (
                       <button
                         key={key}
                         type="button"
@@ -703,7 +736,7 @@ export function DashboardClient() {
                         <thead>
                           <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                             <th className="px-4 py-3 font-medium">Zaposleni</th>
-                            <th className="px-4 py-3 text-right font-medium">Porudžbine</th>
+                            <th className="px-4 py-3 text-right font-medium">Računa</th>
                             <th className="px-4 py-3 text-right font-medium">Prodaja</th>
                             <th className="px-4 py-3 text-right font-medium">Prosek</th>
                             <th className="px-4 py-3 text-right font-medium">Storna</th>
@@ -713,9 +746,9 @@ export function DashboardClient() {
                           {sortedEmployees.map((e) => (
                             <tr key={e.employeeId} className="border-b border-line last:border-0">
                               <td className="px-4 py-3 text-ink">{e.employeeName} <span className="text-xs text-inkSoft">— {ROLE_LABEL[e.role] ?? e.role}</span></td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.completedOrders}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.completedPayments}</td>
                               <td className="px-4 py-3 text-right tabular-nums font-medium text-ink">{formatMoney(e.sales, currency)}</td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{formatMoney(e.averageOrderValue, currency)}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{formatMoney(e.averagePaymentValue, currency)}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.voidCount > 0 ? formatMoney(e.voidValue, currency) : "—"}</td>
                             </tr>
                           ))}
@@ -734,7 +767,7 @@ export function DashboardClient() {
                           <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
                             <th className="px-4 py-3 font-medium">Zaposleni</th>
                             <th className="px-4 py-3 text-right font-medium">Prodaja/sat</th>
-                            <th className="px-4 py-3 text-right font-medium">Porudžbine/sat</th>
+                            <th className="px-4 py-3 text-right font-medium">Računa/sat</th>
                             <th className="px-4 py-3 text-right font-medium">Storno %</th>
                             <th className="px-4 py-3 text-right font-medium">Popust %</th>
                           </tr>
@@ -744,7 +777,7 @@ export function DashboardClient() {
                             <tr key={e.employeeId} className="border-b border-line last:border-0">
                               <td className="px-4 py-3 text-ink">{e.employeeName}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.salesPerHour ? formatMoney(e.salesPerHour, currency) : "—"}</td>
-                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.ordersPerHour ?? "—"}</td>
+                              <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.paymentsPerHour ?? "—"}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.voidPercent !== null ? `${e.voidPercent}%` : "—"}</td>
                               <td className="px-4 py-3 text-right tabular-nums text-inkSoft">{e.discountPercent !== null ? `${e.discountPercent}%` : "—"}</td>
                             </tr>
@@ -803,7 +836,7 @@ export function DashboardClient() {
                       {data.discounts.byEmployee.slice(0, 5).map((e) => (
                         <div key={e.employeeId} className="flex justify-between text-xs">
                           <span className="text-inkSoft">{e.employeeName}</span>
-                          <span className="font-medium text-ink">{e.orderCount}× — {formatMoney(e.discountTotal, currency)}</span>
+                          <span className="font-medium text-ink">{e.paymentCount}× — {formatMoney(e.discountTotal, currency)}</span>
                         </div>
                       ))}
                       {data.discounts.byEmployee.length === 0 && <p className="text-xs text-inkSoft">Nema popusta u periodu.</p>}
