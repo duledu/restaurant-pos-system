@@ -25,6 +25,7 @@ interface Preview {
   orderId: string;
   tableLabel: string;
   fullyPaid: boolean;
+  hasUnsentDraftItems: boolean;
   items: PreviewItem[];
   remainingSubtotal: string;
   remainingTax: string;
@@ -167,9 +168,17 @@ export function SplitBillClient({ tableId }: { tableId: string }) {
         </div>
       )}
 
+      {preview.hasUnsentDraftItems && (
+        <div className="mb-3 rounded-md bg-warn-soft px-3 py-2 text-sm font-medium text-warn">
+          Sto ima neposlate stavke — pošalji ih kuhinji/šanku pre nego što porudžbina može biti u potpunosti zatvorena.
+        </div>
+      )}
+
       {preview.items.length === 0 ? (
         <div className="rounded-md border border-line bg-white p-4 text-center text-ink/70">
-          Sve stavke su naplaćene. Porudžbina je zatvorena.
+          {preview.hasUnsentDraftItems
+            ? "Sve poslate stavke su naplaćene. Sto ostaje otvoren dok se novi krug ne pošalje i naplati."
+            : "Sve stavke su naplaćene. Porudžbina je zatvorena."}
         </div>
       ) : (
         <>

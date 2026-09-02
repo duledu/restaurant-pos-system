@@ -423,10 +423,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [items, setItems] = useState<MenuItem[]>([]);
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [submitted, setSubmitted] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
@@ -485,7 +485,6 @@ export function OrderClient({ tableId }: { tableId: string }) {
       if (!activeCategoryId && categoriesRes.categories.length > 0) {
         setActiveCategoryId(categoriesRes.categories[0].id);
       }
-      if (orderDetail.order.status !== "DRAFT") setSubmitted(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Neočekivana greška");
     } finally {
@@ -515,11 +514,15 @@ export function OrderClient({ tableId }: { tableId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.id, order?.status]);
 
-  // P3.3: dok konobar bira artikle (pre slanja), status zalihe se osvežava
-  // umereno u pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s).
+  // P3.3: dok je porudžbina OTVORENA, status zalihe se osvežava umereno u
+  // pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s). VIŠE-
+  // KRUŽNO NARUČIVANJE: NIKAD se ne gasi samo zato što je porudžbina već
+  // BAR JEDNOM poslata — konobar može dodati naredni krug u bilo kom
+  // trenutku dok je sto otvoren, pa svež meni/dostupnost i dalje mora da
+  // stiže. Gasi se SAMO kad je porudžbina zatvorena (naplaćena/otkazana).
   // Ne dira order/cart stanje, samo listu artikala menija.
   useEffect(() => {
-    if (submitted || !locationId) return;
+    if (!locationId || !order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
     const interval = setInterval(async () => {
       try {
         const itemsRes = await apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${locationId}`);
@@ -530,7 +533,8 @@ export function OrderClient({ tableId }: { tableId: string }) {
       }
     }, 15000);
     return () => clearInterval(interval);
-  }, [submitted, locationId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order?.status, locationId]);
 
   const visibleItems = useMemo(() => {
     return items.filter((item) => {
@@ -540,7 +544,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
   }, [items, activeCategoryId, search]);
 
   const total = useMemo(
-    () => order?.items.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0) ?? 0,
+    () =>
+      order?.items
+        .filter((i) => i.status === "DRAFT")
+        .reduce((sum, i) => sum + Number(i.price) * i.quantity, 0) ?? 0,
     [order]
   );
 
@@ -589,8 +596,16 @@ export function OrderClient({ tableId }: { tableId: string }) {
   async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
     if (!order) return;
     setError(null);
+    // VIŠE-KRUŽNO NARUČIVANJE: poklapanje "postoji, samo inkrementiraj"
+    // gleda ISKLJUČIVO postojeće DRAFT redove — nikad već poslatu stavku
+    // (iz ovog ili ranijeg kruga). "Još jedan Omlet" posle prvog slanja NE
+    // sme tiho povećati količinu VEĆ poslatog/spremanog reda (to bi
+    // izgledalo kao da je originalno poslato 3, ne 2, i pokvarilo KDS/audit
+    // istoriju) — mora postati NOV, zaseban DRAFT red (server updateItem
+    // ionako sad odbija izmenu ne-DRAFT stavke, ovo je isti gard na klijentu
+    // da se izbegne nepotreban round-trip koji bi svakako pao).
     const existing = order.items.find(
-      (i) => i.menuItemId === menuItemId && sameModifierSelection(i.modifiers, modifierOptionIds)
+      (i) => i.menuItemId === menuItemId && i.status === "DRAFT" && sameModifierSelection(i.modifiers, modifierOptionIds)
     );
     if (existing) {
       if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
@@ -740,7 +755,14 @@ export function OrderClient({ tableId }: { tableId: string }) {
   }
 
   async function submit() {
-    if (!order || submitting || submitted) return; // zaštita od dvostrukog klika na UI nivou
+    // VIŠE-KRUŽNO NARUČIVANJE: dozvoljeno kad god postoji BAR JEDNA nova
+    // (DRAFT) stavka — ne samo pre prvog slanja. Zaštita od dvostrukog
+    // klika ostaje (submitting), plus "nema šta da se pošalje" provera na
+    // UI nivou (server je i dalje autoritativan i bezbedno je no-op i bez
+    // ovoga, vidi submitOrder).
+    if (!order || submitting) return;
+    const hasDraftItems = order.items.some((i) => i.status === "DRAFT");
+    if (!hasDraftItems) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -748,12 +770,11 @@ export function OrderClient({ tableId }: { tableId: string }) {
         method: "POST",
         body: JSON.stringify({ idempotencyKey: idempotencyKeyRef.current }),
       });
-      // Bez ovoga `order` ostaje zamrznut na pred-slanje DRAFT snapshot
-      // (sve stavke, status), pa se poll-ovanje ispod (koje zavisi od
-      // order.status !== "DRAFT") nikad ne pokreće — konobar bi zauvek
-      // video "Nacrt" umesto stvarnog statusa kuhinje/šanka.
       setOrder(res.order);
-      setSubmitted(true);
+      // Sveža idempotencyKey za SLEDEĆI krug — ista ne sme se ponovo
+      // koristiti (server je koristi i za PrintJob dispatchKey ovog kruga,
+      // vidi order-service.ts submitOrder/print-service.ts).
+      idempotencyKeyRef.current = crypto.randomUUID();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri slanju porudžbine");
     } finally {
@@ -764,91 +785,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
   if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
   if (!order) return <div className="p-6 text-danger">{error ?? "Porudžbina nije pronađena"}</div>;
 
-  if (submitted) {
-    const allServed = order.items.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
-    return (
-      <div className="flex min-h-screen flex-col p-4">
-        <div className="mb-4 flex items-center justify-between gap-2">
-          <button onClick={() => router.push("/waiter/tables")} className="inline-flex min-h-11 shrink-0 items-center whitespace-nowrap text-sm font-medium text-gold-dark">
-            ← Stolovi
-          </button>
-          <h1 className="min-w-0 flex-1 truncate text-center text-lg font-semibold text-ink">{order.table.label}</h1>
-          <div className="flex shrink-0 items-center gap-1">
-            <QuickLockButton />
-            <LogoutButton />
-          </div>
-        </div>
-
-        <div className="mb-3 rounded-md bg-success-soft px-3 py-2 text-center text-sm font-medium text-success animate-fade-in">
-          Porudžbina poslata — prati status ispod, osvežava se automatski.
-        </div>
-        {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
-
-        <div className="space-y-2">
-          {order.items.map((item) => (
-            <div key={item.id} className="flex items-center justify-between rounded-md border border-line bg-white p-3">
-              <div>
-                <div className="font-medium text-ink">
-                  {item.quantity}× {item.name}
-                </div>
-                {item.modifiers.length > 0 && (
-                  <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
-                )}
-                {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${ITEM_STATUS_TONE[item.status]}`}>
-                  {ITEM_STATUS_LABEL[item.status]}
-                </span>
-                {canVoid && item.status !== "CANCELLED" && item.quantity > 0 && (
-                  <button onClick={() => setVoidingItem(item)} className="text-xs font-medium text-danger/70">
-                    Poništi
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {voidingItem && (
-          <VoidItemModal item={voidingItem} onCancel={() => setVoidingItem(null)} onConfirm={confirmVoid} />
-        )}
-
-        {allServed && (
-          <div className="mt-4 rounded-md bg-info-soft px-3 py-2 text-center text-sm text-info">
-            Sve stavke su servirane. Spremno za naplatu.
-          </div>
-        )}
-
-        <button
-          onClick={() => router.push(`/waiter/tables/${tableId}/bill`)}
-          className="mt-6 w-full rounded-md bg-gold py-4 text-lg font-semibold text-white transition-colors hover:bg-gold-dark"
-        >
-          Račun / Naplata
-        </button>
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <button
-            onClick={() => router.push(`/waiter/tables/${tableId}/split-bill`)}
-            className="rounded-md border-2 border-gold/60 bg-white py-3 text-sm font-semibold text-gold-dark transition-colors hover:bg-gold-soft"
-          >
-            Podeli račun
-          </button>
-          <button
-            onClick={() => router.push(`/waiter/tables/${tableId}/transfer`)}
-            className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink transition-colors hover:border-gold/50"
-          >
-            Prebaci stavke
-          </button>
-        </div>
-        <button
-          onClick={() => router.push("/waiter/tables")}
-          className="mt-3 w-full rounded-md bg-graphite py-3 text-base font-medium text-cream-100 transition-colors hover:bg-graphite-700"
-        >
-          Nazad na stolove
-        </button>
-      </div>
-    );
-  }
+  const hasEverSubmitted = order.status !== "DRAFT";
+  const sentItems = order.items.filter((i) => i.status !== "DRAFT");
+  const draftItems = order.items.filter((i) => i.status === "DRAFT");
+  const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
   return (
     <div className="flex min-h-screen flex-col bg-cream-200 pb-52">
@@ -868,7 +808,82 @@ export function OrderClient({ tableId }: { tableId: string }) {
       <div className="mx-auto w-full max-w-5xl">
         {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
 
+        {hasEverSubmitted && (
+          <div className="p-3">
+            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Poslato / U pripremi</p>
+            <div className="space-y-2 rounded-md border border-line bg-white p-3">
+              {sentItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
+                  <div>
+                    <div className="font-medium text-ink">
+                      {item.quantity}× {item.name}
+                    </div>
+                    {item.modifiers.length > 0 && (
+                      <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                    )}
+                    {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${ITEM_STATUS_TONE[item.status]}`}>
+                      {ITEM_STATUS_LABEL[item.status]}
+                    </span>
+                    {canVoid && item.status !== "CANCELLED" && item.quantity > 0 && (
+                      <button onClick={() => setVoidingItem(item)} className="text-xs font-medium text-danger/70">
+                        Poništi
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {allServed && draftItems.length === 0 && (
+              <div className="mt-3 rounded-md bg-info-soft px-3 py-2 text-center text-sm text-info">
+                Sve stavke su servirane. Spremno za naplatu.
+              </div>
+            )}
+
+            <button
+              onClick={() => router.push(`/waiter/tables/${tableId}/bill`)}
+              className="mt-3 w-full rounded-md bg-gold py-3.5 text-base font-semibold text-white transition-colors hover:bg-gold-dark"
+            >
+              Račun / Naplata
+            </button>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button
+                onClick={() => router.push(`/waiter/tables/${tableId}/split-bill`)}
+                className="rounded-md border-2 border-gold/60 bg-white py-2.5 text-sm font-semibold text-gold-dark transition-colors hover:bg-gold-soft"
+              >
+                Podeli račun
+              </button>
+              <button
+                onClick={() => router.push(`/waiter/tables/${tableId}/transfer`)}
+                className="rounded-md border-2 border-line bg-white py-2.5 text-sm font-semibold text-ink transition-colors hover:border-gold/50"
+              >
+                Prebaci stavke
+              </button>
+            </div>
+          </div>
+        )}
+
+        {voidingItem && (
+          <VoidItemModal item={voidingItem} onCancel={() => setVoidingItem(null)} onConfirm={confirmVoid} />
+        )}
+
+        {hasEverSubmitted ? (
+          <button
+            type="button"
+            onClick={() => searchInputRef.current?.focus()}
+            className="mx-3 mt-2 flex min-h-14 w-[calc(100%-1.5rem)] items-center justify-center gap-2 rounded-md bg-gold text-base font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px"
+          >
+            + Dodaj još u porudžbinu
+          </button>
+        ) : (
+          <p className="mx-3 mt-1 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Izaberi artikle</p>
+        )}
+
         <input
+          ref={searchInputRef}
           className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
           placeholder="Pretraga menija…"
           value={search}
@@ -966,7 +981,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
       {/* Sticky pregled porudžbine */}
       <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{order.items.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Novi krug" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
         {/* max-h u dvh (ne fiksni px) da se prilagodi visini ekrana telefona;
             overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
@@ -976,25 +991,36 @@ export function OrderClient({ tableId }: { tableId: string }) {
             uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
             poslednje stavke pre linije/Ukupno ispod. */}
         <div className="mx-auto max-h-[32dvh] w-full max-w-5xl overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
-          {order.items.length === 0 && <div className="py-2 text-center text-sm text-ink/55">Nema stavki još.</div>}
-          {order.items.map((item) => {
+          {draftItems.length === 0 && (
+            <div className="py-2 text-center text-sm text-ink/55">
+              {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
+            </div>
+          )}
+          {draftItems.map((item) => {
             const canEditModifiers = (items.find((mi) => mi.id === item.menuItemId)?.modifierGroups.length ?? 0) > 0;
             return (
             <div key={item.id} className="border-b border-line/50 py-2.5 text-sm last:border-0">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  {canEditModifiers ? (
-                    <button
-                      type="button"
-                      onClick={() => setEditingModifiersFor(item)}
-                      disabled={cartBusy}
-                      className="block text-left font-medium text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
-                    >
-                      {item.name}
-                    </button>
-                  ) : (
-                    <span className="block font-medium text-ink">{item.name}</span>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {canEditModifiers ? (
+                      <button
+                        type="button"
+                        onClick={() => setEditingModifiersFor(item)}
+                        disabled={cartBusy}
+                        className="text-left font-medium text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
+                      >
+                        {item.name}
+                      </button>
+                    ) : (
+                      <span className="font-medium text-ink">{item.name}</span>
+                    )}
+                    {hasEverSubmitted && (
+                      <span className="shrink-0 rounded-full bg-success-soft px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-success">
+                        Novo
+                      </span>
+                    )}
+                  </div>
                   {item.modifiers.length > 0 && (
                     <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
                   )}
@@ -1044,10 +1070,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
         <div className="mx-auto w-full max-w-5xl px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
           <button
             onClick={submit}
-            disabled={submitting || order.items.length === 0}
+            disabled={submitting || draftItems.length === 0}
             className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
           >
-            {submitting ? "Slanje…" : "Pošalji porudžbinu"}
+            {submitting ? "Slanje…" : hasEverSubmitted ? "Pošalji nove stavke" : "Pošalji porudžbinu"}
           </button>
         </div>
       </div>

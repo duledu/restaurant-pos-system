@@ -62,7 +62,25 @@ function formatModifiersForTicket(modifiers: { optionName: string; priceDelta: P
  * NIKAD ne dobija stavke šanka i obrnuto — grupisanje je direktno po
  * OrderItemStation.station (Faza 1 rutiranje), bez druge/paralelne logike.
  */
-export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string): Promise<void> {
+/**
+ * VIŠE-KRUŽNO NARUČIVANJE: `options.orderItemIds`, kad je prosleđen,
+ * ograničava tiket ISKLJUČIVO na te stavke (konkretan krug slanja) — bez
+ * njega bi funkcija (kao ranije) pokupila SVAKI OrderItemStation red koji
+ * je TRENUTNO u statusu SUBMITTED za celu porudžbinu, što bi za drugi/treći
+ * krug moglo pogrešno pomešati stavke iz različitih krugova na isti tiket
+ * (ili, gore, tiho preskočiti novi krug ako je dispatchKey iz prvog kruga
+ * već zauzeo `orderId_dispatchKey` upsert). `options.dispatchKeySuffix`
+ * postoji iz istog razloga — PRVO slanje zadržava tačan stari format
+ * ključa (`submit:${station}`, potpuna unazadna kompatibilnost), naredni
+ * krug dobija SVOJ, različit ključ (pozivalac prosleđuje idempotencyKey tog
+ * zahteva) tako da svaki krug dobija sopstveni, odvojen tiket — nikad
+ * duplikat, nikad tiho izgubljen.
+ */
+export async function dispatchStationPrintJobs(
+  ctx: AuthContext,
+  orderId: string,
+  options?: { orderItemIds?: string[]; dispatchKeySuffix?: string }
+): Promise<void> {
   const order = await prisma.order.findFirst({
     where: { id: orderId, ...scopeToRestaurant(ctx) },
     include: { table: { select: { label: true } }, restaurant: { select: { name: true } } },
@@ -70,7 +88,11 @@ export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string
   if (!order) return;
 
   const stationItems = await prisma.orderItemStation.findMany({
-    where: { orderItem: { orderId }, status: "SUBMITTED" },
+    where: {
+      orderItem: { orderId },
+      status: "SUBMITTED",
+      ...(options?.orderItemIds ? { orderItemId: { in: options.orderItemIds } } : {}),
+    },
     include: {
       orderItem: {
         select: { name: true, quantity: true, note: true, modifiers: { orderBy: { sortOrder: "asc" } } },
@@ -85,7 +107,10 @@ export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string
   });
   const waiterName = waiter ? `${waiter.firstName} ${waiter.lastName}` : "?";
   const orderNumber = shortOrderNumber(order.id);
-  const submittedAt = (order.submittedAt ?? new Date()).toISOString();
+  // "Sada" (dispatch se poziva odmah posle commit-a submitOrder-a), NE
+  // Order.submittedAt — to je vreme PRVOG slanja cele porudžbine, pogrešno
+  // za tiket bilo kog NAREDNOG kruga.
+  const submittedAt = new Date().toISOString();
 
   const byStation = new Map<Station, typeof stationItems>();
   for (const row of stationItems) {
@@ -109,7 +134,7 @@ export async function dispatchStationPrintJobs(ctx: AuthContext, orderId: string
         modifiers: formatModifiersForTicket(r.orderItem.modifiers),
       })),
     });
-    const dispatchKey = `submit:${station}`;
+    const dispatchKey = options?.dispatchKeySuffix ? `submit:${station}:${options.dispatchKeySuffix}` : `submit:${station}`;
     await prisma.printJob.upsert({
       where: { orderId_dispatchKey: { orderId, dispatchKey } },
       create: {

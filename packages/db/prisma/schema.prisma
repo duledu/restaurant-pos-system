@@ -776,6 +776,16 @@ model OrderItem {
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
+  // VIŠE-KRUŽNO NARUČIVANJE: KADA je OVA konkretna stavka poslata kuhinji/
+  // šanku (DRAFT -> SUBMITTED prelaz) — null dok je još DRAFT. Jedna
+  // porudžbina (Order) sada može primiti VIŠE krugova slanja tokom svog
+  // životnog veka (order-service.ts submitOrder), pa Order.submittedAt
+  // (vreme PRVOG slanja) više nije dovoljno da se razlikuje "stari" od
+  // "novopristiglog" kruga — ovo polje je TAČNO ta minimalna razlika,
+  // namerno bez posebnog "batch/round" modela (nepotrebna složenost —
+  // poređenje po vremenu je dovoljno i za KDS i za audit/izveštaje).
+  submittedAt DateTime?
+
   // FAZA 8 (Split Bill): koliko od `quantity` je VEĆ naplaćeno kroz neki
   // PaymentItem red (vidi Payment/PaymentItem napomenu ispod). Invarijanta
   // održavana na SVAKOM mestu koje menja `quantity` ili `paidQuantity`
