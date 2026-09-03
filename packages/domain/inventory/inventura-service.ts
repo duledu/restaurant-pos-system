@@ -22,6 +22,14 @@ import type {
 const INVENTORY_COUNT = "inventory.count";
 const INVENTORY_VIEW = "inventory.view";
 
+/**
+ * Isti produkcioni incident/rešenje kao billing-service.ts TX_OPTIONS (vidi
+ * opširnu napomenu tamo) — potvrda inventure radi po-liniji atomski upsert
+ * unutar jedne transakcije, na sesiji koja može imati mnogo redova. Nikad
+ * se ne premešta bilo šta van transakcije — samo joj se da dovoljno vremena.
+ */
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
 type TxClient = Prisma.TransactionClient;
 
 async function loadSession(ctx: AuthContext, sessionId: string) {
@@ -467,7 +475,7 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
         const newStatus = delta === 0 ? "MATCH" : delta < 0 ? "SHORTAGE" : "SURPLUS";
         await tx.inventoryCountLine.update({ where: { id: line.id }, data: { status: newStatus, correctionMovementId } });
       }
-    });
+    }, TX_OPTIONS);
   } catch (err) {
     if (err instanceof StaleLineError) {
       // Glavna transakcija je u potpunosti poništena (uključujući pokušaj

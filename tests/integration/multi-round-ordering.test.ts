@@ -21,6 +21,8 @@ interface Fixture {
   tableId: string;
   omletId: string; // 400.00, 20%, KITCHEN
   biftekId: string; // 1500.00, 20%, KITCHEN
+  vinjakId: string; // 120.00, 20%, BAR, sa modifier grupom "Zapremina"
+  vinjakDupliOptionId: string; // "Dupli", +60.00
 }
 
 function context(
@@ -54,8 +56,24 @@ async function createFixture(): Promise<Fixture> {
   const biftek = await prisma.menuItem.create({
     data: { restaurantId: restaurant.id, categoryId: category.id, name: "Biftek", slug: `biftek-${randomUUID()}`, price: "1500.00", taxRate: "20", preparationStation: "KITCHEN" },
   });
+  const vinjak = await prisma.menuItem.create({
+    data: { restaurantId: restaurant.id, categoryId: category.id, name: "Vinjak", slug: `vinjak-${randomUUID()}`, price: "120.00", taxRate: "20", preparationStation: "BAR" },
+  });
+  const zapreminaGroup = await prisma.modifierGroup.create({
+    data: { restaurantId: restaurant.id, name: "Zapremina", required: false, minSelect: 0, maxSelect: 1 },
+  });
+  const vinjakDupli = await prisma.modifierOption.create({ data: { modifierGroupId: zapreminaGroup.id, name: "Dupli", priceDelta: "60.00" } });
+  await prisma.menuItemModifierGroup.create({ data: { menuItemId: vinjak.id, modifierGroupId: zapreminaGroup.id } });
 
-  return { restaurantId: restaurant.id, locationId: location.id, tableId: table.id, omletId: omlet.id, biftekId: biftek.id };
+  return {
+    restaurantId: restaurant.id,
+    locationId: location.id,
+    tableId: table.id,
+    omletId: omlet.id,
+    biftekId: biftek.id,
+    vinjakId: vinjak.id,
+    vinjakDupliOptionId: vinjakDupli.id,
+  };
 }
 
 async function openAndSubmit(fixture: Fixture, waiter: AuthContext, menuItemId: string, quantity: number) {
@@ -325,5 +343,61 @@ describe("multi-round ordering: availability / inventory independence", () => {
 
     const stillNegative = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
     expect(Number(stillNegative.currentStock)).toBe(-3);
+  });
+});
+
+describe("multi-round ordering: 'Dodaj još u porudžbinu' search/add regression (Vinjak bug)", () => {
+  it("adding a NEW item with modifiers via a later round works, keeps its own modifiers, and never touches round-1 items", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order, firstItem } = await openAndSubmit(fixture, waiter, fixture.omletId, 3);
+
+    // Isti korak koji konobar radi posle "Pretraga menija..." → tap na
+    // rezultat: addItem sa modifierOptionIds (klijent ovo radi kroz
+    // ModifierSelectionModal, domenska putanja je identična).
+    const vinjak = await orders.addItem(waiter, order.id, {
+      menuItemId: fixture.vinjakId,
+      quantity: 1,
+      modifierOptionIds: [fixture.vinjakDupliOptionId],
+    });
+    expect(vinjak.status).toBe("DRAFT");
+
+    const round2 = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    const vinjakSubmitted = round2.items.find((i) => i.id === vinjak.id)!;
+    expect(vinjakSubmitted.status).toBe("SUBMITTED");
+    expect(vinjakSubmitted.modifiers.map((m) => m.optionName)).toEqual(["Dupli"]);
+    expect(Number(vinjakSubmitted.price)).toBe(180); // 120 + 60 (Dupli)
+
+    // Round-1 Omlet potpuno netaknut.
+    const omletStillThere = await prisma.orderItem.findUniqueOrThrow({ where: { id: firstItem.id } });
+    expect(omletStillThere.quantity).toBe(3);
+    expect(omletStillThere.status).toBe("SUBMITTED");
+
+    // Vinjakov tiket sadrži SAMO Vinjak (BAR stanica), ne Omlet.
+    const barJob = await prisma.printJob.findFirstOrThrow({ where: { orderId: order.id, type: "BAR" } });
+    const barContent = barJob.content as { items: { name: string }[] };
+    expect(barContent.items.map((i) => i.name)).toEqual(["Vinjak"]);
+  });
+
+  it("the literal reported scenario: 3 Omleti already submitted, waiter searches 'Vinjak' and adds it as the only new work", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await openAndSubmit(fixture, waiter, fixture.omletId, 3);
+
+    // Klijentska pretraga ("Vinjak"/"vinjak"/"VINJAK") je čista funkcija
+    // testirana odvojeno u tests/unit/menu-search.test.ts — ovde se
+    // proverava da ISTI artikal koji bi pretraga pronašla stvarno može da
+    // se doda i pošalje kroz punu domensku putanju, bez modifikatora.
+    const vinjak = await orders.addItem(waiter, order.id, { menuItemId: fixture.vinjakId, quantity: 1 });
+    expect(vinjak.status).toBe("DRAFT");
+
+    const reloaded = await orders.getOrder(waiter, order.id);
+    const draftItems = reloaded.items.filter((i) => i.status === "DRAFT");
+    expect(draftItems).toHaveLength(1);
+    expect(draftItems[0].name).toBe("Vinjak");
+
+    const round2 = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    expect(round2.items.every((i) => i.menuItemId !== fixture.omletId || i.status === "SUBMITTED")).toBe(true);
+    expect(round2.items.find((i) => i.id === vinjak.id)?.status).toBe("SUBMITTED");
   });
 });

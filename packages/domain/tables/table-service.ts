@@ -1,5 +1,6 @@
 import { prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { sortByLabelNatural } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
 
 // ─── Waiter (POS) queries ─────────────────────────────────────────────────────
@@ -41,7 +42,12 @@ export async function listTables(ctx: AuthContext, locationId: string) {
 
   return floors.map((floor) => ({
     ...floor,
-    tables: floor.tables.map(({ orders, ...table }) => ({
+    // Prisma orderBy: { label: "asc" } iznad je LEKSIKOGRAFSKO (string)
+    // poređenje — "Sto 10" bi upalo ODMAH posle "Sto 1" (pre "Sto 2"), jer
+    // Postgres upoređuje karakter-po-karakter. sortByLabelNatural ovde
+    // ispravlja redosled na numerički-svestan ("Sto 1, Sto 2, ..., Sto 9,
+    // Sto 10"), bezbedno i za nazive koji nisu čist broj (vidi natural-sort.ts).
+    tables: sortByLabelNatural(floor.tables).map(({ orders, ...table }) => ({
       ...table,
       activeOrderOwnerId: orders[0]?.openedBy ?? null,
     })),
@@ -72,13 +78,17 @@ export async function adminListFloors(ctx: AuthContext, locationId: string) {
   requirePermission(ctx, "settings.manage");
   requireLocationAccess(ctx, locationId);
 
-  return prisma.floor.findMany({
+  const floors = await prisma.floor.findMany({
     where: { ...scopeToRestaurant(ctx), locationId },
     include: {
       tables: { orderBy: { label: "asc" } },
     },
     orderBy: { sortOrder: "asc" },
   });
+
+  // Isti razlog kao listTables iznad — Prisma orderBy je leksikografsko,
+  // ovde se ispravlja na numerički-svestan redosled.
+  return floors.map((floor) => ({ ...floor, tables: sortByLabelNatural(floor.tables) }));
 }
 
 // ─── Floor mutations ──────────────────────────────────────────────────────────
