@@ -162,7 +162,7 @@ export function DevicesClient() {
   }, [devices, search]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <PageHeader title="Uređaji" description="Deljeni POS terminali i lični uređaji osoblja — pregled i upravljanje" />
 
       {notice && <div className="mb-4 rounded-md bg-success-soft px-4 py-3 text-sm text-success">{notice}</div>}

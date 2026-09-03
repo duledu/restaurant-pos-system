@@ -2,7 +2,7 @@ import { MenuManagementClient } from "./menu-client";
 
 export default function MenuManagementPage() {
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="w-full">
       <div className="mb-6 flex items-baseline justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-ink">Meni</h1>

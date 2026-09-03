@@ -132,7 +132,7 @@ export function ItemsClient() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       {/* Header + filters */}
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>

@@ -870,7 +870,7 @@ export function InventoryClient() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="w-full">
       <PageHeader
         title="Zalihe"
         description="Praćenje stanja zaliha po artiklima i lokacijama"

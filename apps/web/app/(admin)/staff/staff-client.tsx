@@ -454,6 +454,76 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
   );
 }
 
+function DeleteEmployeeModal({
+  employee,
+  onCancel,
+  onDeleted,
+}: {
+  employee: Employee;
+  onCancel: () => void;
+  onDeleted: (name: string) => void;
+}) {
+  const fullName = `${employee.firstName} ${employee.lastName}`;
+  const [confirmText, setConfirmText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canDelete = confirmText.trim() === fullName;
+
+  async function submit() {
+    if (!canDelete || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/employees/${employee.id}`, { method: "DELETE" });
+      onDeleted(fullName);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri brisanju zaposlenog");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Obriši zaposlenog" onCancel={onCancel}>
+      <div className="space-y-3">
+        <div className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
+          Ovo je <strong>trajno i nepovratno</strong> brisanje naloga za <strong>{fullName}</strong>. Ako zaposleni ima
+          bilo kakvu istoriju (porudžbine, uplate, smene, poništavanja…), brisanje će biti odbijeno — u tom slučaju
+          koristi „Deaktiviraj”.
+        </div>
+
+        <div>
+          <label className="mb-1 block text-sm font-medium text-inkSoft">
+            Upiši <strong>{fullName}</strong> da potvrdiš
+          </label>
+          <input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={fullName}
+            className="w-full rounded-md border border-line px-3 py-2.5 text-base"
+          />
+        </div>
+
+        {error && <div className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
+
+        <div className="flex gap-3 pt-2">
+          <button onClick={onCancel} className="flex-1 rounded-md border border-line py-3 text-base font-medium text-ink">
+            Otkaži
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canDelete || submitting}
+            className="flex-1 rounded-md bg-danger py-3 text-base font-semibold text-white disabled:opacity-40"
+          >
+            {submitting ? "Brisanje…" : "Obriši trajno"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
 export function StaffClient() {
   const [staff, setStaff] = useState<Employee[] | null>(null);
   const [locations, setLocations] = useState<LocationOption[]>([]);
@@ -466,6 +536,7 @@ export function StaffClient() {
   const [editing, setEditing] = useState<Employee | null>(null);
   const [changingPin, setChangingPin] = useState<Employee | null>(null);
   const [settingCredentials, setSettingCredentials] = useState<Employee | null>(null);
+  const [deleting, setDeleting] = useState<Employee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -489,14 +560,21 @@ export function StaffClient() {
     load();
   }, [load]);
 
+  // Ova dva prekidača menjaju TAČNO JEDNO poznato polje — optimistički
+  // ažuriramo samo taj red lokalno (bez punog ponovnog učitavanja liste, koje
+  // bi za trenutak zamenilo ceo niz i izazvalo nepotreban re-render/treperenje
+  // za nešto što je server odgovor u suštini već potvrdio). Neuspeh vraća
+  // lokalni state na prethodnu vrednost (rollback), isti obrazac kao
+  // optimistic UI u waiter POS-u.
   async function toggleStatus(emp: Employee) {
     const nextStatus = emp.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE";
     setBusyId(emp.id);
     setError(null);
+    setStaff((prev) => prev?.map((e) => (e.id === emp.id ? { ...e, status: nextStatus } : e)) ?? prev);
     try {
       await apiFetch(`/api/admin/employees/${emp.id}/status`, { method: "POST", body: JSON.stringify({ status: nextStatus }) });
-      await load();
     } catch (e) {
+      setStaff((prev) => prev?.map((row) => (row.id === emp.id ? { ...row, status: emp.status } : row)) ?? prev);
       setError(e instanceof Error ? e.message : "Greška pri promeni statusa");
     } finally {
       setBusyId(null);
@@ -504,15 +582,17 @@ export function StaffClient() {
   }
 
   async function togglePinLogin(emp: Employee) {
+    const nextEnabled = !emp.pinLoginEnabled;
     setBusyId(emp.id);
     setError(null);
+    setStaff((prev) => prev?.map((e) => (e.id === emp.id ? { ...e, pinLoginEnabled: nextEnabled } : e)) ?? prev);
     try {
       await apiFetch(`/api/admin/employees/${emp.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ pinLoginEnabled: !emp.pinLoginEnabled }),
+        body: JSON.stringify({ pinLoginEnabled: nextEnabled }),
       });
-      await load();
     } catch (e) {
+      setStaff((prev) => prev?.map((row) => (row.id === emp.id ? { ...row, pinLoginEnabled: emp.pinLoginEnabled } : row)) ?? prev);
       setError(e instanceof Error ? e.message : "Greška pri promeni PIN prijave");
     } finally {
       setBusyId(null);
@@ -534,7 +614,7 @@ export function StaffClient() {
   }, [staff, search]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <PageHeader
         title="Osoblje"
         description="Konobari, kuhinja, šank i menadžment — nalozi za prijavu PIN-om"
@@ -622,18 +702,21 @@ export function StaffClient() {
                   <button
                     onClick={() => toggleStatus(emp)}
                     disabled={busyId === emp.id}
-                    className={`col-span-2 rounded-md border py-2.5 ${
+                    className={`rounded-md border py-2.5 ${
                       emp.status === "ACTIVE" ? "border-danger/30 text-danger" : "border-success/30 text-success"
                     }`}
                   >
                     {emp.status === "ACTIVE" ? "Deaktiviraj" : "Aktiviraj"}
+                  </button>
+                  <button onClick={() => setDeleting(emp)} className="rounded-md border border-danger/30 py-2.5 text-danger">
+                    Obriši
                   </button>
                 </div>
               </Card>
             ))}
           </div>
 
-          {/* ── Desktop/tablet: table (unchanged) ────────────────────────── */}
+          {/* ── Desktop/tablet: table ────────────────────────────────────── */}
           <Card className="hidden overflow-hidden md:block">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -674,30 +757,36 @@ export function StaffClient() {
                       <Badge tone={STATUS_TONE[emp.status]}>{STATUS_LABEL[emp.status]}</Badge>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex justify-end gap-3 whitespace-nowrap text-xs font-medium">
-                        <button onClick={() => setEditing(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
+                      <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs font-medium">
+                        <button onClick={() => setEditing(emp)} className="inline-flex min-h-8 items-center rounded-md px-2 text-gold-dark hover:bg-gold-soft">
                           Izmeni
                         </button>
-                        <button onClick={() => setChangingPin(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
-                          Promeni PIN
+                        <button onClick={() => setChangingPin(emp)} className="inline-flex min-h-8 items-center rounded-md px-2 text-gold-dark hover:bg-gold-soft">
+                          PIN
                         </button>
                         <button
                           onClick={() => togglePinLogin(emp)}
                           disabled={busyId === emp.id}
                           title={emp.pinLoginEnabled ? "Onemogući PIN prijavu za ovog zaposlenog" : "Omogući PIN prijavu za ovog zaposlenog"}
-                          className={`inline-flex min-h-11 items-center px-1 ${emp.pinLoginEnabled ? "text-inkSoft hover:underline" : "text-success hover:underline"}`}
+                          className={`inline-flex min-h-8 items-center rounded-md px-2 ${emp.pinLoginEnabled ? "text-inkSoft hover:bg-ink/[.04]" : "text-success hover:bg-success-soft"}`}
                         >
                           {emp.pinLoginEnabled ? "Isključi PIN" : "Uključi PIN"}
                         </button>
-                        <button onClick={() => setSettingCredentials(emp)} className="inline-flex min-h-11 items-center px-1 text-gold-dark hover:underline">
+                        <button onClick={() => setSettingCredentials(emp)} className="inline-flex min-h-8 items-center rounded-md px-2 text-gold-dark hover:bg-gold-soft">
                           {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
                         </button>
                         <button
                           onClick={() => toggleStatus(emp)}
                           disabled={busyId === emp.id}
-                          className={`inline-flex min-h-11 items-center px-1 ${emp.status === "ACTIVE" ? "text-danger hover:underline" : "text-success hover:underline"}`}
+                          className={`inline-flex min-h-8 items-center rounded-md px-2 ${emp.status === "ACTIVE" ? "text-danger hover:bg-danger-soft" : "text-success hover:bg-success-soft"}`}
                         >
                           {emp.status === "ACTIVE" ? "Deaktiviraj" : "Aktiviraj"}
+                        </button>
+                        <button
+                          onClick={() => setDeleting(emp)}
+                          className="inline-flex min-h-8 items-center rounded-md border border-danger/30 px-2 text-danger hover:bg-danger-soft"
+                        >
+                          Obriši
                         </button>
                       </div>
                     </td>
@@ -753,6 +842,17 @@ export function StaffClient() {
           onDone={() => {
             setSettingCredentials(null);
             setNotice("Pristupni podaci su uspešno postavljeni.");
+            load();
+          }}
+        />
+      )}
+      {deleting && (
+        <DeleteEmployeeModal
+          employee={deleting}
+          onCancel={() => setDeleting(null)}
+          onDeleted={(name) => {
+            setDeleting(null);
+            setNotice(`${name} je trajno obrisan/a.`);
             load();
           }}
         />

@@ -55,7 +55,7 @@ export function EmployeesClient() {
   }, [load]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Aktivnost zaposlenih</h1>

@@ -471,6 +471,129 @@ export async function setEmployeeLoginPassword(
   });
 }
 
+/**
+ * Da li POSTOJI ijedan istorijski/operativni red koji referencira ovog
+ * zaposlenog. Sva navedena polja su NAMERNO plain (bez FK — vidi napomenu
+ * uz setEmployeeStatus/schema.prisma), pa `employee.delete()` sam po sebi
+ * NIKAD ne bi kaskadno obrisao niti blokirao brisanje preko baze — ova
+ * provera je JEDINA brana koja štiti istoriju od gubitka čitljivosti
+ * (Order/Payment/Shift/Void/Transfer/Print/Availability/Inventory/Inventura
+ * redovi bi posle brisanja i dalje postojali, ali sa "osirotelim" ID-jem
+ * koji se više ne razrešava u ime — vidi resolveEmployeeDisplayNames).
+ *
+ * AuditLog.userId je poseban slučaj: PIN-only zaposleni upisuju SVOJ
+ * employeeId direktno (konvencija iz pin-login/route.ts), dok zaposleni sa
+ * User nalogom upisuju userId — proveravaju se OBE vrednosti.
+ *
+ * Employee.createdBy (ko je kreirao KOG zaposlenog) je NAMERNO isključen —
+ * to je slaba provenijencija ("ko je onboard-ovao koga"), ne poslovna
+ * transakcija/istorija u smislu specifikacije, i ne treba da blokira
+ * brisanje osobe koja je nekad kreirala neki drugi (i dalje aktivan) nalog.
+ */
+async function employeeHasHistoricalReferences(
+  db: Prisma.TransactionClient | typeof prisma,
+  employeeId: string,
+  userId: string | null
+): Promise<boolean> {
+  const auditIds = userId ? [employeeId, userId] : [employeeId];
+  const counts = await Promise.all([
+    db.order.count({ where: { openedBy: employeeId } }),
+    db.shift.count({ where: { OR: [{ openedBy: employeeId }, { closedBy: employeeId }] } }),
+    db.orderEvent.count({ where: { createdBy: employeeId } }),
+    db.payment.count({ where: { completedBy: employeeId } }),
+    db.orderItemVoid.count({ where: { voidedBy: employeeId } }),
+    db.orderItemTransfer.count({ where: { transferredBy: employeeId } }),
+    db.printJob.count({ where: { requestedBy: employeeId } }),
+    db.menuItemAvailability.count({ where: { updatedBy: employeeId } }),
+    db.inventoryMovement.count({ where: { employeeId } }),
+    db.ingredientMovement.count({ where: { employeeId } }),
+    db.inventoryCountSession.count({ where: { OR: [{ startedBy: employeeId }, { confirmedBy: employeeId }] } }),
+    db.inventoryCountLine.count({ where: { countedBy: employeeId } }),
+    db.auditLog.count({ where: { userId: { in: auditIds } } }),
+  ]);
+  return counts.some((c) => c > 0);
+}
+
+/**
+ * Trajno (fizičko) brisanje zaposlenog — SAMO kad nijedan istorijski/
+ * operativni red ne referencira njegov ID (vidi employeeHasHistoricalReferences).
+ * U suprotnom se odbija sa jasnom porukom — "Deaktiviraj" ostaje jedini put
+ * za zaposlenog koji je ikad odradio bilo šta. Nikad se ne izmišlja
+ * kaskadno brisanje/anonimizacija poslovne istorije (zahtev specifikacije).
+ *
+ * requirePermission(EMPLOYEES_MANAGE) već ograničava ovo na OWNER/ADMIN
+ * (MANAGER ima samo employees.view — vidi seed.ts) — ista granica kao
+ * updateEmployee/setEmployeeStatus, bez potrebe za novom permisijom.
+ *
+ * Poslednji-OWNER i poslednji-manage-sposoban-nalog zaštita se ponovo
+ * koristi nepromenjena (assertSafeManagementChange) — brisanje je STROŽIJA
+ * operacija od deaktivacije, pa zaslužuje BAREM istu zaštitu.
+ */
+export async function deleteEmployee(ctx: AuthContext, employeeId: string): Promise<{ hardDeleted: true }> {
+  requirePermission(ctx, EMPLOYEES_MANAGE);
+
+  const employee = await prisma.employee.findFirst({
+    where: { id: employeeId, ...scopeToRestaurant(ctx) },
+    include: { roles: { include: { role: true } } },
+  });
+  if (!employee) throw new Error("Zaposleni nije pronađen");
+
+  const roleNames = employee.roles.map((r) => r.role.name);
+
+  // Brza, van-transakcije provera PRVO — daje jasnu grešku odmah bez
+  // otvaranja transakcije za očigledno odbijen zahtev (uobičajen slučaj:
+  // admin pokuša da obriše nekog ko očigledno ima istoriju).
+  const earlyHasHistory = await employeeHasHistoricalReferences(prisma, employeeId, employee.userId);
+  if (earlyHasHistory) {
+    throw new Error(
+      "Ovaj zaposleni ima istorijske zapise (porudžbine, uplate, smene, poništavanja, transfere, štampu, dostupnost, zalihe/inventuru ili audit trag) — brisanje bi oštetilo istoriju. Koristi „Deaktiviraj” umesto brisanja."
+    );
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Nepovratna operacija — provera istorije se PONAVLJA ovde, sveža,
+    // unutar transakcije, tik pre stvarnog brisanja (zatvara race u kom bi
+    // se između gornje provere i ovog trenutka pojavio nov istorijski red,
+    // npr. baš-pokrenuta smena/porudžbina za ovog zaposlenog).
+    const freshHasHistory = await employeeHasHistoricalReferences(tx, employeeId, employee.userId);
+    if (freshHasHistory) {
+      throw new Error(
+        "Ovaj zaposleni je u međuvremenu dobio istorijski zapis — brisanje je otkazano. Koristi „Deaktiviraj” umesto brisanja."
+      );
+    }
+
+    // Ista zaštita (i isto mesto u transakciji — TEK PRE stvarnog pisanja)
+    // kao setEmployeeStatus/updateEmployee, sada primenjena na strožiju
+    // operaciju: sveža provera unutar transakcije zatvara isti race koji bi
+    // postojao da je provera urađena van nje.
+    await assertSafeManagementChange(tx, ctx.restaurantId, employeeId, {
+      losingOwnerRole: roleNames.includes("OWNER"),
+      losingManageCapability: await employeeHasManageCapability(tx, employeeId),
+    });
+
+    if (employee.userId) {
+      await tx.user.delete({ where: { id: employee.userId } });
+    }
+    // Kaskadno briše SAMO EmployeeRole/EmployeeLocation (dodele role/
+    // lokacije — vidi @relation(onDelete: Cascade) u schema.prisma), nikad
+    // poslovnu istoriju (koja nema FK ka Employee, vidi napomenu iznad).
+    await tx.employee.delete({ where: { id: employeeId } });
+
+    await recordAuditEntry(
+      ctx,
+      {
+        entityType: "Employee",
+        entityId: employeeId,
+        action: "employee.deleted",
+        previousValue: { firstName: employee.firstName, lastName: employee.lastName, roleNames },
+      },
+      tx
+    );
+  });
+
+  return { hardDeleted: true };
+}
+
 export async function setEmployeeStatus(ctx: AuthContext, employeeId: string, status: "ACTIVE" | "SUSPENDED") {
   requirePermission(ctx, EMPLOYEES_MANAGE);
 

@@ -80,7 +80,7 @@ export function ModifiersManagementClient() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="w-full">
       <PageHeader
         title="Dodaci i modifikatori"
         description="Grupe dodataka (npr. Veličina, Dodaci) i njihove opcije — mogu se vezati za više artikala menija."

@@ -74,7 +74,7 @@ export function BarProductionClient() {
   const summary = report?.summary;
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Bar produkcija</h1>

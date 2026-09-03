@@ -68,7 +68,7 @@ export function VoidsClient() {
   const visibleRows = selectedEmployee ? (rows ?? []).filter((r) => r.employeeName === selectedEmployee) : rows;
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Poništavanja poslatih stavki</h1>
