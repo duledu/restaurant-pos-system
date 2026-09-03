@@ -72,6 +72,19 @@ import type { SplitBillPayInput } from "@rcs/shared";
 
 const PAYABLE_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
 
+/**
+ * Isti produkcioni incident/rešenje kao billing-service.ts (vidi opširnu
+ * napomenu tamo): paySplitBill radi analogno puno uzastopnih round-trip-ova
+ * unutar JEDNE transakcije (row lock, sveže čitanje, po-stavci guard petlja,
+ * Payment/PaymentItem, DIRECT_STOCK/RECIPE odbitak, Receipt, audit,
+ * eventualno zatvaranje porudžbine) — na Prisma-inom podrazumevanom
+ * 5s roku ovo je povremeno pucalo baš na `tx.auditLog.create(...)` (poslednji
+ * poziv u redu, ne stvarni uzrok). Nikad se ne premešta Payment/Receipt/
+ * audit van transakcije — samo joj se da dovoljno vremena za POSTOJEĆI,
+ * namerno atomičan posao.
+ */
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
 type OrderWithItems = Prisma.OrderGetPayload<{
   include: { items: { include: { modifiers: true } }; table: true };
 }>;
@@ -465,7 +478,7 @@ export async function paySplitBill(ctx: AuthContext, orderId: string, input: Spl
     }
 
     return { payment: paymentRow, receipt: receiptRow, isFinalPayment, locationId: freshOrder.locationId, tableId: freshOrder.tableId, isRetry: false };
-  });
+  }, TX_OPTIONS);
 
   if (!created.isRetry) {
     await ssePublisher.publish({

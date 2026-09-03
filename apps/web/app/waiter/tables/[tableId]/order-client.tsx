@@ -6,6 +6,7 @@ import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
 import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, type VoidReasonCode } from "@rcs/shared";
 import { sameModifierSelection } from "../../../../lib/order-cart";
+import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
 
 interface Category {
@@ -536,12 +537,10 @@ export function OrderClient({ tableId }: { tableId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.status, locationId]);
 
-  const visibleItems = useMemo(() => {
-    return items.filter((item) => {
-      if (search) return item.name.toLowerCase().includes(search.toLowerCase());
-      return item.categoryId === activeCategoryId;
-    });
-  }, [items, activeCategoryId, search]);
+  const visibleItems = useMemo(
+    () => filterMenuItems(items, search, activeCategoryId),
+    [items, activeCategoryId, search]
+  );
 
   const total = useMemo(
     () =>
@@ -790,8 +789,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const draftItems = order.items.filter((i) => i.status === "DRAFT");
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
+  // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
+  // ne završi vizuelno ispod fiksnog panela — mora biti VEĆI od panelovog
+  // realnog max-h (min(62dvh,34rem)) plus header/footer da bi poslednji red
+  // menija ostao dostižan skrolom stranice čak i kad je panel pun.
   return (
-    <div className="flex min-h-screen flex-col bg-cream-200 pb-52">
+    <div className="flex min-h-screen flex-col bg-cream-200 pb-[28rem]">
       <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
         <button onClick={() => router.push("/waiter/tables")} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
           ← Stolovi
@@ -811,7 +814,13 @@ export function OrderClient({ tableId }: { tableId: string }) {
         {hasEverSubmitted && (
           <div className="p-3">
             <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Poslato / U pripremi</p>
-            <div className="space-y-2 rounded-md border border-line bg-white p-3">
+            {/* max-h + overflow-y-auto (isti obrazac kao DODATNA PORUDŽBINA
+                korpa ispod) — BEZ ovoga, porudžbina sa mnogo već poslatih
+                stavki gura pretragu/meni daleko ispod pregiba ekrana (pogotovo
+                na mobilnom sa otvorenom tastaturom dok konobar kuca pretragu),
+                što je izgledalo kao da pretraga "ne vraća ništa" iako je meni
+                bio ispravno učitan — samo nedostupan bez dužeg skrolovanja. */}
+            <div className="max-h-[24dvh] space-y-2 overflow-y-auto rounded-md border border-line bg-white p-3">
               {sentItems.map((item) => (
                 <div key={item.id} className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
                   <div>
@@ -873,7 +882,17 @@ export function OrderClient({ tableId }: { tableId: string }) {
         {hasEverSubmitted ? (
           <button
             type="button"
-            onClick={() => searchInputRef.current?.focus()}
+            onClick={() => {
+              // scrollIntoView PRE focus() — na mobilnom, fokusiranje inputa
+              // otvara tastaturu i smanjuje vidljivi viewport PRE nego što se
+              // skrol izvrši, što bi skrolovanje učinilo nepouzdanim/kasnim.
+              // Ovo garantuje da meni postane dostupan ODMAH, bez obzira
+              // koliko je već poslatih stavki iznad (vidi napomenu uz max-h
+              // na "Poslato / U pripremi" iznad — ovo je druga, nezavisna
+              // linija odbrane za isti problem).
+              searchInputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+              searchInputRef.current?.focus();
+            }}
             className="mx-3 mt-2 flex min-h-14 w-[calc(100%-1.5rem)] items-center justify-center gap-2 rounded-md bg-gold text-base font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px"
           >
             + Dodaj još u porudžbinu
@@ -884,6 +903,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
         <input
           ref={searchInputRef}
+          onFocus={(e) => e.currentTarget.scrollIntoView({ behavior: "smooth", block: "start" })}
           className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
           placeholder="Pretraga menija…"
           value={search}
@@ -979,18 +999,31 @@ export function OrderClient({ tableId }: { tableId: string }) {
         </div>
       </div>
 
-      {/* Sticky pregled porudžbine */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Dodatna porudžbina" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
-        {/* max-h u dvh (ne fiksni px) da se prilagodi visini ekrana telefona;
-            overscroll-contain sprečava da skrol "procuri" na stranicu iza;
+      {/* Sticky pregled porudžbine — FLEX KOLONA sa eksplicitnim gornjim
+          ograničenjem visine (max-h na SPOLJNOM panelu, ne na stavkama
+          pojedinačno kao ranije). Header/footer su shrink-0 (fiksne
+          visine, nikad se ne skupljaju); JEDINO stavke (flex-1 min-h-0
+          overflow-y-auto) rastu/skupljaju se da popune šta god preostane
+          UNUTAR tog ograničenja. min-h-0 je OBAVEZAN — flex stavka bez
+          njega ne može da se skupi ispod svoje "prirodne" (sadržajem
+          određene) visine ni kad ima flex-1, što bi (stari bug) gurnulo
+          footer (Ukupno/dugme) DOLE, van vidljivog panela, kad ima dosta
+          stavki. Ranija verzija je bodovala max-h SAMO na listi stavki
+          (32dvh), a spoljni panel nije imao sopstveni plafon — na kraćim
+          telefonima/sa dosta stavki, ceo panel (header+lista+footer+dugme)
+          je mogao da preraste vidljivi deo ekrana, gurajući poslednje
+          stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
+          (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
+      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Dodatna porudžbina" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
             uopšte bio touch-skrolabilan (poznato ograničenje) — bez ovoga
             konobar fizički ne može da dođe do poslednjih stavki na nekim
             uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
             poslednje stavke pre linije/Ukupno ispod. */}
-        <div className="mx-auto max-h-[32dvh] w-full max-w-5xl overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
+        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
           {draftItems.length === 0 && (
             <div className="py-2 text-center text-sm text-ink/55">
               {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
@@ -1062,12 +1095,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
             );
           })}
         </div>
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-t border-line px-3 py-2.5">
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line px-3 py-2.5">
           <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
           <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
           </span>
         </div>
-        <div className="mx-auto w-full max-w-5xl px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
+        <div className="mx-auto w-full max-w-5xl shrink-0 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
           <button
             onClick={submit}
             disabled={submitting || draftItems.length === 0}

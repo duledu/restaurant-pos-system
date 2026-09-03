@@ -58,6 +58,15 @@ import type { TransferOrderItemsInput } from "@rcs/shared";
 
 const TRANSFERABLE_ORDER_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
 
+/**
+ * Isti produkcioni incident/rešenje kao billing-service.ts TX_OPTIONS (vidi
+ * opširnu napomenu tamo) — transferOrderItems takođe radi po-stavci petlju
+ * (do 100 redova po zahtevu) unutar jedne transakcije, sa audit upisom po
+ * stavci. Nikad se ne premešta bilo šta van transakcije — samo joj se da
+ * dovoljno vremena.
+ */
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
 type SourceOrder = Prisma.OrderGetPayload<{
   include: { items: { include: { modifiers: true } }; table: { include: { floor: true } } };
 }>;
@@ -312,7 +321,7 @@ export async function transferOrderItems(ctx: AuthContext, sourceOrderId: string
     }
 
     return { destinationOrderId, transfers, sourceClosedAs };
-  });
+  }, TX_OPTIONS);
 
   await ssePublisher.publish({
     type: "order_item.status_changed",

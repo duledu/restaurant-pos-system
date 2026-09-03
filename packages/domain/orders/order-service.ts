@@ -24,6 +24,17 @@ const ORDER_ITEM_INCLUDE = {
 const OPEN_ORDER_STATUSES = new Set(["DRAFT", "SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
 
 /**
+ * Isti produkcioni incident/rešenje kao billing-service.ts TX_OPTIONS (vidi
+ * opširnu napomenu tamo). submitOrder radi analogno puno uzastopnih round-
+ * trip-ova unutar JEDNE transakcije (re-snapshot cene/dodataka po stavci,
+ * provera dostupnosti/zalihe, DRAFT->SUBMITTED, OrderItemStation redovi,
+ * audit) — na porudžbini sa više stavki ovo može preći Prisma-in
+ * podrazumevani 5s rok. Nikad se ne premešta bilo šta van transakcije —
+ * samo joj se da dovoljno vremena.
+ */
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
+/**
  * Otvara NOVU draft porudžbinu za sto (ili vraća postojeći DRAFT ako već
  * postoji za taj sto — konobar se ne kažnjava dvostrukim klikom na isti
  * sto). Zahteva aktivnu smenu na lokaciji stola (pravilo iz plana: bez
@@ -572,7 +583,7 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     }, tx);
 
     return { order: updatedOrder, draftItemIds };
-  });
+  }, TX_OPTIONS);
 
   if (!submitted) {
     // Ništa novo za slanje — vidi napomenu unutar transakcije. Vraća

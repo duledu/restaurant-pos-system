@@ -13,6 +13,31 @@ import type { CompletePaymentInput } from "@rcs/shared";
 
 const PAYABLE_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
 
+/**
+ * PRODUKCIONI INCIDENT (2026-09): naplata je povremeno padala sa
+ * "Transaction API error: Transaction not found... old closed transaction"
+ * na `tx.auditLog.create(...)` blizu kraja transakcije. Uzrok NIJE bio
+ * pogrešna upotreba `tx`-a (nijedan poziv ne koristi `tx` van callback-a,
+ * `recordAuditEntry` uvek dobija `tx` eksplicitno i uvek se izvršava PRE
+ * `return`-a) — uzrok je Prisma-in PODRAZUMEVANI interaktivni-transakcijski
+ * rok (`timeout: 5000ms`, `maxWait: 2000ms`). completePayment radi PUNO
+ * uzastopnih round-trip-ova unutar JEDNE transakcije (row lock, sveže
+ * čitanje, po-stavci guard petlja, Payment/PaymentItem, DIRECT_STOCK
+ * odbitak, RECIPE odbitak, Receipt, zatvaranje porudžbine, audit) — na
+ * porudžbini sa više stavki/sirovina preko mreže ka Postgres-u (Neon) ovo
+ * realno može preći 5s, posle čega Prisma tiho zatvori transakciju i SVAKI
+ * naredni poziv nad `tx` (najčešće upravo audit, jer je poslednji u redu)
+ * puca — nije da je audit "loš", on je samo poslednja žrtva.
+ *
+ * Rešenje: eksplicitan, velikodušniji rok — NIKAD ne premeštati Payment/
+ * Receipt/audit van transakcije (to bi slomilo atomičnost naplate), samo
+ * dati transakciji dovoljno vremena da ispravno završi svoj POSTOJEĆI,
+ * namerno atomičan posao. Isti obrazac primenjen svuda gde postoji analogna
+ * po-stavci petlja unutar jedne transakcije (split-bill, submitOrder,
+ * transfer, inventura potvrda).
+ */
+const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
+
 async function loadOrderForBilling(ctx: AuthContext, orderId: string) {
   requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({
@@ -321,7 +346,7 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     );
 
     return { payment, receipt };
-  });
+  }, TX_OPTIONS);
 
   await ssePublisher.publish({
     type: "payment.completed",
