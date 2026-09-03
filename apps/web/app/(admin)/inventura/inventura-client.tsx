@@ -85,9 +85,10 @@ export function InventuraClient() {
   const [isOwnerAdmin, setIsOwnerAdmin] = useState(false);
 
   const loadLocations = useCallback(async () => {
-    const me = await apiFetch("/api/pos/me");
+    // Nijedan od ova dva ne zavisi od drugog (me.roles vs. lista lokacija) —
+    // nema razloga da čekaju jedan na drugog.
+    const [me, res] = await Promise.all([apiFetch("/api/pos/me"), apiFetch("/api/admin/locations")]);
     setIsOwnerAdmin((me.roles ?? []).some((r: string) => ["OWNER", "ADMIN"].includes(r)));
-    const res = await apiFetch("/api/admin/locations");
     setLocations(res.locations);
     if (res.locations.length > 0) setLocationId((prev) => prev || res.locations[0].id);
   }, []);

@@ -354,7 +354,7 @@ export function ShiftsClient() {
   useEffect(() => { load(); }, [load, refreshKey]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Smene i rekonsilijacija gotovine</h1>

@@ -9,3 +9,8 @@ export const PATCH = withApiAuth<{ id: string }>(async (ctx, request, { id }) =>
   const employee = await employees.updateEmployee(ctx, id, input);
   return NextResponse.json({ employee });
 });
+
+export const DELETE = withApiAuth<{ id: string }>(async (ctx, _request, { id }) => {
+  const result = await employees.deleteEmployee(ctx, id);
+  return NextResponse.json(result);
+});

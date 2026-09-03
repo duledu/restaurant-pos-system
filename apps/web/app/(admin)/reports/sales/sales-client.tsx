@@ -69,7 +69,7 @@ export function SalesClient() {
   }, [load]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-line pb-5">
         <div>
           <p className="mb-1 text-[10px] font-bold uppercase tracking-[.18em] text-gold">Finansijski pregled</p><h1 className="text-2xl font-bold tracking-tight text-ink sm:text-[28px]">Izveštaj o prodaji</h1>

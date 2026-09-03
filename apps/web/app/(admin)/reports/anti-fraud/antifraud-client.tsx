@@ -163,7 +163,7 @@ export function AntiFraudClient() {
   }, [load]);
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="w-full">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-ink">Anti-fraud pregled</h1>

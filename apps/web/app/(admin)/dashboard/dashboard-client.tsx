@@ -135,6 +135,15 @@ async function apiFetch(url: string) {
 // prikazi u TableCore-u (KDS/SSE), bez agresivnog 1s pollinga (specifikacija #18).
 const AUTO_REFRESH_MS = 60_000;
 
+// Modul-nivo (ne komponentni state) keš poslednjeg učitanog snapshot-a —
+// preživljava unmount/remount (napuštanje pa povratak na /dashboard), za
+// razliku od useState/useRef. Isti TTL kao AUTO_REFRESH_MS — stranica VEĆ
+// tolerisala tu zastarelost dok je montirana (periodični tihi refresh
+// iznad), pa keš samo izbegava PONOVNO plaćanje istog troška (19 paralelnih
+// izveštajnih upita) na svaki dolazak na stranicu unutar tog prozora, bez
+// da menja postojeći nivo "uživosti" podataka.
+let dashboardCache: { key: string; data: DashboardData; expiresAt: number } | null = null;
+
 export function DashboardClient() {
   const [filters, setFilters] = useState<ReportFilterState>({ locationId: "ALL", preset: "today" });
   const [data, setData] = useState<DashboardData | null>(null);
@@ -146,9 +155,23 @@ export function DashboardClient() {
   const [showDetails, setShowDetails] = useState(false);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!opts?.silent) setLoading(true);
-    setError(null);
     const query = reportFiltersToQuery(filters);
+    const cacheKey = `${query}|${itemLimit}`;
+
+    if (!opts?.silent) {
+      const cached = dashboardCache;
+      if (cached && cached.key === cacheKey && Date.now() < cached.expiresAt) {
+        // Sveže dovoljno (unutar istog prozora koji stranica već toleriše
+        // dok je montirana) — trenutan prikaz, bez skeleton-a i bez ijednog
+        // mrežnog poziva. Periodični tihi refresh ispod će ionako uskoro
+        // osvežiti kad prozor istekne.
+        setData(cached.data);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+    }
+    setError(null);
     try {
       const [
         kpi, trend, hourly, weekdaysRes, stations, items, categories, employees,
@@ -178,12 +201,14 @@ export function DashboardClient() {
         apiFetch(`/api/admin/inventory/attention?locationId=${filters.locationId}`),
         apiFetch(`/api/admin/ingredients/attention?locationId=${filters.locationId}`),
       ]);
-      setData({
+      const nextData: DashboardData = {
         kpi, trend, hourly, weekdays: weekdaysRes.weekdays, stations, items, categories,
         employees: employees.rows, employeesNormalized, voids, discounts, payments, shifts,
         insights: insightsRes.insights, status: statusRes, signals: signalsRes.signals,
         antifraud: antifraudRes, stock: stockRes, ingredientStock: ingredientStockRes,
-      });
+      };
+      setData(nextData);
+      dashboardCache = { key: cacheKey, data: nextData, expiresAt: Date.now() + AUTO_REFRESH_MS };
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju kontrolne table");
     } finally {

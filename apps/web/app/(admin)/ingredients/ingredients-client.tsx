@@ -478,9 +478,12 @@ export function IngredientsClient() {
     apiFetch("/api/admin/locations").then((j) => {
       const locs: Location[] = j.locations ?? [];
       setLocations(locs);
-      const first = locs[0]?.id ?? "";
-      setLocationId(first);
-      load(first, null);
+      // NE zovi load() ovde — samo postavi locationId. Efekat ispod već
+      // reaguje na promenu locationId-a i pokreće load(); pozivanje odavde
+      // TAKOĐE bi izazvalo DUPLI fetch iste liste sirovina na svaki dolazak
+      // na stranicu (i direktan poziv ovde, i onaj iz efekta ispod, oba sa
+      // istim efektivnim parametrima).
+      setLocationId(locs[0]?.id ?? "");
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

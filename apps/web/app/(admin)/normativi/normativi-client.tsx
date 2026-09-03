@@ -134,7 +134,7 @@ export function NormativiClient() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="w-full">
       <PageHeader title="Normativi" description="Receptura po artikliju menija — koje sirovine i u kojoj količini ulaze u svaki gotov proizvod" />
 
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
