@@ -99,7 +99,7 @@ describe("submitted item is protected from normal edit/delete", () => {
     const waiter = context(fixture, "WAITER", "waiter-1");
     const { order, item } = await submitOrderWithQuantity(fixture, waiter, 2);
 
-    await expect(orders.removeItem(waiter, order.id, item.id)).rejects.toThrow("ne može se menjati");
+    await expect(orders.removeItem(waiter, order.id, item.id)).rejects.toThrow("Poništi");
 
     const entry = await prisma.auditLog.findFirst({
       where: { entityId: order.id, action: "order_item.mutation_attempt_rejected" },
@@ -114,7 +114,7 @@ describe("submitted item is protected from normal edit/delete", () => {
     const waiter = context(fixture, "WAITER", "waiter-1");
     const { order, item } = await submitOrderWithQuantity(fixture, waiter, 2);
 
-    await expect(orders.updateItem(waiter, order.id, item.id, { quantity: 1 })).rejects.toThrow("ne može se menjati");
+    await expect(orders.updateItem(waiter, order.id, item.id, { quantity: 1 })).rejects.toThrow("Poništi");
     const reloaded = await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } });
     expect(reloaded.quantity).toBe(2); // nepromenjeno — nema tihe redukcije
   });

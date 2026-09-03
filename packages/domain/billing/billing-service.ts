@@ -32,11 +32,15 @@ async function loadOrderForBilling(ctx: AuthContext, orderId: string) {
  * Pregled računa — subtotal/porez/ukupno se RAČUNAJU IZNOVA iz trenutnih
  * OrderItem snapshot redova na svaki poziv (nikad se ne čuvaju na Order-u)
  * da bi konobar uvek video tačno stanje, uključujući eventualne void-ovane
- * stavke (Faza 4). CANCELLED stavke se isključuju iz naplate.
+ * stavke (Faza 4). CANCELLED stavke se isključuju iz naplate. VIŠE-KRUŽNO
+ * NARUČIVANJE (Faza 9): DRAFT stavke (neposlat naredni krug, još nikad
+ * poslat kuhinji/šanku) se TAKOĐE isključuju — gost se ne naplaćuje za
+ * nešto što još nije ni poslato, i eventualno se predomisli/ukloni pre
+ * slanja.
  */
 export async function getBillPreview(ctx: AuthContext, orderId: string) {
   const order = await loadOrderForBilling(ctx, orderId);
-  const payableItems = order.items.filter((item) => item.status !== "CANCELLED");
+  const payableItems = order.items.filter((item) => item.status !== "CANCELLED" && item.status !== "DRAFT");
   const totals = computeOrderTotals(payableItems, order.discountAmount ?? 0);
 
   return {
@@ -155,7 +159,23 @@ export async function completePayment(ctx: AuthContext, orderId: string, input: 
     if (freshOrder.status === "CANCELLED") throw new Error("Porudžbina je otkazana");
     if (!PAYABLE_STATUSES.has(freshOrder.status)) throw new Error("Porudžbina još nije poslata — nema šta da se naplati");
 
-    const payableItems = freshOrder.items.filter((item) => item.status !== "CANCELLED");
+    // VIŠE-KRUŽNO NARUČIVANJE: DRAFT stavke (neposlat naredni krug) se
+    // NIKAD ne naplaćuju — ali njihovo POSTOJANJE mora blokirati punu
+    // (jednokratnu) naplatu cele porudžbine (specifikacija Faze 9 #9:
+    // "Order closes only when ... no active unsent items remain"). Bez ove
+    // provere bi puna naplata mogla zatvoriti porudžbinu (i osloboditi sto)
+    // dok neposlata stavka ostane "osirotela" — porudžbina je zatvorena,
+    // stavka se više nikad ne može ni poslati ni ukloniti.
+    const draftItems = freshOrder.items.filter((item) => item.status === "DRAFT");
+    if (draftItems.length > 0) {
+      throw new Error(
+        `Porudžbina ima neposlate stavke (${draftItems.map((i) => i.name).join(", ")}) — pošalji ih kuhinji/šanku ili ih ukloni pre naplate.`
+      );
+    }
+
+    // (draftItems je već proveren/blokiran iznad — ovaj filter je defense-
+    // in-depth, ne oslanja se samo na proveru iznad.)
+    const payableItems = freshOrder.items.filter((item) => item.status !== "CANCELLED" && item.status !== "DRAFT");
     if (payableItems.length === 0) throw new Error("Porudžbina nema nijednu stavku za naplatu");
     if (payableItems.some((item) => item.paidQuantity !== 0)) {
       throw new Error("Porudžbina je već delimično naplaćena — preostale stavke naplati kroz Podeli račun");

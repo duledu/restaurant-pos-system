@@ -94,10 +94,15 @@ interface UnpaidLine {
   remaining: number;
 }
 
-/** Neplaćen ostatak po stavci (isključuje CANCELLED i potpuno-plaćene redove). */
+/**
+ * Neplaćen ostatak po stavci (isključuje CANCELLED, potpuno-plaćene redove,
+ * I DRAFT stavke — VIŠE-KRUŽNO NARUČIVANJE, Faza 9: neposlat naredni krug
+ * se ne naplaćuje kroz Split Bill dok se ne pošalje kuhinji/šanku, isti
+ * razlog kao billing-service.getBillPreview/completePayment).
+ */
 function unpaidLines(order: OrderWithItems): UnpaidLine[] {
   return order.items
-    .filter((item) => item.status !== "CANCELLED")
+    .filter((item) => item.status !== "CANCELLED" && item.status !== "DRAFT")
     .map((item) => ({ item, remaining: item.quantity - item.paidQuantity }))
     .filter((line) => line.remaining > 0);
 }
@@ -111,6 +116,11 @@ function unpaidLines(order: OrderWithItems): UnpaidLine[] {
 export async function getSplitBillPreview(ctx: AuthContext, orderId: string) {
   const order = await loadOrderForSplit(ctx, orderId);
   const lines = unpaidLines(order);
+  // VIŠE-KRUŽNO NARUČIVANJE: neposlata (DRAFT) stavka nikad nije na
+  // računu (vidi unpaidLines), ali NJENO POSTOJANJE mora sprečiti da se
+  // ekran prikaže kao "sve naplaćeno" — konobar mora prvo poslati ili
+  // ukloniti tu stavku.
+  const hasUnsentDraftItems = order.items.some((item) => item.status === "DRAFT");
   const totals = computeOrderTotals(
     lines.map((l) => ({ price: l.item.price, taxRate: l.item.taxRate, quantity: l.remaining })),
     0
@@ -126,7 +136,8 @@ export async function getSplitBillPreview(ctx: AuthContext, orderId: string) {
     orderId: order.id,
     tableLabel: order.table.label,
     status: order.status,
-    fullyPaid: lines.length === 0,
+    fullyPaid: lines.length === 0 && !hasUnsentDraftItems,
+    hasUnsentDraftItems,
     items: lines.map((l) => ({
       orderItemId: l.item.id,
       name: l.item.name,
@@ -272,8 +283,18 @@ export async function paySplitBill(ctx: AuthContext, orderId: string, input: Spl
     // porudžbini — SVEŽE i pod zaključanim redom, pa je pouzdano (nijedna
     // druga split naplata za OVU porudžbinu nije mogla biti "u letu" dok
     // ovde stojimo, vidi napomenu na vrhu fajla).
+    //
+    // VIŠE-KRUŽNO NARUČIVANJE (Faza 9): `unpaidLines` (iznad) NAMERNO
+    // isključuje DRAFT stavke (neposlat naredni krug se ne naplaćuje) — ali
+    // NJIHOVO POSTOJANJE mora i dalje sprečiti da se porudžbina proglasi
+    // "u potpunosti naplaćena" ("Order closes only when ... no active
+    // unsent items remain"). Bez ove eksplicitne provere, plaćanje koje
+    // pokrije SVE poslate stavke bi zatvorilo porudžbinu dok neposlata
+    // stavka ostane osirotela (porudžbina zatvorena, stavka se više ne
+    // može ni poslati ni ukloniti).
+    const hasUnsentDraftItems = freshOrder.items.some((item) => item.status === "DRAFT");
     const freshUnpaid = unpaidLines(freshOrder);
-    const isFinalPayment = freshUnpaid.every((l) => (requestedByItem.get(l.item.id) ?? 0) >= l.remaining);
+    const isFinalPayment = !hasUnsentDraftItems && freshUnpaid.every((l) => (requestedByItem.get(l.item.id) ?? 0) >= l.remaining);
 
     // Popust: prorata na osnovu SVEŽE sume već potrošenog popusta (upit nad
     // istom zaključanom porudžbinom — nijedna druga naplata ga nije mogla

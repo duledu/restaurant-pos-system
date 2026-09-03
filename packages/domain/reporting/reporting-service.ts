@@ -632,6 +632,7 @@ const ACTION_LABELS: Record<string, string> = {
   "auth.login": "Prijava zaposlenog (email)",
   "auth.pin_login": "Prijava zaposlenog (PIN)",
   "order.submitted": "Porudžbina poslata",
+  "order.items_resubmitted": "Novi krug stavki poslat",
   "payment.completed": "Plaćanje završeno",
   "shift.opened": "Smena otvorena",
   "shift.closed": "Smena zatvorena",

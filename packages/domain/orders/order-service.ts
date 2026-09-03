@@ -16,6 +16,13 @@ const ORDER_ITEM_INCLUDE = {
   modifiers: { orderBy: { sortOrder: "asc" as const } },
 };
 
+// VIŠE-KRUŽNO NARUČIVANJE: porudžbina prima NOVE (DRAFT) stavke sve dok
+// nije zatvorena (COMPLETED/CANCELLED) — "poslato" NIKAD ne znači "ova
+// porudžbina više ne prima stavke", znači SAMO "trenutno neposlate stavke
+// su poslate". Ista lista statusa kao PAYABLE_STATUSES u billing-service.ts
+// (svaki status u kom porudžbina još nije naplaćena/otkazana), plus DRAFT.
+const OPEN_ORDER_STATUSES = new Set(["DRAFT", "SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"]);
+
 /**
  * Otvara NOVU draft porudžbinu za sto (ili vraća postojeći DRAFT ako već
  * postoji za taj sto — konobar se ne kažnjava dvostrukim klikom na isti
@@ -63,7 +70,22 @@ export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
   });
 }
 
-async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
+/**
+ * VIŠE-KRUŽNO NARUČIVANJE: zamenjuje raniju getOwnedDraftOrder. Porudžbina
+ * je "otvorena" za DODAVANJE novih (DRAFT) stavki u SVAKOM statusu osim
+ * COMPLETED/CANCELLED — poslata porudžbina i dalje prima naredne krugove
+ * (samo NOVE stavke ulaze kao DRAFT, već poslate ostaju netaknute, vidi
+ * addItem/updateItem/removeItem ispod za per-stavka DRAFT čuvare).
+ *
+ * Vlasništvo (requireDraftOwnership) se primenjuje ISKLJUČIVO dok porudžbina
+ * JOŠ NIJE ni jednom poslata (status === DRAFT) — ista zaštita kao pre,
+ * sprečava da dva konobara istovremeno menjaju isti još-neposlati korpu.
+ * Čim je porudžbina BAR JEDNOM poslata, svaki WAITER sa pristupom lokaciji
+ * sme da doda naredni krug — isto pravilo kao void/transfer/naplata
+ * (order-access.ts/transfer-service.ts: "SUBMITTED+ porudžbina NEMA
+ * per-konobar vlasništvo").
+ */
+async function getOwnedOpenOrder(ctx: AuthContext, orderId: string) {
   requireOrderOperator(ctx);
   const order = await prisma.order.findFirst({ where: { id: orderId, ...scopeToRestaurant(ctx) } });
   if (!order) throw new Error("Porudžbina nije pronađena");
@@ -71,12 +93,12 @@ async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
   // NIJE dovoljan (zaposleni sa pristupom Lokaciji A ne sme dotaći
   // porudžbinu Lokacije B u istom restoranu).
   requireLocationAccess(ctx, order.locationId);
-  if (order.status !== "DRAFT") {
-    // Poslata porudžbina se NIKAD ne menja ovim putem (add/update/remove) —
-    // to je bez izuzetka putanja za controlled void (voidOrderItem, Faza 4).
-    // Zabeleži pokušaj kao evidenciju (specifikacija #11) — bez obzira da li
-    // je posledica zastarelog UI-ja na klijentu ili stvarnog pokušaja
-    // zaobilaženja void toka, obrazac ponavljanja postaje vidljiv u Fazi 5.
+  if (!OPEN_ORDER_STATUSES.has(order.status)) {
+    // Zatvorena (naplaćena/otkazana) porudžbina se NIKAD ne menja ovim
+    // putem. Zabeleži pokušaj kao evidenciju (specifikacija #11) — bez
+    // obzira da li je posledica zastarelog UI-ja na klijentu ili stvarnog
+    // pokušaja zaobilaženja void toka, obrazac ponavljanja postaje vidljiv
+    // u Fazi 5.
     await recordAuditEntry(ctx, {
       entityType: "Order",
       entityId: orderId,
@@ -87,10 +109,36 @@ async function getOwnedDraftOrder(ctx: AuthContext, orderId: string) {
       severity: "WARNING",
       isSuspicious: true,
     });
-    throw new Error("Porudžbina više nije u nacrtu — ne može se menjati ovim putem");
+    throw new Error("Porudžbina je zatvorena (naplaćena/otkazana) — ne može se menjati");
   }
-  requireDraftOwnership(ctx, order.openedBy);
+  if (order.status === "DRAFT") requireDraftOwnership(ctx, order.openedBy);
   return order;
+}
+
+/**
+ * Zajednička audit evidencija za SVAKI odbijen pokušaj izmene VEĆ POSLATE
+ * stavke ovim (ne-Void) putem — isti obrazac/kategorija kao odbijanje na
+ * nivou cele zatvorene porudžbine u getOwnedOpenOrder iznad. entityId
+ * namerno ostaje orderId (ne itemId), isti obrazac na koji se oslanja
+ * postojeći "UNAUTHORIZED_ATTEMPTS" signal u audit-service.ts.
+ */
+async function recordItemMutationRejected(
+  ctx: AuthContext,
+  order: { locationId: string },
+  orderId: string,
+  itemId: string,
+  itemStatus: string
+): Promise<void> {
+  await recordAuditEntry(ctx, {
+    entityType: "Order",
+    entityId: orderId,
+    action: "order_item.mutation_attempt_rejected",
+    newValue: { itemId, itemStatus },
+    locationId: order.locationId,
+    category: "UNAUTHORIZED_ATTEMPT",
+    severity: "WARNING",
+    isSuspicious: true,
+  });
 }
 
 export async function getOrder(ctx: AuthContext, orderId: string) {
@@ -106,7 +154,7 @@ export async function getOrder(ctx: AuthContext, orderId: string) {
 }
 
 export async function addItem(ctx: AuthContext, orderId: string, input: AddOrderItemInput) {
-  const order = await getOwnedDraftOrder(ctx, orderId);
+  const order = await getOwnedOpenOrder(ctx, orderId);
 
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: input.menuItemId, restaurantId: ctx.restaurantId, deletedAt: null },
@@ -186,8 +234,10 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
 /**
  * Izmena izabranih dodataka na VEĆ POSTOJEĆOJ draft stavci — potpuna zamena
  * skupa (ne parcijalni patch), ista validacija/cenovanje kao addItem. Samo
- * za DRAFT stavke (getOwnedDraftOrder već to garantuje) — poslata stavka se
- * ne menja ovim putem, isto pravilo kao updateItem/removeItem.
+ * za DRAFT stavke — poslata (ili kasnija) stavka se NE menja ovim putem
+ * (eksplicitna per-stavka provera ispod, isto pravilo kao updateItem/
+ * removeItem), da izmena dodataka nikad tiho ne iskrivi već poslat KDS
+ * tiket/istoriju.
  */
 export async function updateItemModifiers(
   ctx: AuthContext,
@@ -195,9 +245,13 @@ export async function updateItemModifiers(
   itemId: string,
   input: UpdateOrderItemModifiersInput
 ) {
-  await getOwnedDraftOrder(ctx, orderId);
+  const modifiersOrder = await getOwnedOpenOrder(ctx, orderId);
   const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
   if (!item) throw new Error("Stavka nije pronađena");
+  if (item.status !== "DRAFT") {
+    await recordItemMutationRejected(ctx, modifiersOrder, orderId, itemId, item.status);
+    throw new Error("Stavka je već poslata kuhinji/šanku — dodaci poslate stavke se ne mogu menjati ovim putem");
+  }
   if (!item.menuItemId) throw new Error("Stavka nema povezan artikal iz menija");
 
   const menuItem = await prisma.menuItem.findFirst({ where: { id: item.menuItemId, restaurantId: ctx.restaurantId } });
@@ -235,10 +289,21 @@ async function currentModifierTotal(orderItemId: string): Promise<Prisma.Decimal
 }
 
 export async function updateItem(ctx: AuthContext, orderId: string, itemId: string, input: UpdateOrderItemInput) {
-  const order = await getOwnedDraftOrder(ctx, orderId);
+  const order = await getOwnedOpenOrder(ctx, orderId);
 
   const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
   if (!item) throw new Error("Stavka nije pronađena");
+  // VIŠE-KRUŽNO NARUČIVANJE: ova putanja menja SAMO neposlate (DRAFT)
+  // stavke. Već poslata stavka (bilo iz ranijeg kruga ili upravo poslata)
+  // se NIKAD ne menja in-place ovim putem — količina/cena poslate stavke
+  // ide isključivo kroz controlled void (voidOrderItem, Faza 4); "još jedan
+  // Omlet" posle prvog slanja postaje NOV, zaseban DRAFT red preko addItem
+  // (vidi order-client.tsx addItemWithModifiers — poklapanje za
+  // inkrementiranje sad namerno gleda SAMO postojeće DRAFT redove).
+  if (item.status !== "DRAFT") {
+    await recordItemMutationRejected(ctx, order, orderId, itemId, item.status);
+    throw new Error("Stavka je već poslata kuhinji/šanku — količina poslate stavke se menja samo kroz Poništi (Void)");
+  }
 
   // P3.3: samo kad se KOLIČINA UVEĆAVA i artikal ima poznat menuItemId —
   // smanjenje/uklanjanje je uvek dozvoljeno (specifikacija #20), i ne
@@ -274,15 +339,22 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
 }
 
 export async function removeItem(ctx: AuthContext, orderId: string, itemId: string) {
-  await getOwnedDraftOrder(ctx, orderId);
+  const order = await getOwnedOpenOrder(ctx, orderId);
 
   const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId } });
   if (!item) throw new Error("Stavka nije pronađena");
+  // VIŠE-KRUŽNO NARUČIVANJE: uklanjanje ovim putem je dozvoljeno SAMO za
+  // stavku koja je I DALJE DRAFT (nikad poslata kuhinji/šanku, bez obzira
+  // da li je porudžbina u celini već poslata jedan ili više puta ranije) —
+  // fizičko brisanje je bezbedno SAMO za takvu stavku. Već poslata stavka
+  // (iz ovog ili ranijeg kruga) ide kroz sasvim drugu putanju (Poništi/
+  // Void, Faza 4), NIKAD ovom funkcijom — vidi pravilo "poslata stavka se
+  // ne menja in-place".
+  if (item.status !== "DRAFT") {
+    await recordItemMutationRejected(ctx, order, orderId, itemId, item.status);
+    throw new Error("Stavka je već poslata kuhinji/šanku — koristi Poništi (Void) umesto uklanjanja");
+  }
 
-  // Stavka je I DALJE u DRAFT-u (nikad poslata kuhinji/šanku) — fizičko
-  // brisanje je bezbedno ovde. Nakon submit-a, uklanjanje stavke ide kroz
-  // sasvim drugu putanju (item_cancel_requested/approved, Faza 5), NIKAD
-  // ovom funkcijom — vidi pravilo "poslata stavka se ne menja in-place".
   await prisma.$transaction(async (tx) => {
     await tx.orderItem.delete({ where: { id: itemId } });
     await tx.orderEvent.create({
@@ -292,41 +364,67 @@ export async function removeItem(ctx: AuthContext, orderId: string, itemId: stri
 }
 
 /**
- * Slanje porudžbine — jedina kritična transakcija u Fazi 3. Redosled je
- * namerno: validacija → transakcija → commit → (Faza 4+: pokušaj štampe VAN
- * transakcije, Faza 6) → real-time obaveštenje. Real-time publish je posle
- * uspešnog COMMIT-a, nikad unutar transakcije (event ne sme otići napolje
- * ako se transakcija poništi).
+ * Slanje porudžbine — jedina kritična transakcija u Fazi 3, PROŠIRENA u
+ * Fazi 9 za VIŠE-KRUŽNO NARUČIVANJE: "poslato" NIKAD ne znači "ova
+ * porudžbina više ne prima stavke" — samo "trenutno neposlate (DRAFT)
+ * stavke su poslate". Ova funkcija se sme pozivati proizvoljan broj puta na
+ * istoj porudžbini (svaki put kad postoji bar jedna nova DRAFT stavka);
+ * SVAKI poziv obrađuje ISKLJUČIVO stavke koje su TRENUTNO DRAFT — već
+ * poslate/spremljene/servirane/plaćene/poništene stavke iz ranijih krugova
+ * se NIKAD ne dodiruju (nema ponovnog OrderItemStation reda, nema ponovnog
+ * KDS tiketa, nema promene cene već poslate stavke).
  *
- * IDEMPOTENTNOST: idempotencyKey generiše klijent PRE prvog pokušaja i
- * šalje isti ključ na svaki retry. `@@unique([restaurantId, idempotencyKey])`
- * na bazi garantuje da dupli zahtev (duplo kliknuto dugme, mrežni retry,
- * ponovljen SSE event) nikad ne kreira drugu porudžbinu — drugi poziv sa
- * istim ključem vraća VEĆ POSTOJEĆU porudžbinu umesto greške, što je
- * očekivano ponašanje za retry.
+ * Redosled je namerno: validacija → transakcija → commit → (Faza 4+:
+ * pokušaj štampe VAN transakcije, Faza 6) → real-time obaveštenje. Real-time
+ * publish je posle uspešnog COMMIT-a, nikad unutar transakcije (event ne
+ * sme otići napolje ako se transakcija poništi).
+ *
+ * IDEMPOTENTNOST — PRVO slanje: idempotencyKey generiše klijent PRE prvog
+ * pokušaja i šalje isti ključ na svaki retry. `@@unique([restaurantId,
+ * idempotencyKey])` na bazi garantuje da dupli zahtev (duplo kliknuto
+ * dugme, mrežni retry, ponovljen SSE event) nikad ne kreira drugu
+ * porudžbinu — drugi poziv sa istim ključem vraća VEĆ POSTOJEĆU porudžbinu
+ * umesto greške.
+ *
+ * IDEMPOTENTNOST — NAREDNI krugovi: Order.idempotencyKey je JEDNA kolona,
+ * već trajno zauzeta PRVIM slanjem — ne može ponovo poslužiti kao ključ za
+ * naredne krugove. Umesto toga, sam atomski "obradi SAMO trenutno DRAFT
+ * stavke" upit ispod JE idempotentan po konstrukciji: dupli/konkurentni
+ * poziv za isti krug nalazi NULA preostalih DRAFT stavki (već ih je
+ * obradio prvi pobednik) i bezbedno se vraća bez greške, umesto duplog
+ * slanja/duplog OrderItemStation reda.
  */
 export async function submitOrder(ctx: AuthContext, orderId: string, input: SubmitOrderInput) {
-  // Idempotency provera PRE transakcije: ako je ključ već upotrebljen za
-  // ORDER ID koji nije ovaj, to je ili greška klijenta (ponovna upotreba
-  // ključa za drugu porudžbinu) ili legitiman retry iste porudžbine —
-  // razlikujemo ih po orderId podudaranju.
-  const existingWithKey = await prisma.order.findFirst({
-    where: { restaurantId: ctx.restaurantId, idempotencyKey: input.idempotencyKey },
-  });
-  if (existingWithKey) {
-    if (existingWithKey.id === orderId) {
-      // Retry iste operacije — vrati postojeće stanje, ne greši.
-      return getOrder(ctx, orderId);
+  const order = await getOwnedOpenOrder(ctx, orderId);
+  const isFirstSubmission = order.status === "DRAFT";
+
+  if (isFirstSubmission) {
+    // Idempotency provera PRE transakcije, SAMO za prvo slanje — ako je
+    // ključ već upotrebljen za ORDER ID koji nije ovaj, to je ili greška
+    // klijenta (ponovna upotreba ključa za drugu porudžbinu) ili legitiman
+    // retry iste porudžbine — razlikujemo ih po orderId podudaranju.
+    const existingWithKey = await prisma.order.findFirst({
+      where: { restaurantId: ctx.restaurantId, idempotencyKey: input.idempotencyKey },
+    });
+    if (existingWithKey) {
+      if (existingWithKey.id === orderId) {
+        // Retry iste operacije — vrati postojeće stanje, ne greši.
+        return getOrder(ctx, orderId);
+      }
+      throw new Error("Idempotency ključ je već upotrebljen za drugu porudžbinu");
     }
-    throw new Error("Idempotency ključ je već upotrebljen za drugu porudžbinu");
   }
 
-  const order = await getOwnedDraftOrder(ctx, orderId);
-
   const submitted = await prisma.$transaction(async (tx) => {
-    const items = await tx.orderItem.findMany({ where: { orderId } });
+    // SAMO trenutno DRAFT stavke — ovo je i selekcija ZA slanje i atomska
+    // idempotency brava (vidi napomenu iznad) u jednom.
+    const items = await tx.orderItem.findMany({ where: { orderId, status: "DRAFT" } });
     if (items.length === 0) {
-      throw new Error("Porudžbina nema nijednu stavku");
+      if (isFirstSubmission) throw new Error("Porudžbina nema nijednu stavku");
+      // Naredni krug bez ijedne nove stavke (dupli/konkurentni poziv, ili
+      // zastareo UI) — bezbedan no-op, NIKAD greška koja bi sugerisala da
+      // je nešto pošlo naopako.
+      return null;
     }
 
     // Re-snapshot cene/naziva u trenutku SLANJA (ne samo dodavanja u draft)
@@ -419,12 +517,20 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
 
     await assertIngredientStockAvailable(tx, { restaurantId: ctx.restaurantId, locationId: order.locationId, requirements: stockRequirements });
 
-    await tx.orderItem.updateMany({ where: { orderId }, data: { status: "SUBMITTED" } });
+    // Precizno po ID-u (ne po statusu porudžbine) — VIŠE-KRUŽNO NARUČIVANJE:
+    // `items` je već filtrirano na DRAFT iznad, pa je ovo TAČNO skup stavki
+    // OVOG kruga, ni jedna više. Već poslate/spremne/servirane/plaćene
+    // stavke iz ranijih krugova se OVIM ne dodiruju.
+    const draftItemIds = items.map((item) => item.id);
+    const submittedAt = new Date();
+    await tx.orderItem.updateMany({ where: { id: { in: draftItemIds } }, data: { status: "SUBMITTED", submittedAt } });
     await tx.orderItem.updateMany({
-      where: { orderId, preparationStation: "NONE" },
+      where: { id: { in: draftItemIds }, preparationStation: "NONE" },
       data: { status: "SERVED" },
     });
 
+    // Novi OrderItemStation redovi SAMO za stavke OVOG kruga — nikad za
+    // ranije poslate stavke (koje već imaju svoje, ne diramo ih ovde).
     const stationRows = items.flatMap((item) =>
       stationsForPreparation(item.preparationStation).map((station) => ({
         orderItemId: item.id,
@@ -436,44 +542,67 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       await tx.orderItemStation.createMany({ data: stationRows });
     }
 
-    const updatedOrder = await tx.order.update({
-      where: { id: orderId },
-      data: {
-        status: "SUBMITTED",
-        idempotencyKey: input.idempotencyKey,
-        submittedAt: new Date(),
-      },
-    });
+    // Order-nivo polja (status/idempotencyKey/submittedAt = vreme PRVOG
+    // slanja) se postavljaju SAMO pri prvom slanju — naredni krug ih
+    // ostavlja potpuno netaknutim (porudžbina je već "poslata", ostaje u
+    // svom trenutnom, možda i dalje naprednijem statusu — npr. ACCEPTED/
+    // PREPARING/READY/SERVED ako je kuhinja već napredovala raniji krug).
+    const updatedOrder = isFirstSubmission
+      ? await tx.order.update({
+          where: { id: orderId },
+          data: { status: "SUBMITTED", idempotencyKey: input.idempotencyKey, submittedAt },
+        })
+      : order;
 
     await tx.orderEvent.create({
-      data: { orderId, type: "order_submitted", createdBy: ctx.employeeId, payload: { itemCount: items.length } },
+      data: {
+        orderId,
+        type: isFirstSubmission ? "order_submitted" : "order_items_resubmitted",
+        createdBy: ctx.employeeId,
+        payload: { itemCount: items.length, itemIds: draftItemIds },
+      },
     });
 
     await recordAuditEntry(ctx, {
       entityType: "Order",
       entityId: orderId,
-      action: "order.submitted",
-      newValue: { itemCount: items.length },
+      action: isFirstSubmission ? "order.submitted" : "order.items_resubmitted",
+      newValue: { itemCount: items.length, itemIds: draftItemIds },
       locationId: order.locationId,
     }, tx);
 
-    return updatedOrder;
+    return { order: updatedOrder, draftItemIds };
   });
+
+  if (!submitted) {
+    // Ništa novo za slanje — vidi napomenu unutar transakcije. Vraća
+    // trenutno (već ispravno) stanje, bez greške.
+    return getOrder(ctx, orderId);
+  }
 
   // Real-time obaveštenje TEK posle uspešnog COMMIT-a.
   await ssePublisher.publish({
     type: "order.submitted",
     restaurantId: ctx.restaurantId,
-    locationId: submitted.locationId,
-    payload: { orderId, tableId: submitted.tableId },
+    locationId: submitted.order.locationId,
+    payload: { orderId, tableId: submitted.order.tableId },
     occurredAt: new Date().toISOString(),
   });
 
   // Faza 6: dispatch kuhinjskog/šank PrintJob-a TEK POSLE commit-a, van
   // transakcije — neuspeh štampe NIKAD ne sme oboriti već poslatu porudžbinu
   // niti KDS stanje (OrderItemStation je već zapisan gore, nezavisno od ovoga).
+  // `orderItemIds` ograničava tiket ISKLJUČIVO na stavke OVOG kruga (nikad
+  // ranije poslate) — vidi print-service.ts. `dispatchKeySuffix` je
+  // izostavljen za PRVO slanje (nepromenjen format ključa, potpuna
+  // unazadna kompatibilnost), a za NAREDNE krugove je idempotencyKey OVOG
+  // zahteva — različit ključ = odvojen, nov tiket po krugu; isti ključ na
+  // retry = isti tiket, nikad dupliran.
   try {
-    await dispatchStationPrintJobs(ctx, orderId);
+    await dispatchStationPrintJobs(ctx, orderId, {
+      orderItemIds: submitted.draftItemIds,
+      dispatchKeySuffix: isFirstSubmission ? undefined : input.idempotencyKey,
+    });
   } catch (err) {
     console.error("[printing] dispatchStationPrintJobs failed for order", orderId, err);
   }
