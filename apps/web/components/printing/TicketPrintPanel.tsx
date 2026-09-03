@@ -16,6 +16,7 @@ interface KitchenBarContent {
   orderNumber: string;
   submittedAt: string;
   items: TicketItem[];
+  isAdditional?: boolean;
 }
 
 interface StornoContent {
@@ -60,7 +61,27 @@ interface ReceiptContent {
   changeAmount: string;
 }
 
-export type TicketContent = KitchenBarContent | StornoContent | ReceiptContent;
+interface ShiftReportContent {
+  kind: "SHIFT_REPORT";
+  restaurantName: string;
+  employeeName: string;
+  employeeRole: string;
+  openedAt: string;
+  closedAt: string;
+  orderCount: number;
+  totalRevenue: string;
+  cashTotal: string;
+  cardTotal: string;
+  currency: string;
+  expectedCash: string;
+  countedCash: string;
+  cashDifference: string;
+  discountTotal: string;
+  voidCount: number;
+  voidValue: string;
+}
+
+export type TicketContent = KitchenBarContent | StornoContent | ReceiptContent | ShiftReportContent;
 
 const PAYMENT_LABEL: Record<"CASH" | "CARD", string> = { CASH: "GOTOVINA", CARD: "KARTICA" };
 
@@ -82,13 +103,14 @@ function KitchenBarTicket({ content }: { content: KitchenBarContent }) {
     <>
       <div className="t-header">TABLECORE</div>
       <div className="t-station">{content.stationLabel}</div>
-      <div className="t-meta">STO: {content.tableLabel}</div>
+      <div className="t-table">STO {content.tableLabel}</div>
+      <div className="t-meta">NARUDŽBINA #{content.orderNumber}</div>
+      <div className="t-meta">{fmtTime(content.submittedAt)}</div>
       <div className="t-meta">KONOBAR: {content.waiterName}</div>
-      <div className="t-meta">NARUDŽBINA: #{content.orderNumber}</div>
-      <div className="t-meta">VREME: {fmtTime(content.submittedAt)}</div>
+      {content.isAdditional && <div className="t-additional">DODATNA PORUDŽBINA</div>}
       <hr className="t-sep" />
       {content.items.map((item, i) => (
-        <div key={i}>
+        <div className="t-item-block" key={i}>
           <div className="t-item">
             <span className="t-item-qty">{item.quantity}x</span>
             <span style={{ flex: 1 }}>{item.name}</span>
@@ -191,11 +213,51 @@ function ReceiptTicket({ content }: { content: ReceiptContent }) {
   );
 }
 
+function ShiftReportTicket({ content }: { content: ShiftReportContent }) {
+  const diff = Number(content.cashDifference);
+  return (
+    <>
+      <div className="t-header">{content.restaurantName}</div>
+      <div className="t-station">ZAVRŠNI IZVEŠTAJ SMENE</div>
+      <div className="t-meta">Zaposleni: {content.employeeName}</div>
+      <div className="t-meta">Uloga: {content.employeeRole}</div>
+      <div className="t-meta">Datum: {fmtDateTime(content.closedAt)}</div>
+      <hr className="t-sep" />
+      <div className="t-line"><span>Početak smene:</span><span>{fmtDateTime(content.openedAt)}</span></div>
+      <div className="t-line"><span>Kraj smene:</span><span>{fmtDateTime(content.closedAt)}</span></div>
+      <hr className="t-sep" />
+      <div className="t-line"><span>Broj računa:</span><span>{content.orderCount}</span></div>
+      <div className="t-total"><span>Ukupna prodaja:</span><span>{Number(content.totalRevenue).toFixed(2)} {content.currency}</span></div>
+      <hr className="t-sep" />
+      <div className="t-line"><span>GOTOVINA:</span><span>{Number(content.cashTotal).toFixed(2)}</span></div>
+      <div className="t-line"><span>KARTICA:</span><span>{Number(content.cardTotal).toFixed(2)}</span></div>
+      <hr className="t-sep" />
+      <div className="t-line"><span>Očekivana gotovina:</span><span>{Number(content.expectedCash).toFixed(2)}</span></div>
+      <div className="t-line"><span>Prijavljena gotovina:</span><span>{Number(content.countedCash).toFixed(2)}</span></div>
+      <div className="t-total"><span>RAZLIKA:</span><span>{diff > 0 ? "+" : ""}{diff.toFixed(2)}</span></div>
+      {(Number(content.discountTotal) > 0 || content.voidCount > 0) && (
+        <>
+          <hr className="t-sep" />
+          {Number(content.discountTotal) > 0 && (
+            <div className="t-line"><span>Popusti:</span><span>{Number(content.discountTotal).toFixed(2)}</span></div>
+          )}
+          {content.voidCount > 0 && (
+            <div className="t-line"><span>Storniranja ({content.voidCount}):</span><span>{Number(content.voidValue).toFixed(2)}</span></div>
+          )}
+        </>
+      )}
+      <hr className="t-sep" />
+      <div className="t-footer">Vreme zatvaranja: {fmtTime(content.closedAt)}</div>
+      <div className="t-legal">Interni izveštaj smene — nije fiskalni Z-izveštaj</div>
+    </>
+  );
+}
+
 /**
  * Renderuje BILO KOJI PrintJob.content oblik — kuhinjski/šank tiket, STORNO,
- * ili kupčev račun. Uvek uvijeno u .print-ticket-root (vidi
- * print-thermal.css) tako da je van @media print nevidljivo/van ekrana —
- * ne oslanja se ni na jedan deo normalnog dashboard styling-a.
+ * kupčev račun, ili završni izveštaj smene. Uvek uvijeno u .print-ticket-root
+ * (vidi print-thermal.css) tako da je van @media print nevidljivo/van
+ * ekrana — ne oslanja se ni na jedan deo normalnog dashboard styling-a.
  */
 export function TicketPrintPanel({ content }: { content: TicketContent }) {
   return (
@@ -205,6 +267,8 @@ export function TicketPrintPanel({ content }: { content: TicketContent }) {
           <StornoTicket content={content} />
         ) : content.kind === "RECEIPT" ? (
           <ReceiptTicket content={content} />
+        ) : content.kind === "SHIFT_REPORT" ? (
+          <ShiftReportTicket content={content} />
         ) : (
           <KitchenBarTicket content={content} />
         )}

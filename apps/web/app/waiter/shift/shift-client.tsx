@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
+import { TicketPrintPanel, type TicketContent } from "../../../components/printing/TicketPrintPanel";
 
 interface OpenOrderRef {
   id: string;
@@ -50,6 +51,10 @@ export function ShiftClient() {
   const [countedCash, setCountedCash] = useState("");
   const [closing, setClosing] = useState(false);
   const [closed, setClosed] = useState<ClosedShift | null>(null);
+
+  const [reportContent, setReportContent] = useState<TicketContent | null>(null);
+  const [printBusy, setPrintBusy] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -102,6 +107,21 @@ export function ShiftClient() {
     }
   }
 
+  async function handlePrintReport(shiftId: string) {
+    if (printBusy) return;
+    setPrintBusy(true);
+    setPrintError(null);
+    try {
+      const res = await apiFetch(`/api/pos/shift/${shiftId}/report`);
+      setReportContent(res.content);
+      window.print();
+    } catch (e) {
+      setPrintError(e instanceof Error ? e.message : "Greška pri štampi izveštaja");
+    } finally {
+      setPrintBusy(false);
+    }
+  }
+
   if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
 
   if (noShift) {
@@ -151,13 +171,26 @@ export function ShiftClient() {
               </div>
             </div>
           </div>
+          {printError && <div className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{printError}</div>}
+
+          <button
+            type="button"
+            onClick={() => handlePrintReport(closed.id)}
+            disabled={printBusy}
+            className="mt-4 w-full rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
+          >
+            {printBusy ? "…" : "Štampaj izveštaj smene"}
+          </button>
+
           <button
             onClick={() => router.push("/waiter/tables")}
-            className="mt-6 w-full rounded-md bg-graphite py-4 text-lg font-semibold text-cream-100 transition-colors hover:bg-graphite-700"
+            className="mt-3 w-full rounded-md bg-graphite py-4 text-lg font-semibold text-cream-100 transition-colors hover:bg-graphite-700"
           >
             Nazad na stolove
           </button>
         </div>
+
+        {reportContent && <TicketPrintPanel content={reportContent} />}
       </div>
     );
   }

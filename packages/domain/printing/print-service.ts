@@ -133,6 +133,11 @@ export async function dispatchStationPrintJobs(
         note: r.orderItem.note,
         modifiers: formatModifiersForTicket(r.orderItem.modifiers),
       })),
+      // VIŠE-KRUŽNO NARUČIVANJE: dispatchKeySuffix je izostavljen ISKLJUČIVO
+      // za prvo slanje (vidi order-service.ts submitOrder) — prisustvo
+      // ovog argumenta je zato tačan, već postojeći signal da je ovo NAREDNI
+      // (dodatni) krug, ne novi parametar koji treba posebno prosleđivati.
+      isAdditional: Boolean(options?.dispatchKeySuffix),
     });
     const dispatchKey = options?.dispatchKeySuffix ? `submit:${station}:${options.dispatchKeySuffix}` : `submit:${station}`;
     await prisma.printJob.upsert({

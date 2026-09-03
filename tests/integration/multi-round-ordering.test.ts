@@ -113,8 +113,13 @@ describe("multi-round ordering: core acceptance scenario", () => {
     // Round 2's KDS ticket contains ONLY Biftek, never Omlet again.
     const jobs = await prisma.printJob.findMany({ where: { orderId: round1.id, type: "KITCHEN" }, orderBy: { createdAt: "asc" } });
     expect(jobs).toHaveLength(2);
-    const round2Content = jobs[1].content as { items: { name: string }[] };
+    const round1Content = jobs[0].content as { items: { name: string }[]; isAdditional: boolean };
+    const round2Content = jobs[1].content as { items: { name: string }[]; isAdditional: boolean };
     expect(round2Content.items.map((i) => i.name)).toEqual(["Biftek"]);
+
+    // First submission is never labeled "DODATNA PORUDŽBINA"; every later round always is.
+    expect(round1Content.isAdditional).toBe(false);
+    expect(round2Content.isAdditional).toBe(true);
   });
 });
 
