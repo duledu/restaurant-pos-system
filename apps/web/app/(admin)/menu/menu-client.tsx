@@ -324,7 +324,7 @@ export function MenuManagementClient() {
         <div className="ml-auto">
           <button
             onClick={() => setShowAddForm(true)}
-            className="rounded-sm bg-gold px-4 py-1.5 text-sm font-medium text-white hover:bg-gold-dark transition-colors"
+            className="min-h-11 rounded-sm bg-gold px-4 py-1.5 text-sm font-medium text-white hover:bg-gold-dark transition-colors"
           >
             + Dodaj artikal
           </button>

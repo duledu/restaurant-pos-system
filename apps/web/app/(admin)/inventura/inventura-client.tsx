@@ -442,7 +442,7 @@ function SessionDetailView({
         </div>
       )}
 
-      <div className="mb-3 flex gap-2">
+      <div className="mb-3 flex flex-wrap gap-2">
         <button
           type="button"
           onClick={() => setTab("INGREDIENT")}

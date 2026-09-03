@@ -143,7 +143,7 @@ export function PrintersSettingsClient() {
                     Omogućen
                   </label>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="mb-1 block text-xs text-inkSoft">Naziv</label>
                     <input
@@ -201,7 +201,7 @@ export function PrintersSettingsClient() {
                   type="button"
                   onClick={() => save(cfg)}
                   disabled={saving === station || !cfg.name}
-                  className="mt-4 rounded-md bg-graphite px-5 py-2 text-sm font-semibold text-cream-100 disabled:opacity-40"
+                  className="mt-4 min-h-11 rounded-md bg-graphite px-5 py-2 text-sm font-semibold text-cream-100 disabled:opacity-40"
                 >
                   {saving === station ? "Čuvanje…" : "Sačuvaj"}
                 </button>

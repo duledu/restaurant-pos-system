@@ -82,11 +82,11 @@ export function KitchenProductionClient() {
             Stavke koje je kuhinja izbacila (SERVED) i poništene stavke kuhinjske stanice
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
           <button
             type="button"
             onClick={() => window.print()}
-            className="min-h-11 rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink print:hidden"
+            className="min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink print:hidden sm:w-auto"
           >
             Štampaj / PDF
           </button>
