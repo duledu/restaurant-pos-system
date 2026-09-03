@@ -981,7 +981,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
       {/* Sticky pregled porudžbine */}
       <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Novi krug" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Dodatna porudžbina" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
         {/* max-h u dvh (ne fiksni px) da se prilagodi visini ekrana telefona;
             overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
