@@ -431,6 +431,9 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [roles, setRoles] = useState<string[]>([]);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
+  // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
+  // dok zahtev traje (nezavisno od cartBusy, koje se odnosi na korpu).
+  const [pickupBusyId, setPickupBusyId] = useState<string | null>(null);
   // Artikal za koji je otvoren modal izbora dodataka (dodavanje nove stavke).
   const [modifierPickerItem, setModifierPickerItem] = useState<MenuItem | null>(null);
   // Postojeća DRAFT stavka čiji se dodaci uređuju (umesto dodavanja nove).
@@ -753,6 +756,29 @@ export function OrderClient({ tableId }: { tableId: string }) {
     setVoidingItem(null);
   }
 
+  /**
+   * FAZA 10 — PREUZETO: konobar potvrđuje da je fizički preuzeo SPREMNU
+   * stavku sa kuhinje/šanka (READY -> SERVED). Optimistički — red nestaje iz
+   * "SPREMNO ZA PREUZIMANJE" ODMAH; na grešku se vraća + prikazuje poruka
+   * (isti obrazac kao removeItem/changeQuantity iznad). Server ostaje
+   * autoritativan i za konkurentno preuzimanje (dva tapa/dva uređaja) — vidi
+   * production-service.ts confirmPickup guard.
+   */
+  async function confirmPickup(item: OrderItem) {
+    if (!order || pickupBusyId) return;
+    setPickupBusyId(item.id);
+    setError(null);
+    setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, status: "SERVED" } : i)) } : prev));
+    try {
+      await apiFetch(`/api/pos/orders/${order.id}/items/${item.id}/pickup`, { method: "POST" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri potvrdi preuzimanja");
+      setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, status: "READY" } : i)) } : prev));
+    } finally {
+      setPickupBusyId(null);
+    }
+  }
+
   async function submit() {
     // VIŠE-KRUŽNO NARUČIVANJE: dozvoljeno kad god postoji BAR JEDNA nova
     // (DRAFT) stavka — ne samo pre prvog slanja. Zaštita od dvostrukog
@@ -787,6 +813,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const hasEverSubmitted = order.status !== "DRAFT";
   const sentItems = order.items.filter((i) => i.status !== "DRAFT");
   const draftItems = order.items.filter((i) => i.status === "DRAFT");
+  const readyItems = order.items.filter((i) => i.status === "READY");
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
   // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
@@ -810,6 +837,38 @@ export function OrderClient({ tableId }: { tableId: string }) {
 
       <div className="mx-auto w-full max-w-5xl">
         {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
+
+        {/* FAZA 10: najistaknutija sekcija na ekranu kad postoji bar jedna
+            SPREMNA stavka — konobar mora ovo da primeti PRE menija/istorije.
+            Svaka stavka se potvrđuje NEZAVISNO (sopstveno dugme), nikad
+            čekanje da CEO sto/porudžbina bude spremna odjednom. */}
+        {readyItems.length > 0 && (
+          <div className="m-3 rounded-md border-2 border-gold bg-gold-soft p-3">
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-[.16em] text-gold-dark">Spremno za preuzimanje</p>
+            <div className="space-y-2">
+              {readyItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2.5 shadow-sm">
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-ink">
+                      {item.quantity}× {item.name}
+                    </div>
+                    {item.modifiers.length > 0 && (
+                      <div className="truncate text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => confirmPickup(item)}
+                    disabled={pickupBusyId === item.id}
+                    className="min-h-11 shrink-0 rounded-md bg-gold px-4 text-sm font-bold text-white transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
+                  >
+                    {pickupBusyId === item.id ? "…" : "Preuzeto"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {hasEverSubmitted && (
           <div className="p-3">

@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 import { isTableHeldByAnotherWaiter } from "../../../lib/table-ownership";
+import { myReadyItemIds, hasNewReadyId } from "../../../lib/ready-notifications";
 
+interface ReadyItem {
+  id: string;
+  name: string;
+}
 interface Table {
   id: string;
   label: string;
@@ -17,6 +22,19 @@ interface Table {
   // table-service.ts listTables. Nikad ime/lični podaci, samo ID za
   // poređenje sa sopstvenim nalogom PRE navigacije.
   activeOrderOwnerId: string | null;
+  // FAZA 10: stavke SPREMNE za preuzimanje na aktivnoj porudžbini ovog
+  // stola (prazan niz kad nema nijedne) — vidi table-service.ts listTables.
+  readyItems: ReadyItem[];
+}
+
+const READY_SOUND_PREF_KEY = "tablecore.waiterReadySound";
+
+function readySoundEnabled(): boolean {
+  try {
+    return localStorage.getItem(READY_SOUND_PREF_KEY) !== "off"; // podrazumevano UKLJUČEN
+  } catch {
+    return true;
+  }
 }
 interface FloorWithTables {
   id: string;
@@ -46,7 +64,15 @@ function MoreIcon() {
  * (graphite vs graphite-700), ne nova boja — konobar vidi na prvi pogled
  * da je sto zauzet (tamna površina) I da li je njegov, bez dodatnog tapa.
  */
-function tileStyle(table: Table, isMine: boolean): string {
+function tileStyle(table: Table, isMine: boolean, hasReady: boolean): string {
+  // FAZA 10: SPREMNO obaveštenje nadjačava normalan "zauzet" izgled — mora
+  // biti upadljivije od običnog OCCUPIED stanja, ali i dalje profesionalno
+  // (gold akcent, već korišćen u ostatku premium UI-ja, ne semafor-crveno).
+  // Prikazuje se ISKLJUČIVO odgovornom konobaru (isMine) — "ne obaveštavaj
+  // nepovezane konobare".
+  if (isMine && hasReady) {
+    return "bg-graphite border-gold text-white shadow-card ring-2 ring-gold/70";
+  }
   switch (table.status) {
     case "FREE":
       return "bg-white border-line border-l-4 border-l-success/40 text-ink hover:border-l-success active:bg-success-soft/10";
@@ -106,6 +132,54 @@ export function PosClient() {
   // Hitna ispravka: sto koji je zauzet od strane DRUGOG konobara — tap
   // otvara ovaj popup umesto navigacije (vidi selectTable ispod).
   const [blockedTable, setBlockedTable] = useState<Table | null>(null);
+  const [readySoundOn, setReadySoundOn] = useState(true);
+
+  // FAZA 10 — SPREMNO zvuk: `null` = bazna linija još nije uspostavljena
+  // (prvi poziv posle mount-a NIKAD ne zvoni — postojeće SPREMNO stavke iz
+  // ranije nisu "nov" događaj za OVU sesiju ekrana). Posle toga, zvoni SAMO
+  // kad se pojavi id koji ranije nije bio u skupu — nikad ponovo za isti,
+  // već poznat id (bez obzira koliko puta poll ponovi isti odgovor).
+  const knownReadyIdsRef = useRef<Set<string> | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const employeeIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setReadySoundOn(readySoundEnabled());
+  }, []);
+
+  useEffect(() => {
+    employeeIdRef.current = employeeId;
+  }, [employeeId]);
+
+  function beepReady() {
+    if (!readySoundEnabled()) return;
+    try {
+      audioCtxRef.current ??= new AudioContext();
+      const ctx = audioCtxRef.current;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 660;
+      gain.gain.setValueAtTime(0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    } catch {
+      // Audio blokiran/nepodržan u ovom browseru (autoplay politika i sl.)
+      // — vizuelno obaveštenje (bedž/pulsiranje) i dalje radi bez zvuka.
+    }
+  }
+
+  function toggleReadySound() {
+    const next = !readySoundOn;
+    setReadySoundOn(next);
+    try {
+      localStorage.setItem(READY_SOUND_PREF_KEY, next ? "on" : "off");
+    } catch {
+      // localStorage nedostupan (privatni režim i sl.) — podešavanje važi
+      // samo za trenutnu sesiju, bez greške konobaru.
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,6 +190,7 @@ export function PosClient() {
       if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
       setLocationId(loc);
       setEmployeeId(me.employeeId ?? null);
+      employeeIdRef.current = me.employeeId ?? null;
       setEmployeeName(me.firstName ? `${me.firstName} ${me.lastName ?? ""}`.trim() : null);
 
       const [shiftRes, tablesRes] = await Promise.all([
@@ -124,12 +199,43 @@ export function PosClient() {
       ]);
       setShift(shiftRes.shift);
       setFloors(tablesRes.floors);
+      // Bazna linija — vidi napomenu uz knownReadyIdsRef iznad.
+      const allTables = tablesRes.floors.flatMap((f: FloorWithTables) => f.tables);
+      knownReadyIdsRef.current = myReadyItemIds(allTables, me.employeeId ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Neočekivana greška");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // PERF: lagan periodični poll SAMO za stolove (ne me/smena, koji se retko
+  // menjaju) — isti red veličine kao ostali "uživo" prikazi (KDS 4s, waiter
+  // stock 15s). Tiho (bez loading spinnera) i nezavisno od `loading`
+  // state-a da ne treperi ekran; greška na jednom ciklusu se tiho preskače
+  // (server ionako ostaje autoritativan pri sledećem tapu na sto).
+  const refreshTables = useCallback(async () => {
+    if (!locationId) return;
+    try {
+      const tablesRes = await apiFetch(`/api/pos/tables?locationId=${locationId}`);
+      const nextFloors: FloorWithTables[] = tablesRes.floors;
+      const nextReadyIds = myReadyItemIds(nextFloors.flatMap((f) => f.tables), employeeIdRef.current);
+      if (knownReadyIdsRef.current !== null && hasNewReadyId(knownReadyIdsRef.current, nextReadyIds)) {
+        beepReady();
+      }
+      knownReadyIdsRef.current = nextReadyIds;
+      setFloors(nextFloors);
+    } catch {
+      // Tiho pozadinsko osvežavanje — vidi napomenu iznad.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locationId]);
+
+  useEffect(() => {
+    if (!locationId) return;
+    const interval = setInterval(refreshTables, 5000);
+    return () => clearInterval(interval);
+  }, [locationId, refreshTables]);
 
   useEffect(() => {
     load();
@@ -219,6 +325,20 @@ export function PosClient() {
           >
             Smena aktivna — zatvori
           </button>
+          <button
+            type="button"
+            onClick={toggleReadySound}
+            title={readySoundOn ? "Zvuk za SPREMNO — uključen" : "Zvuk za SPREMNO — isključen"}
+            aria-label={readySoundOn ? "Isključi zvuk za SPREMNO" : "Uključi zvuk za SPREMNO"}
+            aria-pressed={readySoundOn}
+            className="flex h-11 w-11 items-center justify-center rounded-md border border-line text-ink/60 hover:bg-ink/[0.04]"
+          >
+            {readySoundOn ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M18.5 6a9 9 0 0 1 0 12" /></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4V5Z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
+            )}
+          </button>
           <QuickLockButton />
           <LogoutButton />
         </div>
@@ -265,6 +385,14 @@ export function PosClient() {
               >
                 Zatvori smenu
               </button>
+              <button
+                type="button"
+                onClick={toggleReadySound}
+                aria-pressed={readySoundOn}
+                className="block w-full px-4 py-3 text-left text-sm font-medium text-ink hover:bg-ink/[0.04]"
+              >
+                {readySoundOn ? "Isključi zvuk za SPREMNO" : "Uključi zvuk za SPREMNO"}
+              </button>
               <div className="border-t border-line px-2 py-1">
                 <QuickLockButton />
               </div>
@@ -286,17 +414,30 @@ export function PosClient() {
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
             {floor.tables.map((table) => {
               const isMine = table.activeOrderOwnerId !== null && table.activeOrderOwnerId === employeeId;
+              const hasReady = isMine && table.readyItems.length > 0;
               return (
                 <button
                   key={table.id}
                   onClick={() => selectTable(table)}
-                  className={`relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${tileStyle(table, isMine)}`}
+                  className={`relative flex min-h-[112px] flex-col items-start justify-between overflow-hidden rounded-lg border p-4 text-left transition-all duration-150 active:translate-y-px active:scale-[.98] ${tileStyle(table, isMine, hasReady)}`}
                 >
+                  {/* Suptilan puls SAMO na dekorativnom prstenu (ne na celoj
+                      pločici/tekstu) — broj stola/bedž ostaju uvek čitki,
+                      bez "agresivnog treperenja" (specifikacija #2). */}
+                  {hasReady && (
+                    <span className="pointer-events-none absolute inset-0 animate-pulse rounded-lg ring-2 ring-gold" aria-hidden="true" />
+                  )}
                   <span className={`absolute right-3 top-3 h-2 w-2 rounded-full ${STATUS_DOT[table.status]}`} aria-hidden="true" />
                   <span className="text-2xl font-bold tracking-tight">{table.label}</span>
                   <span>
                     <span className="block text-xs font-semibold opacity-80">{statusLabel(table, isMine)}</span>
-                    <span className="mt-0.5 block text-[11px] opacity-50">{table.capacity} mesta</span>
+                    {hasReady ? (
+                      <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-gold px-2 py-0.5 text-[11px] font-bold text-white">
+                        {table.readyItems.length} spremno
+                      </span>
+                    ) : (
+                      <span className="mt-0.5 block text-[11px] opacity-50">{table.capacity} mesta</span>
+                    )}
                   </span>
                 </button>
               );

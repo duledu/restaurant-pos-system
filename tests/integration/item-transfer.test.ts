@@ -248,12 +248,12 @@ describe("transfer: KDS state preserved", () => {
     });
 
     const sourceStation = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
-    expect(sourceStation.status).toBe("PREPARING"); // nepromenjeno transferom
+    expect(sourceStation.status).toBe("READY"); // nepromenjeno transferom
 
     const destItem = await prisma.orderItem.findFirstOrThrow({ where: { orderId: result.destinationOrderId } });
     const destStation = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: destItem.id } });
-    expect(destStation.status).toBe("PREPARING"); // KOPIRANO stanje, ne novi SUBMITTED zahtev
-    expect(destItem.status).toBe("PREPARING");
+    expect(destStation.status).toBe("READY"); // KOPIRANO stanje, ne novi SUBMITTED zahtev
+    expect(destItem.status).toBe("READY");
   });
 
   it("preserves KDS history exactly via a whole-item move (same OrderItemStation row, same orderItemId)", async () => {

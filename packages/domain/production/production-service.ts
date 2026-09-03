@@ -2,6 +2,7 @@ import { prisma, type OrderItemStatus } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { ssePublisher } from "../realtime/sse-publisher";
 import { aggregateStationStatus } from "./station-state";
+import { requireOrderOperator } from "../orders/order-access";
 
 const PRODUCTION_VIEW = "production.view";
 const PRODUCTION_MANAGE = "production.manage";
@@ -150,11 +151,19 @@ export async function listCompletedStationOrders(ctx: AuthContext, locationId: s
   }));
 }
 
+// UPROŠĆEN TOK (Faza 10): Kuhinja/Šank sada idu direktno PRIHVATI -> SPREMNO
+// (ACCEPTED -> READY, preskačući PREPARING/"Počni pripremu" koji se pokazao
+// kao nepotreban dodatni korak). PREPARING OSTAJE u enumu i OSTAJE ovde kao
+// validan sledeći korak — postojeće stavke koje su VEĆ u PREPARING stanju u
+// trenutku deploy-a moraju i dalje moći da napreduju (PREPARING -> READY),
+// bez migracije podataka (namerno aditivna, potpuno unazad-kompatibilna
+// izmena, ne brisanje statusa). READY -> SERVED je NAMERNO uklonjeno odavde
+// — preuzimanje (SERVED) više NIJE akcija Kuhinje/Šanka, vidi confirmPickup
+// ispod (WAITER akcija, sopstvena autorizacija).
 const NEXT_STATUS: Record<string, string> = {
   SUBMITTED: "ACCEPTED",
-  ACCEPTED: "PREPARING",
+  ACCEPTED: "READY",
   PREPARING: "READY",
-  READY: "SERVED",
 };
 
 export async function advanceItemStatus(
@@ -220,6 +229,65 @@ export async function advanceItemStatus(
     restaurantId: ctx.restaurantId,
     locationId: item.order.locationId,
     payload: { orderId, itemId, status: nextStatus },
+    occurredAt: new Date().toISOString(),
+  });
+
+  return updated;
+}
+
+/**
+ * PREUZETO — konobar potvrđuje da je fizički preuzeo SPREMNU stavku sa
+ * kuhinje/šanka. NAMERNO odvojeno od advanceItemStatus iznad: ovo je
+ * konobarska (requireOrderOperator — WAITER ili menadžment), ne
+ * kuhinjska/šank (production.manage + stanica) radnja — vidi napomenu uz
+ * NEXT_STATUS. Item.status je već "READY" samo kada su SVE njegove stanice
+ * (jedna za KITCHEN/BAR, obe za KITCHEN_AND_BAR) stigle do READY
+ * (aggregateStationStatus = najmanje napredna) — zato je bezbedno da JEDAN
+ * tap ovde označi SVAKU READY stanicu te stavke kao SERVED odjednom, bez
+ * posebnog izbora stanice od strane konobara.
+ */
+export async function confirmPickup(ctx: AuthContext, orderId: string, itemId: string) {
+  requireOrderOperator(ctx);
+
+  const item = await prisma.orderItem.findFirst({
+    where: { id: itemId, orderId, order: scopeToRestaurant(ctx) },
+    include: { order: true },
+  });
+  if (!item) throw new Error("Stavka nije pronađena");
+  requireLocationAccess(ctx, item.order.locationId);
+  if (item.status !== "READY") {
+    throw new Error("Stavka nije (više) spremna za preuzimanje — osveži prikaz");
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // Isti "guard na trenutno stanje" obrazac kao svuda drugde (billing/void/
+    // transfer) — zatvara race sa konkurentnim pokušajem preuzimanja iste
+    // stavke (dva tapa, dva uređaja/konobara).
+    const advanced = await tx.orderItemStation.updateMany({
+      where: { orderItemId: itemId, status: "READY" },
+      data: { status: "SERVED" },
+    });
+    if (advanced.count === 0) throw new Error("Stavka je već preuzeta — osveži prikaz");
+
+    const updatedItem = await tx.orderItem.update({ where: { id: itemId }, data: { status: "SERVED" } });
+
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        type: "order_item.picked_up",
+        createdBy: ctx.employeeId,
+        payload: { itemId, name: item.name },
+      },
+    });
+
+    return updatedItem;
+  });
+
+  await ssePublisher.publish({
+    type: "order_item.status_changed",
+    restaurantId: ctx.restaurantId,
+    locationId: item.order.locationId,
+    payload: { orderId, itemId, status: "SERVED" },
     occurredAt: new Date().toISOString(),
   });
 
