@@ -53,11 +53,16 @@ const STATUS_LABEL: Record<string, string> = {
   READY: "Spremno",
 };
 
+// UPROŠĆEN TOK (Faza 10): PRIHVATI -> SPREMNO direktno, "Počni pripremu"
+// korak je uklonjen iz radnog toka (server: production-service.ts
+// NEXT_STATUS). PREPARING i dalje ima dugme radi unazadne kompatibilnosti
+// SAMO za stavke koje su VEĆ bile u tom stanju pre ovog deploy-a. READY
+// NEMA dugme ovde — preuzimanje je sada isključivo konobarska radnja (vidi
+// order-client.tsx "SPREMNO ZA PREUZIMANJE"), ne kuhinjska/šank.
 const STATUS_ACTION_LABEL: Record<string, string> = {
   SUBMITTED: "Prihvati",
-  ACCEPTED: "Počni pripremu",
+  ACCEPTED: "Označi spremno",
   PREPARING: "Označi spremno",
-  READY: "Preuzeto",
 };
 
 const STATUS_BADGE: Record<string, string> = {

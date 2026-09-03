@@ -30,7 +30,18 @@ export async function listTables(ctx: AuthContext, locationId: string) {
         include: {
           orders: {
             where: { status: { notIn: ["COMPLETED", "CANCELLED"] } },
-            select: { openedBy: true },
+            select: {
+              openedBy: true,
+              // FAZA 10 — SPREMNO obaveštenje konobaru: OrderItem.status
+              // "READY" je već tačan agregat (najmanje napredna stanica —
+              // vidi aggregateStationStatus) da je stavka SPREMNA ZA
+              // PREUZIMANJE. Vraćamo SAMO id/name (mala, minimalna dodatna
+              // težina po stolu) — dovoljno da klijent izračuna broj I
+              // otkrije KOJE konkretne stavke su nove otkad je poslednji put
+              // pitao (za zvuk "samo za genuinski nov READY događaj", ne
+              // samo broj koji bi mogao ostati isti dok se stavke menjaju).
+              items: { where: { status: "READY" }, select: { id: true, name: true } },
+            },
             take: 1,
           },
         },
@@ -50,6 +61,7 @@ export async function listTables(ctx: AuthContext, locationId: string) {
     tables: sortByLabelNatural(floor.tables).map(({ orders, ...table }) => ({
       ...table,
       activeOrderOwnerId: orders[0]?.openedBy ?? null,
+      readyItems: orders[0]?.items ?? [],
     })),
   }));
 }

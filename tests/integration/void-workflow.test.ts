@@ -400,12 +400,14 @@ describe("void: kitchen/bar production history", () => {
     const manager = context(fixture, "MANAGER", "mgr-1");
     const { order, item } = await submitOrderWithQuantity(fixture, waiter, 1);
 
-    // Kuhinja započinje pripremu (SUBMITTED -> ACCEPTED -> PREPARING) PRE poništavanja.
+    // Kuhinja prihvata i završava pripremu (SUBMITTED -> ACCEPTED -> READY,
+    // Faza 10 uprošćen tok — "Počni pripremu"/PREPARING korak je uklonjen)
+    // PRE poništavanja.
     const { production } = await import("@rcs/domain");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SUBMITTED");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "ACCEPTED");
-    const preparingState = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
-    expect(preparingState.status).toBe("PREPARING");
+    const readyState = await prisma.orderItemStation.findFirstOrThrow({ where: { orderItemId: item.id } });
+    expect(readyState.status).toBe("READY");
 
     await voids.voidOrderItem(manager, order.id, item.id, {
       quantity: 1,
@@ -423,9 +425,9 @@ describe("void: kitchen/bar production history", () => {
     expect(events.some((e) => e.type === "item_voided")).toBe(true);
 
     // Kuhinja koja pokuša da nastavi (stale expectedStatus) korektno biva odbijena —
-    // stavka je već otkazana, ne "PREPARING" kako je kuhinja mislila.
+    // stavka je već otkazana, ne "READY" kako je kuhinja mislila.
     await expect(
-      production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "PREPARING")
+      production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "READY")
     ).rejects.toThrow("već promenjen");
   });
 
@@ -581,13 +583,13 @@ describe("cancelAbandonedOrder: core behavior", () => {
     const { order, item } = await submitOrderWithQuantity(fixture, waiter, 1);
 
     const { production } = await import("@rcs/domain");
-    // advanceItemStatus's 5th argument is the CURRENT expected status — 4
-    // calls (SUBMITTED->ACCEPTED->PREPARING->READY->SERVED) reach SERVED;
-    // a 5th call attempting to advance FROM SERVED (terminal) would fail.
+    // Faza 10 uprošćen tok: Kuhinja ide SUBMITTED->ACCEPTED->READY direktno
+    // (advanceItemStatus), a READY->SERVED je sada ISKLJUČIVO konobarska
+    // radnja (production.confirmPickup, requireOrderOperator) — Kuhinja
+    // više ne može sama sebe da "posluži".
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "SUBMITTED");
     await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "ACCEPTED");
-    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "PREPARING");
-    await production.advanceItemStatus(kitchen, order.id, item.id, "KITCHEN", "READY");
+    await production.confirmPickup(waiter, order.id, item.id);
 
     await voids.cancelAbandonedOrder(manager, order.id, { reason: "Development cleanup — release stuck table" });
 
