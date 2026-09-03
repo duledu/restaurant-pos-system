@@ -50,6 +50,9 @@ export function buildKitchenBarTicketContent(params: {
   orderNumber: string;
   submittedAt: string;
   items: TicketLineItem[];
+  // VIŠE-KRUŽNO NARUČIVANJE (Faza 9/11): true za SVAKO slanje OSIM prvog —
+  // vidi print-service.ts dispatchStationPrintJobs (isFirstSubmission).
+  isAdditional?: boolean;
 }): KitchenBarTicketContent {
   return {
     kind: params.station,
@@ -60,7 +63,7 @@ export function buildKitchenBarTicketContent(params: {
     orderNumber: params.orderNumber,
     submittedAt: params.submittedAt,
     items: params.items,
-    isAdditional: false,
+    isAdditional: params.isAdditional ?? false,
   };
 }
 
@@ -192,4 +195,41 @@ export function buildReceiptTicketContent(params: {
 
 export function shortOrderNumber(orderId: string): string {
   return orderId.slice(0, 8).toUpperCase();
+}
+
+/**
+ * FAZA 11 — Završni izveštaj smene (INTERNI TableCore izveštaj, NIKAD
+ * fiskalni Z-izveštaj/račun — vidi legalNote ispod). Izvor istine je
+ * ISKLJUČIVO Shift red (zamrznut u closeShift, nikad se ne preračunava) +
+ * lagana agregacija Payment/OrderItemVoid po shiftId — ništa se ovde ne
+ * izmišlja. Namerno BEZ sopstvenog PrintJob reda (Shift, za razliku od
+ * Order/Payment, nema prirodan "vlasnički" orderId za taj model) — štampa
+ * se direktno iz uvek-dostupnih zamrznutih polja Shift reda, pa je
+ * ponovljena štampa (posle neuspele fizičke štampe) trivijalno bezbedna:
+ * isti ulaz -> isti izlaz, proizvoljan broj puta.
+ */
+export interface ShiftReportTicketContent {
+  kind: "SHIFT_REPORT";
+  restaurantName: string;
+  employeeName: string;
+  employeeRole: string;
+  openedAt: string;
+  closedAt: string;
+  orderCount: number;
+  totalRevenue: string;
+  cashTotal: string;
+  cardTotal: string;
+  currency: string;
+  expectedCash: string;
+  countedCash: string;
+  cashDifference: string;
+  discountTotal: string;
+  voidCount: number;
+  voidValue: string;
+}
+
+export const SHIFT_REPORT_LEGAL_NOTE = "Interni izveštaj smene — nije fiskalni Z-izveštaj";
+
+export function buildShiftReportTicketContent(params: Omit<ShiftReportTicketContent, "kind">): ShiftReportTicketContent {
+  return { kind: "SHIFT_REPORT", ...params };
 }

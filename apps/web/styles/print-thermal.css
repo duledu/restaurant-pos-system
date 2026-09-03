@@ -1,6 +1,12 @@
 /**
- * Faza 6 — termalni tiket/račun (80mm primarno; 58mm podržan promenom
+ * Faza 6/11 — termalni tiket/račun (80mm primarno; 58mm podržan promenom
  * jedne CSS promenljive, bez arhitektonske izmene — zahtev #10).
+ *
+ * Faza 11: PRAVI radni tiket za kuhinju/šank, ne web stranica smanjena na
+ * 80mm — velik, podeban tekst čitljiv sa uobičajene radne udaljenosti u
+ * kuhinji (STO/količina/naziv su namerno najkrupniji elementi na tiketu),
+ * generozan razmak između stavki, bez boja/senki/ukrasa (termalna štampa
+ * je crno-bela, jednobojna).
  *
  * Van @media print ovaj sloj je potpuno nevidljiv (position:fixed, van
  * ekrana) — dashboard styling se NIKAD ne oslanja na ove klase, i obrnuto.
@@ -18,9 +24,9 @@
   background: #fff;
   color: #000;
   font-family: "Courier New", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.35;
-  padding: 4mm;
+  font-size: 16px;
+  line-height: 1.3;
+  padding: 3mm 4mm;
   box-sizing: border-box;
 }
 
@@ -36,73 +42,110 @@
 
 .print-ticket .t-header {
   font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.05em;
+  font-size: 18px;
+  letter-spacing: 0.06em;
   text-align: center;
 }
 
+/* KUHINJA / ŠANK — stanica mora biti jasna na prvi pogled sa udaljenosti. */
 .print-ticket .t-station {
   font-weight: 700;
-  font-size: 14px;
+  font-size: 22px;
+  letter-spacing: 0.04em;
   text-align: center;
-  margin: 2mm 0;
+  margin: 1.5mm 0 2.5mm 0;
+}
+
+/* STO N — najkrupniji element na celom tiketu (zahtev #2: "large table number"). */
+.print-ticket .t-table {
+  font-weight: 700;
+  font-size: 30px;
+  text-align: center;
+  margin: 0 0 2mm 0;
 }
 
 .print-ticket .t-meta {
-  font-size: 12px;
-  margin: 1mm 0;
+  font-size: 15px;
+  text-align: center;
+  margin: 0.8mm 0;
+}
+
+/* DODATNA PORUDŽBINA — mora upadati u oči, jasno odvojena od osnovnog
+ * tiketa (zahtev #4: "Clearly label the ticket"). Invertovan (crno na belo
+ * postaje belo na crno) je jednobojan i termalno-bezbedan efekat "podebljanja"
+ * bez oslanjanja na boju. */
+.print-ticket .t-additional {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.03em;
+  text-align: center;
+  background: #000;
+  color: #fff;
+  padding: 1.5mm 0;
+  margin: 2mm 0;
 }
 
 .print-ticket .t-sep {
   border: none;
-  border-top: 1px dashed #000;
-  margin: 2mm 0;
+  border-top: 2px dashed #000;
+  margin: 2.5mm 0;
 }
 
+/* Stavka: krupna, podebljana količina + naziv (zahtev #2: "large/bold
+ * quantities and item names"), sa vidljivim razmakom ISPOD svake stavke
+ * (ne samo margin-top) tako da se lista "diše" i ne deluje zbijeno na
+ * papiru — primer iz specifikacije eksplicitno prazan red između stavki. */
 .print-ticket .t-item {
   display: flex;
-  justify-content: space-between;
-  gap: 2mm;
+  align-items: flex-start;
+  gap: 2.5mm;
   font-weight: 700;
-  font-size: 13px;
-  margin: 1.5mm 0 0 0;
+  font-size: 19px;
+  margin: 0;
+  padding: 1.5mm 0;
+}
+
+.print-ticket .t-item-block + .t-item-block {
+  border-top: 1px dotted #000;
 }
 
 .print-ticket .t-item-qty {
-  min-width: 8mm;
+  min-width: 11mm;
 }
 
 .print-ticket .t-note {
-  font-size: 11px;
+  font-size: 13px;
   font-style: italic;
-  padding-left: 8mm;
-  margin: 0.5mm 0 0 0;
+  padding-left: 13.5mm;
+  margin: 0.5mm 0 1mm 0;
 }
 
 .print-ticket .t-line {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
-  margin: 0.5mm 0;
+  gap: 2mm;
+  font-size: 14px;
+  margin: 0.8mm 0;
 }
 
 .print-ticket .t-total {
   display: flex;
   justify-content: space-between;
+  gap: 2mm;
   font-weight: 700;
-  font-size: 14px;
-  margin-top: 1mm;
+  font-size: 18px;
+  margin-top: 1.5mm;
 }
 
 .print-ticket .t-footer {
   text-align: center;
-  font-size: 11px;
+  font-size: 13px;
   margin-top: 3mm;
 }
 
 .print-ticket .t-legal {
   text-align: center;
-  font-size: 10px;
+  font-size: 11px;
   font-style: italic;
   margin-top: 2mm;
 }
