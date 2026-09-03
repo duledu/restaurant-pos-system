@@ -102,7 +102,7 @@ export function RestaurantSettingsClient() {
               type="button"
               onClick={save}
               disabled={saving}
-              className="mt-2 rounded-md bg-graphite px-5 py-2.5 text-sm font-semibold text-cream-100 disabled:opacity-40"
+              className="mt-2 min-h-11 rounded-md bg-graphite px-5 py-2.5 text-sm font-semibold text-cream-100 disabled:opacity-40"
             >
               {saving ? "Čuvanje…" : "Sačuvaj"}
             </button>

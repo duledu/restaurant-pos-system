@@ -105,11 +105,11 @@ export function DailySummaryClient() {
             Menadžerski pregled dana — NIJE zakonski fiskalni Z izveštaj (nema fiskalizacione integracije)
           </p>
         </div>
-        <div className="no-print flex items-center gap-2">
+        <div className="no-print flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
           <button
             type="button"
             onClick={() => setShowThermal((v) => !v)}
-            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-inkSoft hover:text-ink"
+            className="min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm font-medium text-inkSoft hover:text-ink sm:w-auto"
           >
             {showThermal ? "Sakrij termalni prikaz" : "Termalni prikaz (80mm)"}
           </button>

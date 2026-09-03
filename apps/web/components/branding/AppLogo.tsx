@@ -40,13 +40,6 @@ const DARK_NATURAL = { width: 338, height: 234 };
 // verzijom, ovaj poseban tretman postaje nepotreban i može se ukloniti.
 const DARK_MARK_CROP = { x0: 68, y0: 0, x1: 262, y1: 155 };
 
-const FULL_DIMENSION_CLASS: Record<Size, string> = {
-  sm: "h-6 w-28",
-  md: "h-8 w-36",
-  lg: "h-[clamp(3.25rem,15vw,3.75rem)] w-[clamp(10rem,45vw,14rem)]",
-  xl: "h-16 w-64",
-};
-
 interface Crop {
   x0: number;
   y0: number;
@@ -152,19 +145,33 @@ export function AppLogo({ variant = "full", theme = "light", size = "md", classN
 
   // variant === "full"
   if (theme === "light") {
-    // Kompletan lockup (mark + wordmark + podnaslov) je već jedna celina
-    // u ovom fajlu — prikazuje se ceo, bez sečenja.
+    // Isporučeni fajl je VERTIKALNI lockup (ikonica iznad teksta) uklopljen
+    // u kvadratno 500x500 platno — renderovanje cele slike u širokom/niskom
+    // kontejneru (npr. h-6 w-28 mobilno zaglavlje) skalira po VISINI celog
+    // kvadrata, pa ostaje sitna ikonica uz veliki prazan prostor pored nje
+    // (potvrđeno vizuelnim pregledom fajla). Isti tretman kao tamna tema
+    // ispod: rekonstruišemo širok lockup od već isečene ikonice
+    // (LIGHT_MARK_CROP) + pravog HTML teksta, istim rasporedom/veličinama
+    // kao TableCoreLogo.tsx, tako da lockup ima ispravan (širok) aspect
+    // ratio na svakoj veličini kontejnera.
+    const { text, sub } = SIZE_MAP[size];
     return (
-      <span role="img" aria-label={APP_NAME} className={`relative inline-block shrink-0 ${FULL_DIMENSION_CLASS[size]} ${className}`}>
-        <Image
-          src={LIGHT_SRC}
-          alt={APP_NAME}
-          fill
-          sizes="256px"
-          style={{ objectFit: "contain", objectPosition: "left center" }}
-          priority={size === "lg"}
-          onError={handleError}
-        />
+      <span className={`inline-flex max-w-full items-center gap-2 shrink-0 ${className}`} aria-label={`${APP_NAME} Restaurant Control System`}>
+        <CroppedMark src={LIGHT_SRC} natural={LIGHT_NATURAL} crop={LIGHT_MARK_CROP} heightPx={markPx} onError={handleError} />
+        <span className="flex min-w-0 flex-col justify-center leading-none">
+          <span className="whitespace-nowrap" style={{ fontSize: text, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.1 }}>
+            <span style={{ color: "#0A1931" }}>Table</span>
+            <span style={{ color: "#4A7FA7" }}>Core</span>
+          </span>
+          {size !== "sm" && (
+            <span
+              className="whitespace-nowrap"
+              style={{ fontSize: sub, color: "rgba(74,127,167,0.7)", letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 3, fontWeight: 500 }}
+            >
+              Restaurant Control System
+            </span>
+          )}
+        </span>
       </span>
     );
   }
