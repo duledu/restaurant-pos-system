@@ -20,7 +20,8 @@
 import { prisma, Prisma } from "@rcs/db";
 import { requireLocationAccess, requirePermission, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { getRestaurantSettings } from "../settings/settings-service";
+import { getRestaurantSettings, getPrinterConfigForDispatch } from "../settings/settings-service";
+import { assertStationAccess } from "../production/production-service";
 import {
   buildKitchenBarTicketContent,
   buildCancellationTicketContent,
@@ -120,6 +121,10 @@ export async function dispatchStationPrintJobs(
   }
 
   for (const [station, rows] of byStation) {
+    // Snapshot širine papira ZA OVU STANICU u trenutku dispatch-a (zahtev
+    // #10/#17: kuhinja i šank mogu imati nezavisnu 58mm/80mm konfiguraciju)
+    // — nikad globalna/tvrdo ukucana vrednost, nikad naknadno preračunata.
+    const { paperWidthMm } = await getPrinterConfigForDispatch(ctx.restaurantId, order.locationId, station);
     const content = buildKitchenBarTicketContent({
       station,
       restaurantName: order.restaurant.name,
@@ -138,6 +143,7 @@ export async function dispatchStationPrintJobs(
       // ovog argumenta je zato tačan, već postojeći signal da je ovo NAREDNI
       // (dodatni) krug, ne novi parametar koji treba posebno prosleđivati.
       isAdditional: Boolean(options?.dispatchKeySuffix),
+      paperWidthMm,
     });
     const dispatchKey = options?.dispatchKeySuffix ? `submit:${station}:${options.dispatchKeySuffix}` : `submit:${station}`;
     await prisma.printJob.upsert({
@@ -186,6 +192,7 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
   const modifierLines = formatModifiersForTicket(itemModifiers);
 
   for (const row of stationRows) {
+    const { paperWidthMm } = await getPrinterConfigForDispatch(ctx.restaurantId, voidRecord.locationId, row.station);
     const content = buildCancellationTicketContent({
       station: row.station,
       tableLabel: voidRecord.tableLabel,
@@ -193,6 +200,7 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
       voidedAt: voidRecord.voidedAt.toISOString(),
       items: [{ quantity: voidRecord.voidedQuantity, name: voidRecord.itemName, modifiers: modifierLines }],
       reasonLabel,
+      paperWidthMm,
     });
     const dispatchKey = `void:${voidRecord.id}:${row.station}`;
     await prisma.printJob.upsert({
@@ -230,7 +238,10 @@ export async function dispatchReceiptPrintJob(
   });
   if (!receipt) return;
 
-  const settings = await getRestaurantSettings(ctx);
+  const [settings, { paperWidthMm }] = await Promise.all([
+    getRestaurantSettings(ctx),
+    getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT"),
+  ]);
   const items = receipt.items as unknown as {
     name: string;
     price: string;
@@ -272,6 +283,7 @@ export async function dispatchReceiptPrintJob(
     paymentMethod: receipt.paymentMethod,
     tenderedAmount: receipt.payment.tenderedAmount.toString(),
     changeAmount: receipt.payment.changeAmount.toString(),
+    paperWidthMm,
   });
 
   await prisma.printJob.upsert({
@@ -351,6 +363,78 @@ export async function retryPrintJob(ctx: AuthContext, orderId: string, printJobI
     throw new Error("Samo neuspeo pokušaj štampe može da se ponovi");
   }
   return prisma.printJob.update({ where: { id: job.id }, data: { status: "PENDING", failureReason: null } });
+}
+
+/**
+ * AUTOMATSKA ŠTAMPA (zahtev #1/#3): KDS/šank ekran poziva ovo TAČNO PRE nego
+ * što sam pokrene window.print() za PENDING tiket — nikad posle. Atomski
+ * `updateMany` sa `status: "PENDING"` u WHERE je JEDINA brava koja postoji:
+ * osvežena stranica, drugi poll ciklus, drugi otvoren tab iste stanice, ili
+ * konkurentan zahtev — svaki NEUSPEO "claim" (count === 0) znači da je red
+ * već preuzet/odštampan/nije više PENDING, pa pozivalac MORA tiho odustati,
+ * nikad ponoviti window.print(). Ovo je namerno ODVOJENO od confirmPrintResult
+ * (koje sledi POSLE window.print()-a) — status prolazi PENDING -> PRINTING
+ * (claimed, u toku) -> PRINTED/FAILED (ishod), nikad direktno PENDING ->
+ * PRINTED, tako da ostatak PRINTING nikad ne liči na "još nije ni pokušano".
+ */
+export async function beginPrintAttempt(ctx: AuthContext, orderId: string, printJobId: string) {
+  requirePrintAccess(ctx);
+  const { job } = await loadOwnedPrintJob(ctx, orderId, printJobId);
+  if (job.station) assertStationAccess(ctx, job.station);
+
+  const claimed = await prisma.printJob.updateMany({
+    where: { id: job.id, status: "PENDING" },
+    data: { status: "PRINTING", attemptCount: { increment: 1 } },
+  });
+  if (claimed.count === 0) return null;
+  return prisma.printJob.findUniqueOrThrow({ where: { id: job.id } });
+}
+
+/**
+ * KDS/šank ekran poll-uje ovo (uz listStationOrders) da bi znao koje tikete
+ * treba automatski da odštampa (PENDING) i koje da prikaže kao neuspele uz
+ * dugme "Pokušaj ponovo" (FAILED) — vidi beginPrintAttempt iznad za idempotentan
+ * "claim" korak koji sprečava duplu automatsku štampu. `autoPrintEligible`
+ * prati PrinterConfig.isEnabled za tu stanicu (podrazumevano true kad
+ * podešavanje nikad nije otvoreno) — admin i dalje može ugasiti automatsku
+ * štampu za stanicu bez fizičkog štampača, ručno Print dugme ostaje rezervni
+ * put nezavisno od ove zastavice.
+ */
+// P0.4 — stale claim recovery. beginPrintAttempt() claims PENDING -> PRINTING
+// right before window.print(); if the client crashes/closes the tab before
+// confirmPrintResult ever runs, the job would otherwise stay PRINTING
+// forever (invisible to the auto-print queue, not retryable). No new schema
+// field: PrintJob.updatedAt already advances on every status write, so it
+// doubles as the claim timestamp for free. A claim held longer than this
+// lease is treated as abandoned and silently returned to PENDING — normal
+// browser print (dialog + confirm round-trip) finishes in well under this.
+const STALE_PRINT_LEASE_MS = 90_000;
+
+export async function listPendingStationPrintJobs(ctx: AuthContext, locationId: string, station: "KITCHEN" | "BAR") {
+  requirePermission(ctx, PRODUCTION_MANAGE);
+  requireLocationAccess(ctx, locationId);
+  assertStationAccess(ctx, station);
+
+  await prisma.printJob.updateMany({
+    where: {
+      ...scopeToRestaurant(ctx),
+      locationId,
+      station,
+      status: "PRINTING",
+      updatedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) },
+    },
+    data: { status: "PENDING" },
+  });
+
+  const [jobs, printerConfig] = await Promise.all([
+    prisma.printJob.findMany({
+      where: { ...scopeToRestaurant(ctx), locationId, station, status: { in: ["PENDING", "FAILED"] } },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.printerConfig.findUnique({ where: { locationId_station: { locationId, station } } }),
+  ]);
+
+  return { jobs, autoPrintEligible: printerConfig ? printerConfig.isEnabled : true };
 }
 
 /**

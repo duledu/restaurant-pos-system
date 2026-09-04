@@ -19,6 +19,7 @@ interface KitchenBarContent {
   submittedAt: string;
   items: TicketItem[];
   isAdditional?: boolean;
+  paperWidthMm?: number;
 }
 
 interface StornoContent {
@@ -29,6 +30,7 @@ interface StornoContent {
   voidedAt: string;
   items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
+  paperWidthMm?: number;
 }
 
 interface ReceiptContent {
@@ -61,6 +63,7 @@ interface ReceiptContent {
   paymentMethod: "CASH" | "CARD";
   tenderedAmount: string;
   changeAmount: string;
+  paperWidthMm?: number;
 }
 
 interface ShiftReportContent {
@@ -271,9 +274,21 @@ function ShiftReportTicket({ content }: { content: ShiftReportContent }) {
  * proizvoljne dubine. Bez portala, display:none na roditelju bi sakrio i
  * sam tiket (nema CSS načina da dete "probije" display:none predaka).
  */
+/**
+ * 58mm/80mm PO STANICI (zahtev #10/#17): kuhinja i šank mogu imati
+ * nezavisnu širinu papira — content.paperWidthMm je zamrznut snapshot
+ * PrinterConfig-a U TRENUTKU dispatch-a (vidi print-service.ts), nikad
+ * naknadno preračunat. SHIFT_REPORT nema svoj PrinterConfig red (vidi
+ * ticket-content.ts) pa ostaje na 80mm podrazumevanom.
+ */
+function widthClassFor(content: TicketContent): string {
+  const paperWidthMm = content.kind === "SHIFT_REPORT" ? 80 : content.paperWidthMm ?? 80;
+  return paperWidthMm === 58 ? "print-ticket-root w58" : "print-ticket-root";
+}
+
 export function TicketPrintPanel({ content }: { content: TicketContent }) {
   const ticket = (
-    <div className="print-ticket-root">
+    <div className={widthClassFor(content)}>
       <div className="print-ticket">
         {content.kind === "STORNO" ? (
           <StornoTicket content={content} />

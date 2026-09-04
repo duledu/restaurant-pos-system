@@ -74,4 +74,18 @@
     size: A4;
     margin: 15mm;
   }
+
+  /* Faza 13 — Kuhinja/Bar po-zaposlenom izveštaj (StationReportClient) je
+   * na EKRANU tamna KDS tema (bg-graphite-900/text-cream), za razliku od
+   * već-svetlog Admin panela koji ostatak ovog fajla pretpostavlja. Bez
+   * ovog override-a bi se štampalo tamno na tamnom. Skoped na
+   * .station-report-page da ostatak Admin izveštaja ostane netaknut. */
+  .station-report-page,
+  .station-report-page * {
+    background: transparent !important;
+    color: #000 !important;
+  }
+  .station-report-page {
+    background: #fff !important;
+  }
 }

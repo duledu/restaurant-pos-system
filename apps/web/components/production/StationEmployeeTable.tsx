@@ -21,10 +21,19 @@ export interface EmployeeStationRow {
 export function StationEmployeeTable({
   employees,
   employeeTotals,
+  selectedEmployeeId,
+  onSelectEmployee,
 }: {
   employees: EmployeeStationRow[];
   employeeTotals: { acceptedCount: number; readyCount: number };
+  /** Faza 13 — opciono: kad je prosleđeno uz onSelectEmployee, redovi
+   * postaju klikabilni za filtriranje detalja po zaposlenom (vidi
+   * StationReportClient). Admin izveštaj ovo ne prosleđuje — ponašanje mu
+   * ostaje potpuno nepromenjeno. */
+  selectedEmployeeId?: string | null;
+  onSelectEmployee?: (employeeId: string | null) => void;
 }) {
+  const clickable = Boolean(onSelectEmployee);
   return (
     <Card className="overflow-hidden">
       {employees.length === 0 ? (
@@ -43,7 +52,13 @@ export function StationEmployeeTable({
             </thead>
             <tbody>
               {employees.map((e) => (
-                <tr key={e.employeeId} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
+                <tr
+                  key={e.employeeId}
+                  onClick={clickable ? () => onSelectEmployee!(selectedEmployeeId === e.employeeId ? null : e.employeeId) : undefined}
+                  className={`border-b border-line last:border-0 ${
+                    clickable ? "cursor-pointer" : ""
+                  } ${selectedEmployeeId === e.employeeId ? "bg-gold/10" : "hover:bg-ink/[0.02]"}`}
+                >
                   <td className="px-4 py-3 text-ink">
                     {e.employeeName} <span className="text-xs text-inkSoft">— {ROLE_LABEL[e.role] ?? e.role}</span>
                   </td>

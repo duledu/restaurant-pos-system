@@ -40,6 +40,11 @@ export interface KitchenBarTicketContent {
    * dodavanje stavki posle submit-a trenutno nije podržano nigde u sistemu,
    * ova zastavica postoji da tiket format ne mora da se menja kad se doda). */
   isAdditional: boolean;
+  /** Snapshot PrinterConfig.paperWidthMm za ovu stanicu U TRENUTKU dispatch-a
+   * (vidi print-service.ts) — 58 ili 80. Isti "zamrznut snapshot" princip
+   * kao Receipt: naknadna promena podešavanja štampača NIKAD ne menja već
+   * dispatch-ovan tiket (uklj. reprint istog PrintJob reda). */
+  paperWidthMm: number;
 }
 
 export function buildKitchenBarTicketContent(params: {
@@ -53,6 +58,7 @@ export function buildKitchenBarTicketContent(params: {
   // VIŠE-KRUŽNO NARUČIVANJE (Faza 9/11): true za SVAKO slanje OSIM prvog —
   // vidi print-service.ts dispatchStationPrintJobs (isFirstSubmission).
   isAdditional?: boolean;
+  paperWidthMm: number;
 }): KitchenBarTicketContent {
   return {
     kind: params.station,
@@ -64,6 +70,7 @@ export function buildKitchenBarTicketContent(params: {
     submittedAt: params.submittedAt,
     items: params.items,
     isAdditional: params.isAdditional ?? false,
+    paperWidthMm: params.paperWidthMm,
   };
 }
 
@@ -75,6 +82,7 @@ export interface CancellationTicketContent {
   voidedAt: string;
   items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
+  paperWidthMm: number;
 }
 
 export function buildCancellationTicketContent(params: {
@@ -84,6 +92,7 @@ export function buildCancellationTicketContent(params: {
   voidedAt: string;
   items: { quantity: number; name: string; modifiers?: string[] }[];
   reasonLabel: string;
+  paperWidthMm: number;
 }): CancellationTicketContent {
   return {
     kind: "STORNO",
@@ -93,6 +102,7 @@ export function buildCancellationTicketContent(params: {
     voidedAt: params.voidedAt,
     items: params.items,
     reasonLabel: params.reasonLabel,
+    paperWidthMm: params.paperWidthMm,
   };
 }
 
@@ -138,6 +148,7 @@ export interface ReceiptTicketContent {
   paymentMethod: "CASH" | "CARD";
   tenderedAmount: string;
   changeAmount: string;
+  paperWidthMm: number;
 }
 
 export const DEFAULT_RECEIPT_LEGAL_NOTE = "Radni nalog – nije fiskalni račun";
@@ -165,6 +176,7 @@ export function buildReceiptTicketContent(params: {
   paymentMethod: "CASH" | "CARD";
   tenderedAmount: string;
   changeAmount: string;
+  paperWidthMm: number;
 }): ReceiptTicketContent {
   return {
     kind: "RECEIPT",
@@ -190,6 +202,7 @@ export function buildReceiptTicketContent(params: {
     paymentMethod: params.paymentMethod,
     tenderedAmount: params.tenderedAmount,
     changeAmount: params.changeAmount,
+    paperWidthMm: params.paperWidthMm,
   };
 }
 

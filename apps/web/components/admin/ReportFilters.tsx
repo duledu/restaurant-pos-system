@@ -18,6 +18,9 @@ export interface ReportFilterState {
     | "custom";
   from?: string;
   to?: string;
+  /** Faza 13 — koristi ga SAMO Kuhinja/Bar po-zaposlenom izveštaj (vidi
+   * StationReportClient); ostali izveštaji ovo polje ne postavljaju. */
+  employeeId?: string;
 }
 
 interface LocationOption {
@@ -160,6 +163,9 @@ export function reportFiltersToQuery(filters: ReportFilterState): string {
   if (filters.preset === "custom" && filters.from && filters.to) {
     params.set("from", filters.from);
     params.set("to", filters.to);
+  }
+  if (filters.employeeId) {
+    params.set("employeeId", filters.employeeId);
   }
   return params.toString();
 }

@@ -3,6 +3,7 @@
  * po prirodi (window.print()) — server samo priprema/vraća sadržaj; ovaj
  * modul ga dovlači, pokreće štampu i potvrđuje ishod nazad na server.
  */
+import { defaultPrintTransport, type PrintTransport } from "./print-transport";
 
 export interface PrintJob {
   id: string;
@@ -47,6 +48,31 @@ export async function retryPrintJob(orderId: string, jobId: string): Promise<Pri
   return body.printJob as PrintJob;
 }
 
+/**
+ * Atomski "claim" koraka PENDING -> PRINTING PRE automatske štampe (vidi
+ * beginPrintAttempt u print-service.ts). Vraća `null` (ne baca grešku) kad
+ * je red već preuzet — pozivalac (auto-print red čekanja na KDS-u) to mora
+ * tiho preskočiti, ne prikazati kao grešku.
+ */
+export async function beginPrintJob(orderId: string, jobId: string): Promise<PrintJob | null> {
+  const res = await fetch(`/api/pos/orders/${orderId}/print-jobs/${jobId}/begin`, { method: "POST" });
+  if (res.status === 409) return null;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
+  return body.printJob as PrintJob;
+}
+
+export interface PendingStationPrintJobs {
+  jobs: PrintJob[];
+  autoPrintEligible: boolean;
+}
+
+export async function fetchPendingStationPrintJobs(station: "KITCHEN" | "BAR", locationId: string): Promise<PendingStationPrintJobs> {
+  const base = station === "KITCHEN" ? "/api/production/kitchen" : "/api/production/bar";
+  const body = await apiFetch(`${base}/print-jobs?locationId=${locationId}`);
+  return { jobs: body.jobs as PrintJob[], autoPrintEligible: Boolean(body.autoPrintEligible) };
+}
+
 export async function reprintReceipt(orderId: string): Promise<PrintJob> {
   const body = await apiFetch(`/api/pos/orders/${orderId}/receipt/reprint`, {
     method: "POST",
@@ -62,8 +88,19 @@ export async function reprintReceipt(orderId: string): Promise<PrintJob> {
  * sinhrono blokirajući u većini browsera pa se "success" tretira kao
  * najbolji dostupan signal — korisnik i dalje može ručno da klikne
  * "Ponovi" ako fizička štampa nije uspela (npr. printer offline).
+ *
+ * Ako window.print() ili sam confirm poziv baci grešku (npr. browser bez
+ * print podrške, mreža dole tokom confirm-a), red NIKAD ne sme ostati
+ * "zaglavljen" bez ishoda — pokušava se best-effort da se markira FAILED
+ * (vidljivo/retryable, zahtev #4) umesto da tiho ostane u prethodnom stanju.
  */
-export async function printAndConfirm(orderId: string, jobId: string): Promise<void> {
-  window.print();
-  await confirmPrintJob(orderId, jobId, { success: true });
+export async function printAndConfirm(orderId: string, jobId: string, transport: PrintTransport = defaultPrintTransport): Promise<void> {
+  try {
+    await transport.print();
+    await confirmPrintJob(orderId, jobId, { success: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Greška pri štampi";
+    await confirmPrintJob(orderId, jobId, { success: false, errorMessage: message }).catch(() => {});
+    throw err;
+  }
 }

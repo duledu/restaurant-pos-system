@@ -27,6 +27,32 @@
   page: ticket;
 }
 
+/* 58mm varijanta (zahtev #10/#17) — Kuhinja i Šank mogu imati nezavisnu
+ * širinu papira po PrinterConfig.paperWidthMm; TicketPrintPanel.tsx dodaje
+ * ovu klasu kad je content.paperWidthMm === 58. Sopstvena IMENOVANA @page
+ * (ticket58, ispod) je NUŽNA iz istog razloga kao gore — @page size ne
+ * prati var() pouzdano (Chrome ograničenje), pa svaka širina mora imati
+ * SOPSTVENO tvrdo ukucano imenovano @page pravilo. */
+.print-ticket-root.w58 {
+  --ticket-width: 58mm;
+  page: ticket58;
+}
+.print-ticket-root.w58 .print-ticket {
+  padding: 2mm 2.5mm;
+}
+.print-ticket-root.w58 .t-header { font-size: 15px; }
+.print-ticket-root.w58 .t-station { font-size: 17px; margin: 1mm 0 2mm 0; }
+.print-ticket-root.w58 .t-table { font-size: 22px; }
+.print-ticket-root.w58 .t-meta { font-size: 12px; }
+.print-ticket-root.w58 .t-item { font-size: 15px; }
+.print-ticket-root.w58 .t-item-qty { min-width: 8mm; }
+.print-ticket-root.w58 .t-note { font-size: 11px; padding-left: 10mm; }
+.print-ticket-root.w58 .t-line { font-size: 11px; }
+.print-ticket-root.w58 .t-total { font-size: 14px; }
+.print-ticket-root.w58 .t-footer { font-size: 10px; }
+.print-ticket-root.w58 .t-legal { font-size: 9px; }
+.print-ticket-root.w58 .t-additional { font-size: 13px; }
+
 .print-ticket {
   width: var(--ticket-width);
   background: #fff;
@@ -163,10 +189,16 @@
    * gore) — namerno NE bezimeno @page, da se ne bi sudarilo sa print-report.css
    * @page pravilom (A4/15mm, za izveštaje). @page takođe ne podržava pouzdano
    * var() u `size` (poznato Chrome ograničenje) — zato je 80mm ovde TVRDO
-   * ukucano, ne var(--ticket-width). Ako se ikad doda 58mm varijanta, ovaj
-   * @page blok mora ručno pratiti tu promenu. */
+   * ukucano, ne var(--ticket-width). */
   @page ticket {
     size: 80mm auto;
+    margin: 0;
+  }
+
+  /* 58mm varijanta — sopstvena imenovana stranica (vidi `page: ticket58;`
+   * na .print-ticket-root.w58 gore), iz istog razloga kao @page ticket. */
+  @page ticket58 {
+    size: 58mm auto;
     margin: 0;
   }
 

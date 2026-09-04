@@ -94,3 +94,22 @@ export async function deletePrinterConfig(ctx: AuthContext, id: string): Promise
   requirePermission(ctx, SETTINGS_MANAGE);
   await prisma.printerConfig.deleteMany({ where: { id, ...scopeToRestaurant(ctx) } });
 }
+
+/**
+ * Interno čitanje (BEZ permission gate-a) za sam štamparski pipeline —
+ * npr. KONOBAR koji šalje porudžbinu mora dobiti tačnu širinu papira te
+ * stanice da bi se tiket ispravno zamrznuo u PrintJob.content, a nema (i ne
+ * treba mu) "settings.manage". NIKAD se ne izlaže direktno kroz API rutu —
+ * samo iz print-service.ts dispatch* funkcija. Nepostojeći red = razumni
+ * podrazumevani (80mm, omogućeno) — restoran koji nikad nije otvorio
+ * podešavanja štampača i dalje dobija ispravnu, radnu konfiguraciju.
+ */
+export async function getPrinterConfigForDispatch(
+  restaurantId: string,
+  locationId: string,
+  station: "KITCHEN" | "BAR" | "RECEIPT"
+): Promise<{ paperWidthMm: number; isEnabled: boolean }> {
+  const row = await prisma.printerConfig.findUnique({ where: { locationId_station: { locationId, station } } });
+  if (!row || row.restaurantId !== restaurantId) return { paperWidthMm: 80, isEnabled: true };
+  return { paperWidthMm: row.paperWidthMm, isEnabled: row.isEnabled };
+}

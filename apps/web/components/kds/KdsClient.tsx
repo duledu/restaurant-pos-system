@@ -5,7 +5,14 @@ import Link from "next/link";
 import { LogoutButton } from "../ui/LogoutButton";
 import { AppLogo } from "../branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
-import { fetchPrintJobs, printAndConfirm, type PrintJob } from "../../lib/print-client";
+import {
+  fetchPrintJobs,
+  printAndConfirm,
+  beginPrintJob,
+  fetchPendingStationPrintJobs,
+  retryPrintJob,
+  type PrintJob,
+} from "../../lib/print-client";
 
 interface StationItemModifier {
   id: string;
@@ -99,6 +106,50 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [printBusyId, setPrintBusyId] = useState<string | null>(null);
   const [pendingPrint, setPendingPrint] = useState<{ orderId: string; job: PrintJob } | null>(null);
+  const [failedPrintJobs, setFailedPrintJobs] = useState<PrintJob[]>([]);
+  const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
+
+  // AUTOMATSKA ŠTAMPA (zahtev #1/#3): red čekanja + reference umesto state-a
+  // za "print u toku" — `load` je stabilan useCallback (isti interval
+  // nikad se ne re-subscribe-uje), pa bi čitanje React state-a unutar
+  // njegove zatvorene funkcije videlo ZASTARELU (uvek-početnu) vrednost;
+  // ref.current je uvek svež bez obzira koja zatvorena funkcija ga čita.
+  const printInFlightRef = useRef(false);
+  const printDoneResolveRef = useRef<(() => void) | null>(null);
+  const autoQueueRef = useRef<{ orderId: string; job: PrintJob }[]>([]);
+  const autoSeenRef = useRef<Set<string>>(new Set());
+  const autoBusyRef = useRef(false);
+
+  const processAutoQueue = useCallback(() => {
+    if (autoBusyRef.current || printInFlightRef.current) return;
+    const next = autoQueueRef.current.shift();
+    if (!next) return;
+    autoBusyRef.current = true;
+    printInFlightRef.current = true;
+    (async () => {
+      try {
+        // Atomski "claim" (PENDING -> PRINTING) TAČNO PRE window.print()-a —
+        // ako je 0 redova pogođeno, neko/nešto drugo je već preuzelo ovaj
+        // tiket (refresh, drugi tab, prethodni poll ciklus) — tiho odustani,
+        // NIKAD ne štampaj ponovo isti tiket (zahtev #3, idempotentnost).
+        const claimed = await beginPrintJob(next.orderId, next.job.id);
+        if (claimed) {
+          await new Promise<void>((resolve) => {
+            printDoneResolveRef.current = resolve;
+            setPendingPrint({ orderId: next.orderId, job: claimed });
+          });
+        } else {
+          printInFlightRef.current = false;
+        }
+      } catch (e) {
+        printInFlightRef.current = false;
+        setError(e instanceof Error ? e.message : "Greška pri automatskoj štampi");
+      } finally {
+        autoBusyRef.current = false;
+        processAutoQueue();
+      }
+    })();
+  }, []);
 
   const baseEndpoint = station === "KITCHEN" ? "/api/production/kitchen" : "/api/production/bar";
 
@@ -127,9 +178,10 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         loc = me.locationIds[0];
         setLocationId(loc);
       }
-      const [activeRes, completedRes] = await Promise.all([
+      const [activeRes, completedRes, pendingPrintRes] = await Promise.all([
         apiFetch(`${baseEndpoint}?locationId=${loc}`),
         apiFetch(`${baseEndpoint}/completed?locationId=${loc}`),
+        fetchPendingStationPrintJobs(station, loc!),
       ]);
       const newOrders: StationOrder[] = activeRes.orders;
 
@@ -139,6 +191,26 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
 
       setOrders(newOrders);
       setCompletedOrders(completedRes.orders);
+
+      // AUTOMATSKA ŠTAMPA: svaki PENDING tiket za ovu stanicu koji još nismo
+      // videli ide u red čekanja (obrađuje se serijski, jedan po jedan, da
+      // se print dijalozi ne bi gomilali). `autoSeenRef` sprečava da isti
+      // poll ciklus (na 4s) ponovo doda već-viđen posao dok čeka na obradu —
+      // krajnja bezbednost od duplikata je ipak server-side atomski claim
+      // (beginPrintAttempt), ovo je samo da se izbegnu suvišni pokušaji.
+      // FAILED tiketi se NIKAD automatski ne štampaju ponovo — samo se
+      // prikazuju sa dugmetom "Pokušaj ponovo" (zahtev #4).
+      const failed = pendingPrintRes.jobs.filter((j) => j.status === "FAILED");
+      setFailedPrintJobs(failed);
+      if (pendingPrintRes.autoPrintEligible) {
+        for (const job of pendingPrintRes.jobs) {
+          if (job.status === "PENDING" && !autoSeenRef.current.has(job.id)) {
+            autoSeenRef.current.add(job.id);
+            autoQueueRef.current.push({ orderId: job.orderId, job });
+          }
+        }
+        processAutoQueue();
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju");
@@ -167,6 +239,9 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   }
 
   async function handlePrintTicket(orderId: string) {
+    // Ručno dugme ostaje rezervni put (zahtev #1) — nezavisno od auto-reda
+    // čekanja, radi čak i za tiket koji je automatika već odštampala
+    // (reprint), pa NAMERNO ne prolazi kroz beginPrintAttempt claim.
     setPrintBusyId(orderId);
     setError(null);
     try {
@@ -176,6 +251,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         setError("Nema tiketa za štampu za ovu porudžbinu");
         return;
       }
+      printInFlightRef.current = true;
       setPendingPrint({ orderId, job });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju tiketa");
@@ -184,11 +260,33 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     }
   }
 
+  async function handleRetryPrint(orderId: string, jobId: string) {
+    setRetryBusyId(jobId);
+    setError(null);
+    try {
+      await retryPrintJob(orderId, jobId);
+      setFailedPrintJobs((prev) => prev.filter((j) => j.id !== jobId));
+      // Dozvoli da ga sledeći poll ciklus ponovo vidi kao PENDING i doda u
+      // auto-print red čekanja (server ga je upravo vratio na PENDING).
+      autoSeenRef.current.delete(jobId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri ponovnom pokušaju štampe");
+    } finally {
+      setRetryBusyId(null);
+    }
+  }
+
   useEffect(() => {
     if (!pendingPrint) return;
     printAndConfirm(pendingPrint.orderId, pendingPrint.job.id)
       .catch((e) => setError(e instanceof Error ? e.message : "Greška pri štampi"))
-      .finally(() => setPendingPrint(null));
+      .finally(() => {
+        setPendingPrint(null);
+        printInFlightRef.current = false;
+        const resolveAutoQueue = printDoneResolveRef.current;
+        printDoneResolveRef.current = null;
+        resolveAutoQueue?.();
+      });
   }, [pendingPrint]);
 
   const isBar = station === "BAR";
@@ -277,6 +375,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
             {orders.map((order) => {
               const waitMin = minutesSince(order.submittedAt);
               const isLate = waitMin >= 12;
+              const failedJob = failedPrintJobs.find((j) => j.orderId === order.orderId);
               return (
                 <div
                   key={order.orderId}
@@ -305,6 +404,20 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                       </button>
                     </div>
                   </div>
+
+                  {failedJob && (
+                    <div className="flex items-center justify-between gap-2 border-b border-danger/20 bg-danger-soft px-4 py-2">
+                      <span className="text-xs font-semibold text-danger">Automatska štampa nije uspela</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRetryPrint(order.orderId, failedJob.id)}
+                        disabled={retryBusyId === failedJob.id}
+                        className="min-h-8 shrink-0 rounded-md bg-danger px-3 py-1 text-xs font-bold text-white disabled:opacity-40"
+                      >
+                        {retryBusyId === failedJob.id ? "…" : "Pokušaj ponovo"}
+                      </button>
+                    </div>
+                  )}
 
                   <div className="space-y-2 p-3">
                     {order.items.map((item) => (

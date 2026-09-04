@@ -26,6 +26,7 @@ import { requirePermission, requireLocationAccess, type AuthContext } from "@rcs
 import { resolveDateRange, type ReportPreset } from "./date-range";
 import { resolveEmployeeDisplayNames } from "../audit/audit-service";
 import { assertStationAccess } from "../production/production-service";
+import { shortOrderNumber } from "../printing/ticket-content";
 import { VOID_REASON_LABELS, type VoidReasonCode } from "@rcs/shared";
 
 const REPORTING_PERMISSION = "audit.view";
@@ -41,6 +42,9 @@ export interface ReportFilters {
   preset: ReportPreset;
   from?: string;
   to?: string;
+  /** Faza 13 — opciono suzi Kuhinja/Bar izveštaj na JEDNOG zaposlenog (vidi
+   * getStationEmployeeReport). Neiskorišćeno u ostalim Faza 5 izveštajima. */
+  employeeId?: string;
 }
 
 // FAZA 7: eksportovano — analytics-service.ts ponovo koristi ISTU
@@ -1170,10 +1174,169 @@ export async function getBarProductionReport(
   return getStationProductionReport(ctx, filters, "BAR");
 }
 
+export interface StationItemTotal {
+  name: string;
+  quantity: number;
+}
+
+export interface StationActivityRow {
+  /** ISO — kada je stavka označena SPREMNOM (isti trenutak kao "produced"
+   * timing svuda drugde u ovom fajlu, vidi getStationProductionReport). */
+  time: string;
+  table: string;
+  orderNumber: string;
+  itemName: string;
+  quantity: number;
+  acceptedBy: string;
+  readyBy: string;
+  /** null kad PRIHVATI događaj ne postoji u periodu (npr. legacy stavka
+   * koja je već bila u PREPARING pre uvođenja PRIHVATI->SPREMNO toka) —
+   * NIKAD izmišljeno trajanje. */
+  durationMinutes: number | null;
+}
+
+export interface StationPerformance {
+  avgMinutes: number | null;
+  fastestMinutes: number | null;
+  longestMinutes: number | null;
+  /** Broj stavki koje imaju I PRIHVATI I SPREMNO događaj u periodu — osnova
+   * za avg/fastest/longest iznad. */
+  pairsCount: number;
+}
+
+const UNKNOWN_EMPLOYEE_LABEL = "Nepoznato";
+
+/**
+ * Faza 13 — dopuna Faza 12 po-zaposlenom izveštaja: artikli koje je
+ * (izabrani ili svaki) zaposleni STVARNO završio (SPREMNO događaj), vreme
+ * pripreme (PRIHVATI -> SPREMNO par po stavci) i aktivnost stavka-po-stavka
+ * sa punom atribucijom (ko je prihvatio, ko je označio spremnim — zahtev
+ * "preserve acceptedBy/readyBy kao odvojene ljude, nikad poslednji dodirnuo
+ * = ceo posao"). Izvor je ISTI OrderEvent trag kao
+ * computeStationEmployeeBreakdown, ali čita NEZAVISNIM upitom da bi taj
+ * već-proveren/korišćen kod (Admin izveštaj) ostao potpuno netaknut.
+ */
+async function computeStationActivityDetail(
+  restaurantId: string,
+  locationIds: string[],
+  range: { from: Date; to: Date },
+  station: "KITCHEN" | "BAR",
+  employeeId?: string
+): Promise<{ itemTotals: StationItemTotal[]; performance: StationPerformance; activity: StationActivityRow[] }> {
+  const events = await prisma.orderEvent.findMany({
+    where: {
+      type: "order_item.status_changed",
+      createdAt: { gte: range.from, lt: range.to },
+      order: { restaurantId, locationId: { in: locationIds } },
+    },
+    select: { orderId: true, createdBy: true, createdAt: true, payload: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  type Ev = { orderId: string; createdBy: string; createdAt: Date };
+  const groups = new Map<string, { orderId: string; itemId: string; accepted?: Ev; ready?: Ev }>();
+  for (const e of events) {
+    const payload = e.payload as { station?: string; to?: string; itemId?: string } | null;
+    if (!payload || payload.station !== station || !payload.itemId) continue;
+    if (payload.to !== "ACCEPTED" && payload.to !== "READY") continue;
+    const key = `${e.orderId}:${payload.itemId}`;
+    const group = groups.get(key) ?? { orderId: e.orderId, itemId: payload.itemId };
+    const ev: Ev = { orderId: e.orderId, createdBy: e.createdBy, createdAt: e.createdAt };
+    if (payload.to === "ACCEPTED") group.accepted = ev;
+    else group.ready = ev;
+    groups.set(key, group);
+  }
+
+  // Artikli/vreme/aktivnost se računaju SAMO za stavke čije se SPREMNO
+  // dogodilo unutar ovog perioda — legacy stavke sa samo PRIHVATI (još
+  // uvek u pripremi) namerno se ne prikazuju ovde (nisu "završene").
+  const readyGroups = Array.from(groups.values()).filter(
+    (g): g is { orderId: string; itemId: string; accepted?: Ev; ready: Ev } => Boolean(g.ready)
+  );
+  if (readyGroups.length === 0) {
+    return { itemTotals: [], performance: { avgMinutes: null, fastestMinutes: null, longestMinutes: null, pairsCount: 0 }, activity: [] };
+  }
+
+  const itemIds = Array.from(new Set(readyGroups.map((g) => g.itemId)));
+  const orderIds = Array.from(new Set(readyGroups.map((g) => g.orderId)));
+  const employeeIds = Array.from(
+    new Set(readyGroups.flatMap((g) => [g.ready.createdBy, ...(g.accepted ? [g.accepted.createdBy] : [])]))
+  );
+
+  const [items, orders, nameByEmployee] = await Promise.all([
+    prisma.orderItem.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true, quantity: true } }),
+    prisma.order.findMany({ where: { id: { in: orderIds } }, select: { id: true, table: { select: { label: true } } } }),
+    resolveEmployeeDisplayNames(restaurantId, employeeIds),
+  ]);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const orderById = new Map(orders.map((o) => [o.id, o]));
+
+  const itemTotalsMap = new Map<string, number>();
+  const durations: number[] = [];
+  const activity: StationActivityRow[] = [];
+
+  for (const g of readyGroups) {
+    const item = itemById.get(g.itemId);
+    const order = orderById.get(g.orderId);
+    if (!item || !order) continue; // izbrisana/nedostupna referenca — preskoči, ne izmišljaj podatke
+
+    const readyByName = nameByEmployee.get(g.ready.createdBy)?.name ?? UNKNOWN_EMPLOYEE_LABEL;
+    const acceptedByName = g.accepted ? nameByEmployee.get(g.accepted.createdBy)?.name ?? UNKNOWN_EMPLOYEE_LABEL : UNKNOWN_EMPLOYEE_LABEL;
+    const durationMinutes = g.accepted
+      ? Math.max(0, Math.round((g.ready.createdAt.getTime() - g.accepted.createdAt.getTime()) / 60000))
+      : null;
+
+    // Artikli/vreme pripreme: "šta je ZAVRŠIO" — broji se ka zaposlenom koji
+    // je stavku lično označio spremnom (isti princip kao "Spremno" kolona u
+    // postojećoj po-zaposlenom tabeli).
+    if (employeeId == null || g.ready.createdBy === employeeId) {
+      itemTotalsMap.set(item.name, (itemTotalsMap.get(item.name) ?? 0) + item.quantity);
+      if (durationMinutes != null) durations.push(durationMinutes);
+    }
+
+    // Aktivnost: "šta je RADIO" — širi obuhvat, prikazuje red i kad je
+    // izabrani zaposleni samo prihvatio (ne i završio) tu stavku.
+    if (employeeId == null || g.ready.createdBy === employeeId || g.accepted?.createdBy === employeeId) {
+      activity.push({
+        time: g.ready.createdAt.toISOString(),
+        table: order.table.label,
+        orderNumber: shortOrderNumber(g.orderId),
+        itemName: item.name,
+        quantity: item.quantity,
+        acceptedBy: acceptedByName,
+        readyBy: readyByName,
+        durationMinutes,
+      });
+    }
+  }
+
+  activity.sort((a, b) => (a.time < b.time ? 1 : -1));
+
+  const itemTotals: StationItemTotal[] = Array.from(itemTotalsMap.entries())
+    .map(([name, quantity]) => ({ name, quantity }))
+    .sort((a, b) => b.quantity - a.quantity)
+    .slice(0, LIST_ROW_CAP);
+
+  const performance: StationPerformance = durations.length
+    ? {
+        avgMinutes: Math.round(durations.reduce((s, d) => s + d, 0) / durations.length),
+        fastestMinutes: Math.min(...durations),
+        longestMinutes: Math.max(...durations),
+        pairsCount: durations.length,
+      }
+    : { avgMinutes: null, fastestMinutes: null, longestMinutes: null, pairsCount: 0 };
+
+  return { itemTotals, performance, activity: activity.slice(0, LIST_ROW_CAP) };
+}
+
 export interface StationEmployeeReport {
   range: { from: string; to: string };
   employees: EmployeeStationRow[];
   employeeTotals: { acceptedCount: number; readyCount: number };
+  itemTotals: StationItemTotal[];
+  performance: StationPerformance;
+  activity: StationActivityRow[];
+  selectedEmployeeId: string | null;
 }
 
 /**
@@ -1210,11 +1373,18 @@ async function getStationEmployeeReport(
   });
   const range = resolveDateRange(filters.preset, restaurant.timezone, { customFrom: filters.from, customTo: filters.to });
 
-  const breakdown = await computeStationEmployeeBreakdown(ctx.restaurantId, locationIds, range, station);
+  const [breakdown, detail] = await Promise.all([
+    computeStationEmployeeBreakdown(ctx.restaurantId, locationIds, range, station),
+    computeStationActivityDetail(ctx.restaurantId, locationIds, range, station, filters.employeeId),
+  ]);
   return {
     range: { from: range.from.toISOString(), to: range.to.toISOString() },
     employees: breakdown.employees,
     employeeTotals: breakdown.employeeTotals,
+    itemTotals: detail.itemTotals,
+    performance: detail.performance,
+    activity: detail.activity,
+    selectedEmployeeId: filters.employeeId ?? null,
   };
 }
 

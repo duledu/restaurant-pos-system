@@ -27,6 +27,10 @@ export const reportFiltersSchema = z
     preset: z.enum(REPORT_PRESETS).default("today"),
     from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    // Faza 13 — opciono, koristi ga SAMO Kuhinja/Bar po-zaposlenom izveštaj
+    // (vidi reporting-service.ts getStationEmployeeReport); ostali izveštaji
+    // ga jednostavno ignorišu.
+    employeeId: z.string().trim().min(1).optional(),
   })
   .refine((v) => v.preset !== "custom" || (v.from && v.to), {
     message: "Prilagođeni period zahteva 'from' i 'to' datume",

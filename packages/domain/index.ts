@@ -23,5 +23,6 @@ export * as ingredients from "./inventory/ingredient-service";
 export * as inventoryCategories from "./inventory/inventory-category-service";
 export * as unitOfMeasure from "./inventory/unit-of-measure";
 export * as inventura from "./inventory/inventura-service";
+export * as fiscalization from "./fiscalization/provider";
 export * from "./realtime/publisher";
 export { ssePublisher, subscribe } from "./realtime/sse-publisher";

@@ -7,5 +7,6 @@ export function parseReportFilters(url: URL): ReportFiltersInput {
     preset: url.searchParams.get("preset") ?? undefined,
     from: url.searchParams.get("from") ?? undefined,
     to: url.searchParams.get("to") ?? undefined,
+    employeeId: url.searchParams.get("employeeId") ?? undefined,
   });
 }
