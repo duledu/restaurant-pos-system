@@ -15,7 +15,7 @@ export type Station = "KITCHEN" | "BAR";
  * za oba ekrana — razdvajanje po stanici se sprovodi OVDE, na osnovu uloge
  * pozivaoca, ne na osnovu parametra koji bi klijent mogao da falsifikuje.
  */
-function assertStationAccess(ctx: AuthContext, station: Station): void {
+export function assertStationAccess(ctx: AuthContext, station: Station): void {
   const isManagement = ctx.roles.some((r) => ["OWNER", "ADMIN", "MANAGER"].includes(r));
   if (isManagement) return; // nadzor sme da vidi obe stanice
 

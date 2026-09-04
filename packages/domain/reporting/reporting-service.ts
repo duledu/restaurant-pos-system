@@ -25,9 +25,11 @@ import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, type AuthContext } from "@rcs/auth";
 import { resolveDateRange, type ReportPreset } from "./date-range";
 import { resolveEmployeeDisplayNames } from "../audit/audit-service";
+import { assertStationAccess } from "../production/production-service";
 import { VOID_REASON_LABELS, type VoidReasonCode } from "@rcs/shared";
 
 const REPORTING_PERMISSION = "audit.view";
+const PRODUCTION_VIEW_PERMISSION = "production.view";
 
 // Gornja granica za detaljne liste (void-i, activity log) — ovo je pregled
 // za vlasnika, ne export/analitički alat. Sprečava da se slučajno povuče
@@ -983,6 +985,24 @@ export interface KitchenProductionRow {
   voidedQty: number;
 }
 
+/**
+ * Faza 12 — pojedinačna radna aktivnost po zaposlenom na stanici. Izvor je
+ * ISKLJUČIVO postojeći OrderEvent audit trag (order_item.status_changed,
+ * createdBy + payload.station/payload.to — vidi production-service.ts
+ * advanceItemStatus) — NEMA nove kolone/migracije, jer ovaj podatak već
+ * postoji otkad je Kuhinja/Bar tok uveden. acceptedCount = broj stavki koje
+ * je ZAPOSLENI prihvatio (PRIHVATI); readyCount = broj stavki koje je
+ * OZNAČIO spremnim (SPREMNO). Namerno NE broji preuzimanje (SERVED) — to je
+ * od Faze 10 konobarska radnja (confirmPickup), ne kuhinjska/šank.
+ */
+export interface EmployeeStationRow {
+  employeeId: string;
+  employeeName: string;
+  role: string;
+  acceptedCount: number;
+  readyCount: number;
+}
+
 export interface KitchenProductionReport {
   range: { from: string; to: string };
   rows: KitchenProductionRow[];
@@ -991,6 +1011,8 @@ export interface KitchenProductionReport {
     totalVoided: number;
     uniqueItems: number;
   };
+  employees: EmployeeStationRow[];
+  employeeTotals: { acceptedCount: number; readyCount: number };
 }
 
 /**
@@ -1004,6 +1026,60 @@ export interface KitchenProductionReport {
  * "svoju" polovinu bez dupliranja iste RSD vrednosti (ovo je produkciona,
  * ne finansijska agregacija — nema RSD iznosa ovde uopšte).
  */
+/**
+ * Faza 12 — po-zaposlenom razlaganje kuhinjske/šank produkcije, iz
+ * postojećeg OrderEvent audit traga (order_item.status_changed). BEZ nove
+ * kolone/migracije: `createdBy` (ko) + `payload.station`/`payload.to`
+ * (koja stanica, koji prelaz) već postoje na svakom PRIHVATI/SPREMNO
+ * pozivu (vidi production-service.ts advanceItemStatus). Filtriranje po
+ * JSON payload-u radi se u JS-u posle grubljeg upita (tip+period+lokacija)
+ * — obim OrderEvent redova po smeni je mali (par stotina), pa Prisma JSON
+ * path upit nije potreban niti vredan dodatne fragilnosti.
+ */
+async function computeStationEmployeeBreakdown(
+  restaurantId: string,
+  locationIds: string[],
+  range: { from: Date; to: Date },
+  station: "KITCHEN" | "BAR"
+): Promise<{ employees: EmployeeStationRow[]; employeeTotals: { acceptedCount: number; readyCount: number } }> {
+  const events = await prisma.orderEvent.findMany({
+    where: {
+      type: "order_item.status_changed",
+      createdAt: { gte: range.from, lt: range.to },
+      order: { restaurantId, locationId: { in: locationIds } },
+    },
+    select: { createdBy: true, payload: true },
+  });
+
+  const countsByEmployee = new Map<string, { acceptedCount: number; readyCount: number }>();
+  for (const event of events) {
+    const payload = event.payload as { station?: string; to?: string } | null;
+    if (!payload || payload.station !== station) continue;
+    const entry = countsByEmployee.get(event.createdBy) ?? { acceptedCount: 0, readyCount: 0 };
+    if (payload.to === "ACCEPTED") entry.acceptedCount += 1;
+    else if (payload.to === "READY") entry.readyCount += 1;
+    else continue;
+    countsByEmployee.set(event.createdBy, entry);
+  }
+
+  const nameByEmployee = await resolveEmployeeDisplayNames(restaurantId, Array.from(countsByEmployee.keys()));
+  const employees: EmployeeStationRow[] = Array.from(countsByEmployee.entries())
+    .map(([employeeId, counts]) => ({
+      employeeId,
+      employeeName: nameByEmployee.get(employeeId)?.name ?? "?",
+      role: nameByEmployee.get(employeeId)?.role ?? "?",
+      ...counts,
+    }))
+    .sort((a, b) => b.acceptedCount + b.readyCount - (a.acceptedCount + a.readyCount));
+
+  const employeeTotals = employees.reduce(
+    (acc, e) => ({ acceptedCount: acc.acceptedCount + e.acceptedCount, readyCount: acc.readyCount + e.readyCount }),
+    { acceptedCount: 0, readyCount: 0 }
+  );
+
+  return { employees, employeeTotals };
+}
+
 async function getStationProductionReport(
   ctx: AuthContext,
   filters: ReportFilters,
@@ -1014,7 +1090,7 @@ async function getStationProductionReport(
   // TIMING: filter by OrderItemStation.updatedAt (= when status reached SERVED),
   // NOT order.submittedAt. This correctly answers "what did this station complete
   // in this period" even for orders that were submitted before the period started.
-  const [servedStations, voids] = await Promise.all([
+  const [servedStations, voids, employeeBreakdown] = await Promise.all([
     prisma.orderItemStation.findMany({
       where: {
         station,
@@ -1041,6 +1117,7 @@ async function getStationProductionReport(
       },
       select: { itemName: true, voidedQuantity: true },
     }),
+    computeStationEmployeeBreakdown(ctx.restaurantId, locationIds, range, station),
   ]);
 
   const producedByName = new Map<string, number>();
@@ -1071,6 +1148,8 @@ async function getStationProductionReport(
     range: { from: range.from.toISOString(), to: range.to.toISOString() },
     rows,
     summary: { totalProduced, totalVoided, uniqueItems: rows.length },
+    employees: employeeBreakdown.employees,
+    employeeTotals: employeeBreakdown.employeeTotals,
   };
 }
 
@@ -1089,4 +1168,60 @@ export async function getBarProductionReport(
   filters: ReportFilters
 ): Promise<KitchenProductionReport> {
   return getStationProductionReport(ctx, filters, "BAR");
+}
+
+export interface StationEmployeeReport {
+  range: { from: string; to: string };
+  employees: EmployeeStationRow[];
+  employeeTotals: { acceptedCount: number; readyCount: number };
+}
+
+/**
+ * Faza 12 — verzija izveštaja dostupna SAMOJ Kuhinji/Šanku (ne samo
+ * Admin/Menadžer panelu). Namerno odvojena autorizacija od
+ * getKitchenProductionReport/getBarProductionReport iznad (koje zahtevaju
+ * "audit.view", permisiju koju KITCHEN/BAR uloge NEMAJU po podrazumevanoj
+ * RBAC šemi) — ovde se koristi ISTA autorizacija kao za sam KDS ekran
+ * (production.view + assertStationAccess, vidi production-service.ts
+ * listStationOrders), tako da kuhinjski radnik vidi SAMO kuhinjski
+ * izveštaj, šanker SAMO šankerski, a menadžment oba — bez ijedne nove
+ * Admin dozvole.
+ */
+async function getStationEmployeeReport(
+  ctx: AuthContext,
+  filters: ReportFilters,
+  station: "KITCHEN" | "BAR"
+): Promise<StationEmployeeReport> {
+  requirePermission(ctx, PRODUCTION_VIEW_PERMISSION);
+  assertStationAccess(ctx, station);
+
+  let locationIds: string[];
+  if (filters.locationId === "ALL") {
+    locationIds = ctx.locationIds;
+  } else {
+    requireLocationAccess(ctx, filters.locationId);
+    locationIds = [filters.locationId];
+  }
+  if (locationIds.length === 0) throw new Error("Nalog nema dodeljenu nijednu lokaciju");
+
+  const restaurant = await prisma.restaurant.findUniqueOrThrow({
+    where: { id: ctx.restaurantId },
+    select: { timezone: true },
+  });
+  const range = resolveDateRange(filters.preset, restaurant.timezone, { customFrom: filters.from, customTo: filters.to });
+
+  const breakdown = await computeStationEmployeeBreakdown(ctx.restaurantId, locationIds, range, station);
+  return {
+    range: { from: range.from.toISOString(), to: range.to.toISOString() },
+    employees: breakdown.employees,
+    employeeTotals: breakdown.employeeTotals,
+  };
+}
+
+export async function getKitchenEmployeeReport(ctx: AuthContext, filters: ReportFilters): Promise<StationEmployeeReport> {
+  return getStationEmployeeReport(ctx, filters, "KITCHEN");
+}
+
+export async function getBarEmployeeReport(ctx: AuthContext, filters: ReportFilters): Promise<StationEmployeeReport> {
+  return getStationEmployeeReport(ctx, filters, "BAR");
 }

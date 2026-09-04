@@ -17,6 +17,14 @@
   position: fixed;
   left: -9999px;
   top: 0;
+  /* Imenovana stranica (CSS Paged Media named pages) — vidi @page ticket
+   * ispod. NUŽNO je imenovana, ne podrazumevana (bezimena) @page: i ova
+   * stranica i print-report.css @page (A4/15mm, izveštaji) su bezimene bi
+   * se sudarile — poslednja učitana u layout.tsx (print-report.css) bi
+   * tiho pobedila za SVAKU štampu na sajtu, uključujući tikete (potvrđen
+   * uzrok "uska prazna stranica" bug-a: tiket je dobijao A4/15mm umesto
+   * 80mm/0). Imenovanjem obe stranice ostaju potpuno nezavisne. */
+  page: ticket;
 }
 
 .print-ticket {
@@ -151,19 +159,32 @@
 }
 
 @media print {
-  @page {
-    size: var(--ticket-width) auto;
+  /* Imenovana stranica "ticket" (vidi `page: ticket;` na .print-ticket-root
+   * gore) — namerno NE bezimeno @page, da se ne bi sudarilo sa print-report.css
+   * @page pravilom (A4/15mm, za izveštaje). @page takođe ne podržava pouzdano
+   * var() u `size` (poznato Chrome ograničenje) — zato je 80mm ovde TVRDO
+   * ukucano, ne var(--ticket-width). Ako se ikad doda 58mm varijanta, ovaj
+   * @page blok mora ručno pratiti tu promenu. */
+  @page ticket {
+    size: 80mm auto;
     margin: 0;
   }
-  body * {
-    visibility: hidden;
-  }
-  .print-ticket-root,
-  .print-ticket-root * {
-    visibility: visible;
+
+  /* .print-ticket-root se portalizuje direktno u <body> (vidi
+   * TicketPrintPanel.tsx) SPECIFIČNO da bi ovo pravilo moglo pouzdano da
+   * ukloni SVE ostalo iz toka stranice preko display:none (ne visibility:
+   * hidden — visibility ne uklanja element iz layout toka, pa je ranije
+   * cela iza-tiketa nevidljiva-ali-i-dalje-zauzima-prostor KDS/porudžbina
+   * lista gurala pravi tiket na DRUGU stranicu, ili proizvodila prazne
+   * listove). :has() ograničava pravilo da se aktivira SAMO kad je tiket
+   * stvarno prisutan — štampa admin izveštaja (print-report.css) ostaje
+   * potpuno nezavisna i nedirnuta ovim pravilom. */
+  body:has(> .print-ticket-root) > *:not(.print-ticket-root) {
+    display: none !important;
   }
   .print-ticket-root {
-    position: static;
-    left: 0;
+    position: static !important;
+    left: 0 !important;
+    display: block !important;
   }
 }

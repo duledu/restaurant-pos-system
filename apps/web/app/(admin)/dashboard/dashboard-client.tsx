@@ -274,11 +274,11 @@ export function DashboardClient() {
         title="Kontrolna tabla"
         description="Stanje restorana upravo sada — promet, gotovina/kartica, kuhinja/bar, zalihe, storna i šta zahteva pažnju."
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
             <button
               type="button"
               onClick={() => load({ silent: true })}
-              className="min-h-11 rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink print:hidden"
+              className="min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink print:hidden sm:w-auto"
               title="Osveži"
             >
               ↻ Osveži

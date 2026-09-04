@@ -216,6 +216,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           >
             Dostupnost
           </Link>
+          <Link
+            href={station === "KITCHEN" ? "/kitchen/report" : "/bar/report"}
+            className="flex min-h-11 items-center rounded-md border border-white/10 bg-white/[.05] px-3 text-xs font-semibold text-cream-300/80 hover:bg-white/[.1]"
+          >
+            Izveštaj
+          </Link>
           <LogoutButton theme="dark" />
         </div>
       </div>

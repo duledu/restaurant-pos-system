@@ -7,6 +7,7 @@ import { Skeleton } from "../../../../components/ui/Skeleton";
 import { KpiCard } from "../../../../components/admin/KpiCard";
 import { ReportFilters, reportFiltersToQuery, type ReportFilterState } from "../../../../components/admin/ReportFilters";
 import { ReportPrintHeader } from "../../../../components/admin/ReportPrintHeader";
+import { StationEmployeeTable, type EmployeeStationRow } from "../../../../components/production/StationEmployeeTable";
 
 interface KitchenProductionRow {
   name: string;
@@ -22,6 +23,8 @@ interface KitchenProductionReport {
     totalVoided: number;
     uniqueItems: number;
   };
+  employees: EmployeeStationRow[];
+  employeeTotals: { acceptedCount: number; readyCount: number };
 }
 
 async function apiFetch(url: string) {
@@ -186,6 +189,18 @@ export function KitchenProductionClient() {
         <span className="font-medium">SERVED</span> tokom izabranog perioda (po vremenu završetka
         u kuhinji). Stornirano = poništene stavke kuhinjske stanice. Vraćeno nije evidentirano u
         trenutnoj verziji sistema.
+      </p>
+
+      <h2 className="mb-4 mt-8 text-sm font-semibold text-inkSoft uppercase tracking-wide">Pregled po zaposlenom</h2>
+      {loading ? (
+        <Skeleton className="h-48" />
+      ) : (
+        <StationEmployeeTable employees={report?.employees ?? []} employeeTotals={report?.employeeTotals ?? { acceptedCount: 0, readyCount: 0 }} />
+      )}
+      <p className="mt-3 text-xs text-inkSoft">
+        Prihvaćeno = broj stavki koje je zaposleni lično prihvatio (PRIHVATI). Spremno = broj
+        stavki koje je isti zaposleni označio spremnim (SPREMNO). Preuzimanje (SERVED) je od Faze
+        10 konobarska radnja i ne broji se ovde.
       </p>
     </div>
   );

@@ -1,5 +1,7 @@
 "use client";
 
+import { createPortal } from "react-dom";
+
 interface TicketItem {
   quantity: number;
   name: string;
@@ -258,9 +260,19 @@ function ShiftReportTicket({ content }: { content: ShiftReportContent }) {
  * kupčev račun, ili završni izveštaj smene. Uvek uvijeno u .print-ticket-root
  * (vidi print-thermal.css) tako da je van @media print nevidljivo/van
  * ekrana — ne oslanja se ni na jedan deo normalnog dashboard styling-a.
+ *
+ * PORTAL u document.body (ne inline na mestu poziva) je NAMERAN, ne kozmetički
+ * detalj — pozivaoci ovog panela (KDS ekran sa velikom mrežom porudžbina,
+ * order-client, bill-client, shift-client...) ga renderuju duboko ugnježden
+ * u sopstveno stablo komponenti. print-thermal.css @media print blok mora da
+ * ukloni SVE OSTALO sa stranice preko display:none (vidi napomenu tamo o
+ * tome zašto visibility:hidden ne radi) — a to je pouzdano izvodljivo SAMO
+ * ako je .print-ticket-root pravi direktni child <body>-a, ne potomak
+ * proizvoljne dubine. Bez portala, display:none na roditelju bi sakrio i
+ * sam tiket (nema CSS načina da dete "probije" display:none predaka).
  */
 export function TicketPrintPanel({ content }: { content: TicketContent }) {
-  return (
+  const ticket = (
     <div className="print-ticket-root">
       <div className="print-ticket">
         {content.kind === "STORNO" ? (
@@ -275,4 +287,14 @@ export function TicketPrintPanel({ content }: { content: TicketContent }) {
       </div>
     </div>
   );
+
+  // Bez mount-gate-a NAMERNO: svaki pozivalac renderuje ovaj panel tek kao
+  // reakciju na klik (npr. KdsClient postavlja pendingPrint, koji odmah u
+  // ISTOM commit-u renderuje ovaj panel), nikad tokom SSR-a — document
+  // uvek postoji u tom trenutku. Odloženi portal (mount-gate + jedan dodatni
+  // render) bi razdvojio "tiket se pojavljuje u DOM-u" od
+  // "print-client.ts poziva window.print()" (koji se dešava u pozivaočevom
+  // sopstvenom useEffect-u vezanom za isti state), pa bi window.print()
+  // mogao da opali PRE nego što je portal stvarno montiran.
+  return createPortal(ticket, document.body);
 }
