@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Card } from "../../../../components/ui/Card";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { TicketPrintPanel, type TicketContent } from "../../../../components/printing/TicketPrintPanel";
+import { defaultPrintTransport } from "../../../../lib/print-transport";
 
 interface Location {
   id: string;
@@ -107,8 +108,7 @@ export function PrintersSettingsClient() {
 
   useEffect(() => {
     if (!testPrintContent) return;
-    window.print();
-    setTestPrintContent(null);
+    defaultPrintTransport.print().finally(() => setTestPrintContent(null));
   }, [testPrintContent]);
 
   const load = useCallback(async () => {

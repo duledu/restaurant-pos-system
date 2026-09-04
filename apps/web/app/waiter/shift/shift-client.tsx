@@ -6,6 +6,7 @@ import { LogoutButton } from "../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../../../components/printing/TicketPrintPanel";
+import { defaultPrintTransport } from "../../../lib/print-transport";
 
 interface OpenOrderRef {
   id: string;
@@ -114,13 +115,27 @@ export function ShiftClient() {
     try {
       const res = await apiFetch(`/api/pos/shift/${shiftId}/report`);
       setReportContent(res.content);
-      window.print();
+      // Štampa se pokreće iz useEffect-a ispod (isti obrazac kao KdsClient
+      // pendingPrint) — TicketPrintPanel/.print-ticket-root se montira TEK
+      // posle ovog re-rendera, pa poziv transporta odmah ovde (pre commit-a)
+      // ne bi našao tiket u DOM-u.
     } catch (e) {
       setPrintError(e instanceof Error ? e.message : "Greška pri štampi izveštaja");
-    } finally {
       setPrintBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!reportContent) return;
+    defaultPrintTransport
+      .print()
+      .catch((e) => setPrintError(e instanceof Error ? e.message : "Greška pri štampi izveštaja"))
+      .finally(() => {
+        setReportContent(null);
+        setPrintBusy(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportContent]);
 
   if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
 
