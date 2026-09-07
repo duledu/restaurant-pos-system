@@ -50,6 +50,7 @@
     "autoprefixer": "^10.4.0",
     "dotenv-cli": "^7.4.4",
     "embedded-postgres": "^16.14.0-beta.17",
+    "jsdom": "^25.0.1",
     "pg": "^8.12.0",
     "postcss": "^8.4.0",
     "react-dom": "^18.3.0",
