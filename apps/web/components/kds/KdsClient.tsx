@@ -16,8 +16,7 @@ import {
 } from "../../lib/print-client";
 import { defaultPrintTransport, type PrintTransport } from "../../lib/print-transport";
 import { resolveAutoPrintTransport } from "../../lib/qz-auto-transport";
-import { getQzSettings } from "../../lib/qz-settings";
-import { QzSettingsPanel } from "./QzSettingsPanel";
+import { getQzSettings, isQzAutoPrintConfigured } from "../../lib/qz-settings";
 
 interface StationItemModifier {
   id: string;
@@ -113,7 +112,13 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   const [pendingPrint, setPendingPrint] = useState<{ orderId: string; job: PrintJob; transport?: PrintTransport } | null>(null);
   const [failedPrintJobs, setFailedPrintJobs] = useState<PrintJob[]>([]);
   const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
-  const [showQzSettings, setShowQzSettings] = useState(false);
+  // P0.17: SAMO čitanje — podešavanje QZ štampača je administratorski
+  // zadatak (vidi apps/web/app/(admin)/settings/printers), Kuhinja/Šank
+  // ovde dobija isključivo status prikaz, bez ijedne kontrole.
+  const [qzConfigured, setQzConfigured] = useState(false);
+  useEffect(() => {
+    setQzConfigured(isQzAutoPrintConfigured(getQzSettings()));
+  }, []);
 
   // AUTOMATSKA ŠTAMPA (zahtev #1/#3): red čekanja + reference umesto state-a
   // za "print u toku" — `load` je stabilan useCallback (isti interval
@@ -335,15 +340,18 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           >
             Izveštaj
           </Link>
-          <button
-            type="button"
-            onClick={() => setShowQzSettings(true)}
-            title="QZ direktna štampa"
-            aria-label="QZ direktna štampa"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[.05] text-cream-300/80 hover:bg-white/[.1]"
+          {/* P0.17: SAMO informativno — podešavanje se radi u Admin →
+              Podešavanja → Štampači (ADMIN_ROLES), nikad ovde. Nema klika,
+              nema kontrola — Kuhinja/Šank ne "podešavaju", samo vide status. */}
+          <span
+            title={qzConfigured ? "Štampač podešen za automatsku QZ štampu na ovom računaru" : "QZ štampač nije podešen — obratite se administratoru"}
+            className={`flex min-h-11 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold ${
+              qzConfigured ? "border-success/30 bg-success/10 text-success" : "border-white/10 bg-white/[.05] text-cream-300/60"
+            }`}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" /></svg>
-          </button>
+            <span className={`h-1.5 w-1.5 rounded-full ${qzConfigured ? "bg-success" : "bg-cream-300/40"}`} aria-hidden="true" />
+            {qzConfigured ? "Štampač: Spreman" : "Štampač nije podešen"}
+          </span>
           <LogoutButton theme="dark" />
         </div>
       </div>
@@ -535,7 +543,6 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
       )}
 
       {pendingPrint && <TicketPrintPanel content={pendingPrint.job.content as TicketContent} />}
-      {showQzSettings && <QzSettingsPanel onClose={() => setShowQzSettings(false)} />}
     </div>
   );
 }

@@ -1,18 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Card } from "../ui/Card";
 import { getQzSettings, saveQzSettings, type QzPrintSettings } from "../../lib/qz-settings";
 import { connectQz, listPrinters, qzTestPrint, isQzLibraryLoaded, QzUnavailableError } from "../../lib/qz-client";
 
 /**
- * P0.16 — podešavanje QZ direktne štampe, PO UREĐAJU (localStorage, vidi
- * qz-settings.ts). Otvara se sa dugmeta u KdsClient.tsx zaglavlju —
- * namerno NIJE admin ekran: kuhinjski radnik (KITCHEN rola, bez
- * settings.manage) mora moći da izabere/testira svoj štampač bez admin
- * prijave, jer je ovo isključivo lokalno svojstvo NJEGOVOG računara, ne
- * poslovno podešavanje restorana.
+ * P0.16 / P0.17 — podešavanje QZ direktne štampe, PO UREĐAJU (localStorage,
+ * vidi qz-settings.ts). NAMERNO admin-only ekran (montira se ISKLJUČIVO iz
+ * printers-settings-client.tsx, iza (admin) layout-a koji već zahteva
+ * ADMIN_ROLES — vidi apps/web/app/(admin)/layout.tsx) — postavljanje
+ * fizičkog Windows štampača na kuhinjskom računaru je administratorski
+ * zadatak, ne kuhinjski. KDS (KdsClient.tsx) posle ovoga samo ČITA već
+ * sačuvano podešavanje (getQzSettings), bez ijedne kontrole za izbor/
+ * omogućavanje/testiranje.
+ *
+ * Ostaje inline kartica (ne modal) da bi vizuelno pratila ostatak ove
+ * admin stranice (Kuhinja/Šank/Račun kartice iznad).
  */
-export function QzSettingsPanel({ onClose }: { onClose: () => void }) {
+export function QzSettingsPanel() {
   const [settings, setSettings] = useState<QzPrintSettings>({ enabled: false, printerName: null });
   const [printers, setPrinters] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
@@ -69,85 +75,80 @@ export function QzSettingsPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-md rounded-lg border border-white/10 bg-graphite-800 p-5 text-cream-100 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold">QZ direktna štampa</h2>
-          <button type="button" onClick={onClose} className="text-cream-300/60 hover:text-cream-100" aria-label="Zatvori">
-            ✕
-          </button>
+    <Card className="p-5">
+      <div className="mb-3">
+        <h2 className="font-semibold text-ink">QZ direktna štampa — ovaj računar</h2>
+        <p className="mt-0.5 text-xs text-inkSoft">
+          Vezano za FIZIČKI računar/browser na kome se ovo sačuva (npr. kuhinjski računar), ne za restoran u celini.
+          Konobar/kuhinja ne vide ovo podešavanje — samo status.
+        </p>
+      </div>
+
+      <label className="mb-4 flex items-center gap-2 text-sm text-ink">
+        <input
+          type="checkbox"
+          checked={settings.enabled}
+          onChange={(e) => save({ ...settings, enabled: e.target.checked })}
+        />
+        Omogući direktnu štampu preko QZ Tray-a na ovom računaru (bez Chrome dijaloga)
+      </label>
+
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={refreshPrinters}
+          className="min-h-11 rounded-md bg-graphite px-4 text-sm font-semibold text-cream-100 disabled:opacity-40"
+          disabled={status === "connecting"}
+        >
+          {status === "connecting" ? "Povezivanje…" : "Pronađi QZ štampače"}
+        </button>
+        {status === "connected" && (
+          <p className="mt-2 text-xs font-semibold text-success">Povezano — {printers.length} štampač(a) pronađeno.</p>
+        )}
+        {status === "error" && statusMessage && <p className="mt-2 text-xs text-danger">{statusMessage}</p>}
+      </div>
+
+      {printers.length > 0 && (
+        <div className="mb-4">
+          <label className="mb-1.5 block text-xs text-inkSoft">Štampač</label>
+          <select
+            value={settings.printerName ?? ""}
+            onChange={(e) => save({ ...settings, printerName: e.target.value || null })}
+            className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+          >
+            <option value="">— izaberi —</option>
+            {printers.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
         </div>
+      )}
 
-        <label className="mb-4 flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={settings.enabled}
-            onChange={(e) => save({ ...settings, enabled: e.target.checked })}
-          />
-          Omogući direktnu štampu preko QZ Tray-a (bez Chrome dijaloga)
-        </label>
-
+      {settings.printerName && (
         <div className="mb-4">
           <button
             type="button"
-            onClick={refreshPrinters}
-            className="min-h-11 rounded-md bg-gold px-4 text-sm font-bold text-white disabled:opacity-40"
-            disabled={status === "connecting"}
+            onClick={runTestPrint}
+            disabled={testBusy}
+            className="min-h-11 rounded-md border border-line px-5 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink disabled:opacity-40"
           >
-            {status === "connecting" ? "Povezivanje…" : "Pronađi QZ štampače"}
+            {testBusy ? "Štampanje…" : "Probna štampa (QZ)"}
           </button>
-          {status === "connected" && (
-            <p className="mt-2 text-xs font-semibold text-success">Povezano — {printers.length} štampač(a) pronađeno.</p>
-          )}
-          {status === "error" && statusMessage && (
-            <p className="mt-2 text-xs text-danger">{statusMessage}</p>
-          )}
+          {testResult && <p className="mt-2 text-xs text-inkSoft">{testResult}</p>}
         </div>
+      )}
 
-        {printers.length > 0 && (
-          <div className="mb-4">
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-cream-300/70">Štampač</label>
-            <select
-              value={settings.printerName ?? ""}
-              onChange={(e) => save({ ...settings, printerName: e.target.value || null })}
-              className="h-11 w-full rounded-md border border-white/10 bg-graphite-900 px-3 text-sm text-cream-100"
-            >
-              <option value="">— izaberi —</option>
-              {printers.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {settings.printerName && (
-          <div className="mb-4">
-            <button
-              type="button"
-              onClick={runTestPrint}
-              disabled={testBusy}
-              className="min-h-11 w-full rounded-md border border-white/20 py-2 text-sm font-semibold text-cream-100 disabled:opacity-40"
-            >
-              {testBusy ? "Štampanje…" : "Probna štampa"}
-            </button>
-            {testResult && <p className="mt-2 text-xs text-cream-300/80">{testResult}</p>}
-          </div>
-        )}
-
-        <div className="rounded-md border border-white/10 bg-white/[.03] p-3 text-xs text-cream-300/70">
-          <p className="mb-1 font-semibold text-cream-300/90">Napomena</p>
-          <p>
-            Chrome može zatražiti dozvolu &quot;Local Network Access&quot; da bi ovaj sajt mogao da komunicira sa QZ Tray-om
-            na localhost-u. Ako konekcija ne uspe, proveri Chrome podešavanja sajta (Site settings → Local Network Access) za{" "}
-            <span className="font-mono">tablecore.net</span>.
-          </p>
-        </div>
+      <div className="rounded-md border border-line bg-cream-100 p-3 text-xs text-inkSoft">
+        <p className="mb-1 font-semibold text-ink">Napomena</p>
+        <p>
+          Chrome može zatražiti dozvolu &quot;Local Network Access&quot; da bi ovaj sajt mogao da komunicira sa QZ Tray-om
+          na localhost-u. Ako konekcija ne uspe, proveri Chrome podešavanja sajta (Site settings → Local Network Access)
+          za ovaj domen — na RAČUNARU na kome se štampa (npr. kuhinjski računar), ne na uređaju administratora ako se
+          razlikuju.
+        </p>
       </div>
-    </div>
+    </Card>
   );
 }

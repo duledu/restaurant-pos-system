@@ -5,6 +5,7 @@ import { Card } from "../../../../components/ui/Card";
 import { Skeleton } from "../../../../components/ui/Skeleton";
 import { TicketPrintPanel, type TicketContent } from "../../../../components/printing/TicketPrintPanel";
 import { defaultPrintTransport } from "../../../../lib/print-transport";
+import { QzSettingsPanel } from "../../../../components/kds/QzSettingsPanel";
 
 interface Location {
   id: string;
@@ -283,6 +284,7 @@ export function PrintersSettingsClient() {
               </Card>
             );
           })}
+          <QzSettingsPanel />
         </div>
       )}
 
