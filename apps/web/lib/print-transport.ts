@@ -152,3 +152,28 @@ export class BrowserPrintTransport implements PrintTransport {
 }
 
 export const defaultPrintTransport: PrintTransport = new BrowserPrintTransport();
+
+/**
+ * P0.16 — QZ Tray direktna štampa (Kuhinja). Implementira ISTI
+ * PrintTransport interfejs, pa je čist zamenski put za
+ * BrowserPrintTransport na mestu poziva (KdsClient.tsx bira koji transport
+ * prosleđuje printAndConfirm-u u print-client.ts — sama funkcija
+ * printAndConfirm, njen claim/confirm/retry tok, ostaju POTPUNO
+ * nepromenjeni bez obzira koji transport dobiju).
+ *
+ * NAMERNO baca (ne guta) svaku grešku — printAndConfirm već zavisi od
+ * ovoga (catch tamo markira PrintJob kao FAILED, nikad kao uspeh) — ovaj
+ * transport NIKAD ne sme sam sebi da "proguta" grešku i tiho vrati uspeh.
+ */
+export class QzPrintTransport implements PrintTransport {
+  constructor(private readonly printerName: string) {}
+
+  async print(): Promise<void> {
+    const ticketRoot = document.querySelector<HTMLElement>(".print-ticket-root");
+    if (!ticketRoot) {
+      throw new Error("Nema tiketa za QZ štampu u DOM-u");
+    }
+    const { printTicketViaQz } = await import("./qz-client");
+    await printTicketViaQz(ticketRoot, this.printerName);
+  }
+}
