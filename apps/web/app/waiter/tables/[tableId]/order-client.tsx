@@ -8,6 +8,7 @@ import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, typ
 import { sameModifierSelection } from "../../../../lib/order-cart";
 import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
+import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../../../lib/client-cache";
 
 interface Category {
   id: string;
@@ -15,18 +16,6 @@ interface Category {
   type: "FOOD" | "DRINK";
 }
 
-// PERF: module-scope (not component state) so it survives client-side
-// navigation between DIFFERENT tables — /waiter/tables/[tableId] fully
-// remounts this component per table, but the JS module itself stays loaded.
-// Categories are restaurant-wide (never location-scoped) and change rarely
-// (an admin editing the menu), unlike order/stock/availability data which
-// must always be fresh — so this is the one piece of this screen's data
-// that's safe to reuse across table entries within a short window.
-// Deliberately NOT applied to the item list: it carries live per-location
-// stock/availability state (see availability-service.ts) that must stay
-// accurate on every table entry, not up to a minute stale.
-let categoriesCache: { categories: Category[]; fetchedAt: number } | null = null;
-const CATEGORIES_CACHE_TTL_MS = 60_000;
 interface ModifierOption {
   id: string;
   name: string;
@@ -455,14 +444,17 @@ export function OrderClient({ tableId }: { tableId: string }) {
     try {
       // PERF: categories/me depend on NEITHER the order nor its location —
       // fire them immediately, concurrently with opening/loading the order
-      // itself, instead of waiting for that round trip to resolve first
-      // (the old code awaited openOrder, THEN started these two — a fully
-      // avoidable sequential hop on every table entry). Categories additionally
-      // reuse a short-lived cache (see categoriesCache above) — skip the
-      // network call entirely on a warm hit.
-      const freshCategories = categoriesCache && Date.now() - categoriesCache.fetchedAt < CATEGORIES_CACHE_TTL_MS ? categoriesCache.categories : null;
-      const categoriesPromise = freshCategories ? Promise.resolve({ categories: freshCategories }) : apiFetch(`/api/admin/menu/categories`);
-      const mePromise = apiFetch(`/api/pos/me`);
+      // itself, instead of waiting for that round trip to resolve first (the
+      // old code awaited openOrder, THEN started these two — a fully
+      // avoidable sequential hop on every table entry). Both go through the
+      // shared client cache (60s) — a warm hit skips the network call
+      // entirely. Deliberately NOT applied to the item list below: it
+      // carries live per-location stock/availability state (see
+      // availability-service.ts) that must stay accurate on every table
+      // entry (and is separately re-polled every 15s further down) — caching
+      // it here would silently defeat that freshness guarantee.
+      const categoriesPromise = getOrFetch(CLIENT_CACHE_KEYS.categories, CLIENT_CACHE_TTL_MS, () => apiFetch(`/api/admin/menu/categories`));
+      const mePromise = getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch(`/api/pos/me`));
 
       const orderRes = await apiFetch("/api/pos/orders", {
         method: "POST",
@@ -485,7 +477,6 @@ export function OrderClient({ tableId }: { tableId: string }) {
       setCategories(categoriesRes.categories);
       setItems(itemsRes.items);
       setRoles(meRes.roles ?? []);
-      if (!freshCategories) categoriesCache = { categories: categoriesRes.categories, fetchedAt: Date.now() };
       if (!activeCategoryId && categoriesRes.categories.length > 0) {
         setActiveCategoryId(categoriesRes.categories[0].id);
       }

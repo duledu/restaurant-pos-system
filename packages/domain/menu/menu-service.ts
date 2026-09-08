@@ -4,6 +4,7 @@ import { recordAuditEntry } from "../audit/audit-service";
 import { getStockStatusForMenuItems } from "../inventory/inventory-service";
 import { getRecipeAvailabilityForMenuItems } from "../inventory/ingredient-service";
 import { getAvailabilityForMenuItems } from "./availability-service";
+import { buildCacheKey, getOrSet, cacheDel } from "../cache/cache-client";
 import type {
   CreateCategoryInput,
   UpdateCategoryInput,
@@ -23,13 +24,56 @@ import type {
 const MENU_MANAGE = "menu.manage";
 const MENU_VIEW = "menu.view";
 
+// ── KEŠ (P0/perf) ───────────────────────────────────────────────────────
+//
+// Keširaju se ISKLJUČIVO kategorije i "bazni" oblik artikala (naziv/cena/
+// dodaci/kategorija) — NIKAD live overlay (zaliha/recepturisana dostupnost/
+// operativna dostupnost po lokaciji, vidi listMenuItems ispod), koji uvek
+// mora ostati svež po zahtevu (specifikacija: "safe/base menu item data
+// only"). TTL je bezbednosna rezerva (rekonstrukcija ako invalidacija
+// promaši), STVARNA svežina dolazi od eksplicitne invalidacije POSLE
+// uspešne DB izmene (nikad pre) na kraju svake mutacione funkcije ispod.
+const MENU_CACHE_TTL_SECONDS = 300;
+
+function categoriesCacheKey(restaurantId: string): string {
+  return buildCacheKey(restaurantId, "categories");
+}
+
+/**
+ * Samo DVE keširane varijante artikala postoje — "all" (bez filtera) i
+ * "active" (activeOnly=true, bez ijednog drugog filtera). Bilo koji drugi
+ * skup filtera (categoryId/preparationStation/search/type) NIKAD se ne
+ * kešira — search posebno bi značio neograničen prostor ključeva. Ovo je
+ * namerno uzak obim ("base menu item data only"), ne opšti keš za svaki
+ * mogući upit.
+ */
+type MenuItemsCacheVariant = "all" | "active";
+
+function menuItemsCacheKey(restaurantId: string, variant: MenuItemsCacheVariant): string {
+  return buildCacheKey(restaurantId, "menu-items", variant);
+}
+
+function baseCacheVariant(filters: MenuItemFilters): MenuItemsCacheVariant | null {
+  if (filters.categoryId || filters.preparationStation || filters.search || filters.type) return null;
+  return filters.activeOnly ? "active" : "all";
+}
+
+async function invalidateMenuItemsCache(restaurantId: string): Promise<void> {
+  await cacheDel(menuItemsCacheKey(restaurantId, "all"), menuItemsCacheKey(restaurantId, "active"));
+}
+
 // ── KATEGORIJE ──────────────────────────────────────────────────────────
 
 export async function listCategories(ctx: AuthContext) {
   requirePermission(ctx, MENU_VIEW);
-  return prisma.menuCategory.findMany({
-    where: scopeToRestaurant(ctx),
-    orderBy: { sortOrder: "asc" },
+  return getOrSet({
+    key: categoriesCacheKey(ctx.restaurantId),
+    ttlSeconds: MENU_CACHE_TTL_SECONDS,
+    loader: () =>
+      prisma.menuCategory.findMany({
+        where: scopeToRestaurant(ctx),
+        orderBy: { sortOrder: "asc" },
+      }),
   });
 }
 
@@ -38,6 +82,7 @@ export async function createCategory(ctx: AuthContext, input: CreateCategoryInpu
   const category = await prisma.menuCategory.create({
     data: { ...input, restaurantId: ctx.restaurantId },
   });
+  await cacheDel(categoriesCacheKey(ctx.restaurantId));
   await recordAuditEntry(ctx, {
     entityType: "MenuCategory",
     entityId: category.id,
@@ -58,6 +103,11 @@ export async function updateCategory(ctx: AuthContext, categoryId: string, input
     where: { id: categoryId },
     data: input,
   });
+  await cacheDel(categoriesCacheKey(ctx.restaurantId));
+  // Kategorija se prikazuje ugnježdena u svakom artiklu (include: { category: true }
+  // u listMenuItems) — izmena naziva/statusa kategorije mora obesnažiti i
+  // keširane liste artikala, ne samo listu kategorija.
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuCategory",
@@ -85,6 +135,7 @@ export async function reorderCategories(ctx: AuthContext, input: ReorderCategori
       prisma.menuCategory.update({ where: { id }, data: { sortOrder: index } })
     )
   );
+  await cacheDel(categoriesCacheKey(ctx.restaurantId));
 
   await recordAuditEntry(ctx, {
     entityType: "MenuCategory",
@@ -115,6 +166,8 @@ export async function deleteCategory(ctx: AuthContext, categoryId: string, force
   }
 
   await prisma.menuCategory.delete({ where: { id: categoryId } });
+  await cacheDel(categoriesCacheKey(ctx.restaurantId));
+  await invalidateMenuItemsCache(ctx.restaurantId); // affected items move to "uncategorized"
 
   await recordAuditEntry(ctx, {
     entityType: "MenuCategory",
@@ -135,34 +188,48 @@ export async function listMenuItems(ctx: AuthContext, filters: MenuItemFilters =
   // P3.3 (bez stock polja) — potpuno aditivno.
   if (filters.locationId) requireLocationAccess(ctx, filters.locationId);
 
-  const items = await prisma.menuItem.findMany({
-    where: {
-      ...scopeToRestaurant(ctx),
-      deletedAt: null,
-      ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
-      ...(filters.preparationStation ? { preparationStation: filters.preparationStation } : {}),
-      ...(filters.activeOnly ? { isActive: true } : {}),
-      ...(filters.search
-        ? { name: { contains: filters.search, mode: "insensitive" as const } }
-        : {}),
-      ...(filters.type ? { category: { type: filters.type } } : {}),
-    },
-    include: {
-      category: true,
-      // P3.2: JEDAN batch-ovan include za sve stavke (ne upit po artiklu) —
-      // waiter ekran ovim saznaje da li artikal ima grupe dodataka bez
-      // dodatnih rundi ka serveru (specifikacija #63). Prazno za artikle
-      // bez vezanih grupa — jeftino po redu.
-      modifierGroups: {
-        where: { group: { isActive: true } },
-        include: { group: { include: { options: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } } } },
-        orderBy: { sortOrder: "asc" },
+  const loadItems = () =>
+    prisma.menuItem.findMany({
+      where: {
+        ...scopeToRestaurant(ctx),
+        deletedAt: null,
+        ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
+        ...(filters.preparationStation ? { preparationStation: filters.preparationStation } : {}),
+        ...(filters.activeOnly ? { isActive: true } : {}),
+        ...(filters.search
+          ? { name: { contains: filters.search, mode: "insensitive" as const } }
+          : {}),
+        ...(filters.type ? { category: { type: filters.type } } : {}),
       },
-    },
-    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-  });
+      include: {
+        category: true,
+        // P3.2: JEDAN batch-ovan include za sve stavke (ne upit po artiklu) —
+        // waiter ekran ovim saznaje da li artikal ima grupe dodataka bez
+        // dodatnih rundi ka serveru (specifikacija #63). Prazno za artikle
+        // bez vezanih grupa — jeftino po redu.
+        modifierGroups: {
+          where: { group: { isActive: true } },
+          include: { group: { include: { options: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } } } },
+          orderBy: { sortOrder: "asc" },
+        },
+      },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    });
+
+  // P0/perf: kešira se ISKLJUČIVO "bazni" (bez-filtera / activeOnly-samo)
+  // oblik — nikad proizvoljna kombinacija filtera (search posebno bi bio
+  // neograničen prostor ključeva). Bilo koji drugi filter ide direktno na
+  // Postgres, nepromenjeno u odnosu na ranije.
+  const cacheVariant = baseCacheVariant(filters);
+  const items = cacheVariant
+    ? await getOrSet({ key: menuItemsCacheKey(ctx.restaurantId, cacheVariant), ttlSeconds: MENU_CACHE_TTL_SECONDS, loader: loadItems })
+    : await loadItems();
 
   if (!filters.locationId) return items;
+  // NAPOMENA: sve ispod (zaliha/recepturisana dostupnost/operativna
+  // dostupnost) računa se UVEK uživo, bez obzira da li su `items` iznad
+  // došli iz keša — ovo je live operativni podatak po lokaciji koji se
+  // NIKAD ne kešira (specifikacija: "safe/base menu item data only").
 
   // P1.4: dva batch-ovana upita paralelno (finished-goods status +
   // recepturisana dostupnost), oba "batch, ne po artiklu" (specifikacija
@@ -197,6 +264,7 @@ export async function createMenuItem(ctx: AuthContext, input: CreateMenuItemInpu
   const item = await prisma.menuItem.create({
     data: { ...input, restaurantId: ctx.restaurantId },
   });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -227,6 +295,7 @@ export async function updateMenuItem(ctx: AuthContext, itemId: string, input: Up
   const { price: _ignoredPrice, categoryId: _ignoredCategoryId, ...rest } = input;
 
   const updated = await prisma.menuItem.update({ where: { id: itemId }, data: rest });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -263,6 +332,7 @@ export async function changePrice(ctx: AuthContext, itemId: string, input: Chang
       ...(resolvesReview ? { needsReview: false, reviewNote: null, isActive: true } : {}),
     },
   });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -293,6 +363,7 @@ export async function moveToCategory(ctx: AuthContext, itemId: string, input: Mo
     where: { id: itemId },
     data: { categoryId: input.categoryId },
   });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -309,6 +380,7 @@ export async function setAvailability(ctx: AuthContext, itemId: string, isAvaila
   const existing = await getOwnedItem(ctx, itemId);
 
   const updated = await prisma.menuItem.update({ where: { id: itemId }, data: { isAvailable } });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -325,6 +397,7 @@ export async function setActive(ctx: AuthContext, itemId: string, isActive: bool
   const existing = await getOwnedItem(ctx, itemId);
 
   const updated = await prisma.menuItem.update({ where: { id: itemId }, data: { isActive } });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -344,6 +417,7 @@ export async function archiveMenuItem(ctx: AuthContext, itemId: string) {
     where: { id: itemId },
     data: { deletedAt: new Date(), isActive: false },
   });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -365,6 +439,7 @@ export async function deleteMenuItem(ctx: AuthContext, itemId: string) {
   const existing = await getOwnedItem(ctx, itemId);
 
   await prisma.menuItem.delete({ where: { id: itemId } });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -389,6 +464,7 @@ export async function duplicateMenuItem(ctx: AuthContext, itemId: string) {
   const duplicate = await prisma.menuItem.create({
     data: { ...rest, name: `${existing.name} (kopija)`, slug, isActive: false },
   });
+  await invalidateMenuItemsCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",

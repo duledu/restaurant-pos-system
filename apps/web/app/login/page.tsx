@@ -8,6 +8,7 @@ import { PinPad } from "../../components/auth/PinPad";
 import { clearDevice, getDeviceId } from "../../lib/shared-pos";
 import { ROLE_LABEL } from "../../components/admin/role-labels";
 import { InstallAppButton } from "../../components/system/InstallAppButton";
+import { prefetchPosReferenceData } from "../../lib/prefetch";
 
 // Tri stanja prijave:
 // "admin"            – email + lozinka (OWNER/ADMIN/MANAGER)
@@ -188,6 +189,7 @@ function StaffLoginForm({ deviceId, onDeviceInvalid }: { deviceId: string; onDev
         if (res.status === 423 || res.status === 429) throw new Error("Previše neuspešnih pokušaja. Pokušajte ponovo kasnije.");
         throw new Error(body.error ?? "Prijava nije uspela");
       }
+      prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
       router.push(body.redirectTo ?? "/login");
       router.refresh();
     } catch (err) {
@@ -394,6 +396,7 @@ function PasswordLoginForm() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Prijava nije uspela");
+      prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
       router.push(body.redirectTo ?? "/login");
       router.refresh();
     } catch (err) {

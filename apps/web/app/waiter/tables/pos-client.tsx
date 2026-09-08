@@ -7,6 +7,7 @@ import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 import { isTableHeldByAnotherWaiter } from "../../../lib/table-ownership";
 import { myReadyItemIds, hasNewReadyId } from "../../../lib/ready-notifications";
+import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../../lib/client-cache";
 
 interface ReadyItem {
   id: string;
@@ -185,7 +186,7 @@ export function PosClient() {
     setLoading(true);
     setError(null);
     try {
-      const me = await apiFetch("/api/pos/me");
+      const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
       const loc = me.locationIds[0];
       if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
       setLocationId(loc);

@@ -6,8 +6,19 @@
  */
 import { prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { buildCacheKey, getOrSet, cacheDel } from "../cache/cache-client";
 
 const SETTINGS_MANAGE = "settings.manage";
+
+// P0/perf: SAMO opšta podešavanja restorana (adresa/PIB/tekst na računu) —
+// NAMERNO ne i konfiguracija štampača ispod (PrinterConfig) dok se ne
+// završi QZ Tray integracija koja tu konfiguraciju uskoro menja; keširanje
+// nečega što se aktivno redizajnira bi samo dodalo zbunjujuću zastarelost.
+const SETTINGS_CACHE_TTL_SECONDS = 300;
+
+function settingsCacheKey(restaurantId: string): string {
+  return buildCacheKey(restaurantId, "settings");
+}
 
 export interface RestaurantSettingsView {
   restaurantId: string;
@@ -34,8 +45,14 @@ const DEFAULTS = (restaurantId: string): RestaurantSettingsView => ({
  * ne postoji (lenjo kreiran tek pri prvom čuvanju — nema backfill migracije).
  */
 export async function getRestaurantSettings(ctx: Pick<AuthContext, "restaurantId">): Promise<RestaurantSettingsView> {
-  const row = await prisma.restaurantSettings.findUnique({ where: { restaurantId: ctx.restaurantId } });
-  return row ?? DEFAULTS(ctx.restaurantId);
+  return getOrSet({
+    key: settingsCacheKey(ctx.restaurantId),
+    ttlSeconds: SETTINGS_CACHE_TTL_SECONDS,
+    loader: async () => {
+      const row = await prisma.restaurantSettings.findUnique({ where: { restaurantId: ctx.restaurantId } });
+      return row ?? DEFAULTS(ctx.restaurantId);
+    },
+  });
 }
 
 export interface UpdateRestaurantSettingsInput {
@@ -52,11 +69,13 @@ export async function updateRestaurantSettings(
   input: UpdateRestaurantSettingsInput
 ): Promise<RestaurantSettingsView> {
   requirePermission(ctx, SETTINGS_MANAGE);
-  return prisma.restaurantSettings.upsert({
+  const updated = await prisma.restaurantSettings.upsert({
     where: { restaurantId: ctx.restaurantId },
     create: { restaurantId: ctx.restaurantId, ...input },
     update: input,
   });
+  await cacheDel(settingsCacheKey(ctx.restaurantId));
+  return updated;
 }
 
 export interface PrinterConfigInput {

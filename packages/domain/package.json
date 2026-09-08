@@ -6,6 +6,7 @@
   "dependencies": {
     "@rcs/db": "*",
     "@rcs/auth": "*",
-    "@rcs/shared": "*"
+    "@rcs/shared": "*",
+    "@upstash/redis": "^1.34.0"
   }
 }

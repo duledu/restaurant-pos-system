@@ -5,6 +5,7 @@ import Link from "next/link";
 import { LogoutButton } from "../ui/LogoutButton";
 import { AppLogo } from "../branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
+import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../lib/client-cache";
 import {
   fetchPrintJobs,
   printAndConfirm,
@@ -174,7 +175,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     try {
       let loc = locationId;
       if (!loc) {
-        const me = await apiFetch("/api/pos/me");
+        const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
         loc = me.locationIds[0];
         setLocationId(loc);
       }

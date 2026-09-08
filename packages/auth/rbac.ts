@@ -16,6 +16,14 @@ export interface AuthContext {
   roles: string[];
   permissions: Set<string>;
   deviceId?: string;
+  // Aditivno, OPCIONO polje (P0/perf): requireAuth već učitava ovo iz
+  // Employee reda ispod (nema DODATNOG upita) — postoji da /api/pos/me ne
+  // mora da radi SOPSTVENI, redundantan prisma.employee.findUnique za
+  // identičan podatak. Opciono (ne obavezno) da bi preostala dva mesta koja
+  // ručno grade AuthContext ISKLJUČIVO za recordAuditEntry (pin-login.ts,
+  // login/route.ts, pre nego što je sesija uopšte izdata) ostala nepromenjena.
+  firstName?: string | null;
+  lastName?: string | null;
 }
 
 export class UnauthorizedError extends Error {
@@ -200,6 +208,8 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
     roles,
     permissions,
     deviceId: session.deviceId,
+    firstName: employee.firstName,
+    lastName: employee.lastName,
   };
 }
 
