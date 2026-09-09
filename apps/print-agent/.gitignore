@@ -1,0 +1,16 @@
+bin/
+obj/
+.tools/
+artifacts/
+agent.local.json
+
+# Defense-in-depth (Faza 2C konsolidacija) — ovi fajlovi PRIPADAJU
+# ProgramData/instaliranoj mašini, NIKAD izvornom stablu; ovi obrasci
+# postoje samo za slučaj da neko pokrene agenta sa CWD unutar checkout-a
+# (npr. `dotnet run` bez --run/servisa) i on tu ostavi razvojni trag.
+*.sqlite3
+*.sqlite3-*
+workstation-credential.dat
+agent.config.json
+agent-state.sqlite3
+installer/dist/

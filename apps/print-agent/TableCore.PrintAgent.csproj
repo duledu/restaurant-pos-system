@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Konsolidacija — eksplicitna interna pilot oznaka na samom EXE-u
+         (Windows Svojstva/Details -> Product version), MORA se poklapati sa
+         AgentVersion.Current (AgentRunner.cs) i MyAppVersion (installer/
+         TableCorePrintAgent.iss). NE javno stabilno izdanje. -->
+    <Version>1.0.0-pilot.1</Version>
+    <!-- Never package workstation config, local SDKs, or prior publish/test output. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;.tools/**;agent.local.json</DefaultItemExcludes>
+  </PropertyGroup>
+  <!-- Faza 2C, sekcija 2 — samostalan (self-contained) win-x64 objavljeni
+       paket, BEZ posebne .NET instalacije na ciljnom računaru. Namerno
+       uslovljeno na Release konfiguraciju (ne osnovni PropertyGroup iznad):
+       svakodnevni `dotnet build`/`dotnet run` (self-test i sl.) u Debug-u ostaje
+       brz, framework-dependent (deli već instaliran .NET 8 SDK runtime na
+       OVOM razvojnom računaru); STVARAN objavljeni artefakt za installer
+       (installer/) uvek dolazi iz `dotnet publish -c Release`. -->
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- Microsoft.Data.Sqlite nosi izvornu (native) SQLitePCLRaw biblioteku
+         koja MORA moći da se raspakuje pored jednog EXE-a pri pokretanju —
+         bez ovoga bi single-file objavljivanje tiho pokvarilo AgentDatabase.cs
+         (SQLite) na ciljnoj mašini, iako lokalni build/self-test to nikad ne
+         bi otkrio (Debug/dotnet run ne koristi ovaj put). -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Faza 2A — CredentialStore.cs (DPAPI). Ne deo osnovnog net8.0-windows
+         BCL-a iako umotava Windows-only API; zvaničan, Microsoft-objavljen
+         paket. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <!-- Faza 2B — AgentDatabase.cs: lagano, pouzdano, fajl-bazirano trajno
+         lokalno stanje pokušaja štampe (zamenjuje in-memory skup iz Faze 1).
+         Samo ADO.NET provajder, NE EF Core — namerno najmanji dovoljan alat. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- Faza 2C — AgentService.cs: hostuje AgentRunner.Run kao Windows
+         servis (Generic Host + SCM integracija), zvaničan Microsoft paket. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+  </ItemGroup>
+</Project>
