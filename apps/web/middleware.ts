@@ -26,8 +26,25 @@ const PUBLIC_API_PATHS = new Set([
   "/api/device/check",
 ]);
 
+// Faza 2A/2B — TableCore Print Agent: SVAKA /api/agent/** ruta autentifikuje
+// preko Authorization: Bearer <kredencijal radne stanice>
+// (withWorkstationAuth, packages/auth/workstation-auth.ts) ili (register)
+// preko jednokratnog koda za uparivanje — NIKAD preko rcs_session cookie-ja,
+// pa bi ih ovaj middleware inače blokirao PRE nego što handler uopšte
+// stigne da proveri sopstvenu autentifikaciju. "Javno" ovde znači samo
+// "izuzeto od cookie provere", ne "bez autentifikacije" — isti princip kao
+// /api/device/personal-register (nema cookie, ali zahteva lozinku). Prefiks
+// (ne lista tačnih putanja) namerno — /api/agent/jobs/[jobId]/start i
+// .../result imaju dinamički segment, a SVAKA buduća /api/agent/** ruta
+// deli isto pravilo, pa nema smisla nabrajati svaku posebno.
+const PUBLIC_API_PREFIXES = ["/api/agent/"];
+
 function isPublicPath(pathname: string): boolean {
-  return PUBLIC_PAGE_PATHS.has(pathname) || PUBLIC_API_PATHS.has(pathname);
+  return (
+    PUBLIC_PAGE_PATHS.has(pathname) ||
+    PUBLIC_API_PATHS.has(pathname) ||
+    PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))
+  );
 }
 
 export async function middleware(request: NextRequest) {

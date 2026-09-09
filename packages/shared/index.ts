@@ -9,3 +9,4 @@ export * from "./settings-schemas";
 export * from "./availability-reasons";
 export * from "./inventura-schemas";
 export * from "./natural-sort";
+export * from "./workstation-schemas";

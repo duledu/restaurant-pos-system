@@ -13,12 +13,13 @@ const prisma = new PrismaClient();
 
 const NEW_PERMISSIONS = [
   { code: "inventory.count", description: "Fizičko prebrojavanje zaliha (Inventura) — sesija/redovi/potvrda" },
+  { code: "workstations.manage", description: "Uparivanje/opoziv TableCore Print Agent radnih stanica (Faza 2A)" },
 ] as const;
 
 const NEW_ROLE_GRANTS: Record<string, string[]> = {
-  OWNER: ["inventory.count"],
-  ADMIN: ["inventory.count"],
-  MANAGER: ["inventory.count"],
+  OWNER: ["inventory.count", "workstations.manage"],
+  ADMIN: ["inventory.count", "workstations.manage"],
+  MANAGER: ["inventory.count", "workstations.manage"],
 };
 
 async function main() {

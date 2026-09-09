@@ -6,6 +6,7 @@ import { Skeleton } from "../../../../components/ui/Skeleton";
 import { TicketPrintPanel, type TicketContent } from "../../../../components/printing/TicketPrintPanel";
 import { defaultPrintTransport } from "../../../../lib/print-transport";
 import { QzSettingsPanel } from "../../../../components/kds/QzSettingsPanel";
+import { WorkstationsPanel } from "../../../../components/kds/WorkstationsPanel";
 
 interface Location {
   id: string;
@@ -260,7 +261,7 @@ export function PrintersSettingsClient() {
                         checked={cfg.autoPrint}
                         onChange={(e) => updateDraft(station, { autoPrint: e.target.checked })}
                       />
-                      Automatska štampa (kad podrška za server-side adapter bude dostupna)
+                      {station === "RECEIPT" ? "Automatska štampa računa (rezervisano; pregled ostaje dostupan)" : "Automatska štampa novih porudžbina (isključivanje ne utiče na KDS)"}
                     </label>
                   </div>
                 </div>
@@ -284,6 +285,7 @@ export function PrintersSettingsClient() {
               </Card>
             );
           })}
+          <WorkstationsPanel locationId={locationId} />
           <QzSettingsPanel />
         </div>
       )}
