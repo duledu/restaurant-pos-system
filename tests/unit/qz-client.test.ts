@@ -93,6 +93,74 @@ describe("connectQz", () => {
   });
 });
 
+describe("security promise wiring — signing credentials absent (production default today)", () => {
+  it("does NOT register any QZ security promise, avoiding QZ's 'Failed to sign request'", async () => {
+    fetchOkOnce({ certificate: "", signingConfigured: false });
+    mockConnect.mockResolvedValue(undefined);
+    const { connectQz } = await import("../../apps/web/lib/qz-client");
+
+    await connectQz();
+
+    expect(mockSetCertificatePromise).not.toHaveBeenCalled();
+    expect(mockSetSignaturePromise).not.toHaveBeenCalled();
+    expect(mockSetSignatureAlgorithm).not.toHaveBeenCalled();
+    expect(mockConnect).toHaveBeenCalledTimes(1); // connection still proceeds — unsigned mode, not blocked
+  });
+
+  it("treats a missing signingConfigured field the same as false (safe default)", async () => {
+    fetchOkOnce({ certificate: "" }); // no signingConfigured key at all
+    mockConnect.mockResolvedValue(undefined);
+    const { connectQz } = await import("../../apps/web/lib/qz-client");
+
+    await connectQz();
+
+    expect(mockSetSignaturePromise).not.toHaveBeenCalled();
+  });
+
+  it("still connects successfully even if the certificate-status fetch itself fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    mockConnect.mockResolvedValue(undefined);
+    const { connectQz } = await import("../../apps/web/lib/qz-client");
+
+    await expect(connectQz()).resolves.toBeUndefined();
+    expect(mockSetSignaturePromise).not.toHaveBeenCalled();
+  });
+});
+
+describe("security promise wiring — signing credentials configured", () => {
+  it("registers certificate + signature promises using the fetched certificate and calls qz-sign correctly when QZ invokes them", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/print/qz-certificate") {
+        return Promise.resolve({ ok: true, json: async () => ({ certificate: "-----BEGIN CERTIFICATE-----FAKE-----END CERTIFICATE-----", signingConfigured: true }) } as Response);
+      }
+      if (url === "/api/print/qz-sign") {
+        const body = JSON.parse(String(init?.body));
+        expect(body.toSign).toBe("nonce-123");
+        return Promise.resolve({ ok: true, json: async () => ({ signature: "base64-signature" }) } as Response);
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockConnect.mockResolvedValue(undefined);
+    const { connectQz } = await import("../../apps/web/lib/qz-client");
+
+    await connectQz();
+
+    expect(mockSetCertificatePromise).toHaveBeenCalledTimes(1);
+    expect(mockSetSignatureAlgorithm).toHaveBeenCalledWith("SHA512");
+    expect(mockSetSignaturePromise).toHaveBeenCalledTimes(1);
+
+    // Exercise the registered certificate promise the way QZ itself would.
+    const certResolve = vi.fn();
+    mockSetCertificatePromise.mock.calls[0][0](certResolve);
+    expect(certResolve).toHaveBeenCalledWith("-----BEGIN CERTIFICATE-----FAKE-----END CERTIFICATE-----");
+
+    // Exercise the registered signature promise the way QZ itself would.
+    const signResult = await mockSetSignaturePromise.mock.calls[0][0]("nonce-123");
+    expect(signResult).toBe("base64-signature");
+  });
+});
+
 describe("listPrinters / isPrinterAvailable", () => {
   it("returns the printer list from qz.printers.find()", async () => {
     mockConnect.mockResolvedValue(undefined);

@@ -46,15 +46,48 @@ export function isQzLibraryLoaded(): boolean {
   return typeof qz !== "undefined" && Boolean(qz?.websocket);
 }
 
-// Bezbedno pozvati više puta — QZ samo prepiše promise fabrike. Poziva se
-// TAČNO PRE svakog connect() poziva (ne jednom na učitavanje modula) da
-// izbegnemo red-race sa Next.js hot-reload/modul re-evaluacijom u dev modu.
-function wireSecurityPromises(): void {
-  qz.security.setCertificatePromise((resolve, reject) => {
-    fetch("/api/print/qz-certificate")
-      .then((res) => res.json())
-      .then((body) => resolve(body.certificate ?? ""))
-      .catch(() => resolve("")); // vidi cert rutu — prazan sertifikat je bezbedan, QZ tad prikazuje sopstveni "nepouzdano" prompt umesto tihe štampe
+interface QzCertificateResponse {
+  certificate: string;
+  signingConfigured: boolean;
+}
+
+async function fetchCertificateStatus(): Promise<QzCertificateResponse> {
+  try {
+    const res = await fetch("/api/print/qz-certificate");
+    const body = await res.json();
+    return { certificate: typeof body?.certificate === "string" ? body.certificate : "", signingConfigured: Boolean(body?.signingConfigured) };
+  } catch {
+    return { certificate: "", signingConfigured: false };
+  }
+}
+
+/**
+ * P0.18 — ISPRAVKA "Failed to sign request": security promise-ovi se
+ * registruju kod QZ-a SAMO kad je potpisivanje STVARNO podešeno na
+ * serveru (signingConfigured, provereno PRE registracije, ne posle).
+ *
+ * Zašto ovo mora biti uslovno, ne uvek: QZ Tray ima DVA potpuno različita
+ * unutrašnja toka — (1) NIJEDAN signature promise nije registrovan -> QZ
+ * sam pada na sopstveni podrazumevani nepotpisan tok (prikazuje sopstveni
+ * "dozvoli jednom?" prompt), TAČNO ono što zvaničan QZ demo sajt radi i
+ * što je već potvrđeno da radi na ovom hardveru; (2) signature promise JESTE
+ * registrovan -> QZ ga zove za svaki potpisiv zahtev i OČEKUJE stvaran
+ * potpis. Kad QZ_PRIVATE_KEY nije podešen, qz-sign ruta i dalje bezbedno
+ * vraća prazan string (nikad grešku) — ali PRAZAN potpis u grani (2) QZ
+ * Tray tumači kao NEUSPEO pokušaj potpisivanja ("Failed to sign request"),
+ * ne kao "nema potpisivanja". Rešenje nije popraviti šta se vraća, nego
+ * NIKAD ne ući u granu (2) dok stvarni ključ ne postoji.
+ *
+ * Bezbedno pozvati više puta — QZ samo prepiše promise fabrike. Poziva se
+ * TAČNO PRE svakog connect() poziva (ne jednom na učitavanje modula) da
+ * izbegnemo red-race sa Next.js hot-reload/modul re-evaluacijom u dev modu.
+ */
+async function wireSecurityPromises(): Promise<void> {
+  const { certificate, signingConfigured } = await fetchCertificateStatus();
+  if (!signingConfigured) return; // NIŠTA se ne registruje — QZ ostaje u sopstvenom podrazumevanom nepotpisanom toku
+
+  qz.security.setCertificatePromise((resolve) => {
+    resolve(certificate);
   });
   qz.security.setSignatureAlgorithm("SHA512");
   qz.security.setSignaturePromise((toSign: string) => {
@@ -87,14 +120,15 @@ export async function connectQz(): Promise<void> {
   if (qz.websocket.isActive()) return;
   if (connectPromise) return connectPromise;
 
-  wireSecurityPromises();
   // .finally (ne samo .catch) briše connectPromise NA SVAKI ishod, ne samo
   // neuspeh — bez ovoga bi USPEŠNO razrešen promise zauvek ostao keširan
   // ovde, pa bi POZNIJI poziv (npr. posle stvarnog gubitka konekcije van
   // ove funkcije) tiho vratio STARI, već razrešen promise umesto da
   // ponovo proveri qz.websocket.isActive() i pokuša novu konekciju.
-  const attempt = qz.websocket
-    .connect({ retries: 1, delay: 1 })
+  // wireSecurityPromises() MORA biti završen (uklj. provera signingConfigured)
+  // PRE websocket.connect() poziva — otud .then lanac, ne odvojen await.
+  const attempt = wireSecurityPromises()
+    .then(() => qz.websocket.connect({ retries: 1, delay: 1 }))
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       throw new QzUnavailableError(`QZ Tray konekcija nije uspela: ${message}`);
