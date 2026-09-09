@@ -57,7 +57,11 @@ describe("resolveAutoPrintTransport", () => {
     const { resolveAutoPrintTransport } = await import("../../apps/web/lib/qz-auto-transport");
     const { QzPrintTransport } = await import("../../apps/web/lib/print-transport");
 
-    const transport = await resolveAutoPrintTransport({ enabled: true, printerName: "POS-58 (1)" });
+    const content = { kind: "KITCHEN" };
+    const transport = await resolveAutoPrintTransport({ enabled: true, printerName: "POS-58 (1)" }, content);
     expect(transport).toBeInstanceOf(QzPrintTransport);
+    // P0.19 — PrintJob.content mora stići do transporta (koristi se za
+    // stvarni QZ ispis, ne DOM čitanje) — proveri preko privatnog polja.
+    expect((transport as unknown as { content: unknown }).content).toBe(content);
   });
 });

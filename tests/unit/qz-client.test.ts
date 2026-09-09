@@ -40,15 +40,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function buildTicketRoot(): HTMLElement {
-  const root = document.createElement("div");
-  root.className = "print-ticket-root";
-  const inner = document.createElement("div");
-  inner.className = "print-ticket";
-  inner.textContent = "TICKET";
-  root.appendChild(inner);
-  document.body.appendChild(root);
-  return root;
+function buildTicketData(overrides?: Partial<import("../../apps/web/lib/qz-ticket-html").QzKitchenBarTicketData>) {
+  return {
+    stationLabel: "KUHINJA",
+    tableLabel: "5",
+    orderNumber: "ABC12345",
+    waiterName: "Marko",
+    submittedAt: new Date().toISOString(),
+    isAdditional: false,
+    items: [{ quantity: 2, name: "Pljeskavica", note: null, modifiers: [] }],
+    paperWidthMm: 58,
+    ...overrides,
+  };
 }
 
 describe("isQzLibraryLoaded", () => {
@@ -192,13 +195,28 @@ describe("printTicketViaQz — successful print path", () => {
     mockPrint.mockResolvedValue(undefined);
     const { printTicketViaQz } = await import("../../apps/web/lib/qz-client");
 
-    await printTicketViaQz(buildTicketRoot(), "POS-58 (1)");
+    await printTicketViaQz(buildTicketData(), "POS-58 (1)");
 
     expect(mockPrint).toHaveBeenCalledTimes(1);
     const [config, data] = mockPrint.mock.calls[0];
     expect(config.printer).toBe("POS-58 (1)");
     expect(data[0]).toMatchObject({ type: "pixel", format: "html", flavor: "plain" });
-    expect(data[0].data).toContain("TICKET");
+    expect(data[0].data).toContain("Pljeskavica");
+  });
+
+  it("passes the two-pass measured height into qz.configs.create (not just width)", async () => {
+    mockConnect.mockResolvedValue(undefined);
+    mockFind.mockResolvedValue(["POS-58 (1)"]);
+    mockPrint.mockResolvedValue(undefined);
+    const { printTicketViaQz } = await import("../../apps/web/lib/qz-client");
+
+    await printTicketViaQz(buildTicketData(), "POS-58 (1)");
+
+    expect(mockConfigsCreate).toHaveBeenCalledTimes(1);
+    const [, options] = mockConfigsCreate.mock.calls[0];
+    expect(options.units).toBe("mm");
+    expect(options.size.width).toBe(58);
+    expect(options.size.height).toBeGreaterThan(0);
   });
 });
 
@@ -208,7 +226,7 @@ describe("printTicketViaQz — printer not found", () => {
     mockFind.mockResolvedValue(["Some Other Printer"]);
     const { printTicketViaQz, QzPrinterNotFoundError } = await import("../../apps/web/lib/qz-client");
 
-    await expect(printTicketViaQz(buildTicketRoot(), "POS-58 (1)")).rejects.toBeInstanceOf(QzPrinterNotFoundError);
+    await expect(printTicketViaQz(buildTicketData(), "POS-58 (1)")).rejects.toBeInstanceOf(QzPrinterNotFoundError);
     expect(mockPrint).not.toHaveBeenCalled();
   });
 });
@@ -220,7 +238,7 @@ describe("printTicketViaQz — failed print does not resolve as success", () => 
     mockPrint.mockRejectedValue(new Error("Printer offline"));
     const { printTicketViaQz, QzPrintFailedError } = await import("../../apps/web/lib/qz-client");
 
-    await expect(printTicketViaQz(buildTicketRoot(), "POS-58 (1)")).rejects.toBeInstanceOf(QzPrintFailedError);
+    await expect(printTicketViaQz(buildTicketData(), "POS-58 (1)")).rejects.toBeInstanceOf(QzPrintFailedError);
   });
 });
 

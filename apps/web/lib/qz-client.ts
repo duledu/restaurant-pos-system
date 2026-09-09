@@ -20,6 +20,7 @@
  * sacrifice text correctness just to force raw ESC/POS").
  */
 import * as qz from "qz-tray";
+import { buildKitchenBarTicketHtml, buildTestPrintHtml, type QzKitchenBarTicketData } from "./qz-ticket-html";
 
 export class QzUnavailableError extends Error {
   constructor(message = "QZ Tray nije dostupan") {
@@ -49,6 +50,20 @@ export function isQzLibraryLoaded(): boolean {
 interface QzCertificateResponse {
   certificate: string;
   signingConfigured: boolean;
+}
+
+/**
+ * Admin-only status čitanje (QzSettingsPanel.tsx "poverenje/trust" sekcija).
+ * NAMERNO vraća SAMO boolean, nikad sam sertifikat/ključ — Admin ekran sme
+ * da PRIKAŽE da li je potpisivanje podešeno, ne da vidi/preuzme kredencijale
+ * (zahtev: "do NOT expose QZ_PRIVATE_KEY... or allow it to be viewed from
+ * Admin"). Odvojeno od wireSecurityPromises() da Admin može proveriti status
+ * BEZ da pokrene stvarnu QZ konekciju (npr. i kad QZ Tray uopšte nije
+ * pokrenut na ovom računaru).
+ */
+export async function getQzSigningStatus(): Promise<{ signingConfigured: boolean }> {
+  const { signingConfigured } = await fetchCertificateStatus();
+  return { signingConfigured };
 }
 
 async function fetchCertificateStatus(): Promise<QzCertificateResponse> {
@@ -154,43 +169,52 @@ export async function isPrinterAvailable(printerName: string): Promise<boolean> 
 const MM_PER_PX = 25.4 / 96; // isti odnos kao print-transport.ts — CSS px specifikacija, ne ekranski DPI
 const PAGE_HEIGHT_SAFETY_MM = 5; // malo velikodušnija rezerva nego browser put — QZ rasterizuje u SOPSTVENOM procesu, ne u živoj strani, pa scaleContent (ispod) apsorbuje sitnu razliku bez rizika da odseče sadržaj
 const MIN_PAGE_HEIGHT_MM = 20;
-
-function buildStandaloneHtml(ticketRoot: HTMLElement): string {
-  // Isti kompajlirani stylesheet-ovi kao živa stranica (uklj. print-thermal.css)
-  // — QZ Tray na istoj mašini dovlači ove URL-ove preko mreže (javni, isti-
-  // origin statički asset, bez potrebe za auth-om), isto poreklo teksta/
-  // stilova kao postojeći BrowserPrintTransport (vidi print-transport.ts) —
-  // NIKAD duplirana/prekucana CSS kopija.
-  const stylesheetLinks = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'))
-    .map((link) => `<link rel="stylesheet" href="${link.href}">`)
-    .join("\n");
-  return `<!doctype html><html><head><meta charset="utf-8">${stylesheetLinks}</head><body>${ticketRoot.outerHTML}</body></html>`;
-}
-
-function measureTicketMm(ticketRoot: HTMLElement): { widthMm: number; heightMm: number } {
-  const isW58 = ticketRoot.classList.contains("w58");
-  const widthMm = isW58 ? 58 : 80;
-  const measureTarget = ticketRoot.querySelector<HTMLElement>(".print-ticket") ?? ticketRoot;
-  const contentHeightPx = measureTarget.getBoundingClientRect().height;
-  const heightMm = Math.max(MIN_PAGE_HEIGHT_MM, Math.ceil(contentHeightPx * MM_PER_PX) + PAGE_HEIGHT_SAFETY_MM);
-  return { widthMm, heightMm };
-}
+// Dovoljno širok/visok da NIKAD sam ne ograniči layout ni za 80mm ni za
+// najduži realan tiket — STVARNA širina tiketa dolazi iz CSS-a UNUTAR
+// samog dokumenta (html,body{width:${widthMm}mm}, vidi qz-ticket-html.ts),
+// ne iz dimenzija ovog merenog iframe-a.
+const MEASURE_IFRAME_WIDTH_PX = 320;
+const MEASURE_IFRAME_HEIGHT_PX = 3000;
 
 /**
- * Direktna štampa preko QZ-a na imenovani Windows/QZ štampač. Baca
- * (nikad tiho ne guta) na svaki neuspeh — pozivalac (QzPrintTransport)
- * mora videti grešku da NIKAD ne potvrdi uspeh koji se stvarno nije desio
- * (zahtev: "Do not mark a print job successful before QZ reports that the
- * job was accepted for printing").
+ * Meri STVARNU renderovanu visinu dokumenta (isti dvoprolazni princip kao
+ * print-transport.ts: prvi prolaz bez visine/`auto`, izmeri, drugi prolaz
+ * sa TAČNOM visinom) — NIKAD se ne oslanja isključivo na `auto` čak ni za
+ * QZ-ov rasterizer, iz istog razloga koji je već jednom potvrđen za stvaran
+ * interaktivan Chrome print dijalog (vidi print-transport.ts P0.15).
  */
-export async function printTicketViaQz(ticketRoot: HTMLElement, printerName: string): Promise<void> {
+async function measureDocumentHeightMm(html: string): Promise<number> {
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.style.position = "fixed";
+  iframe.style.left = "-9999px";
+  iframe.style.top = "0";
+  iframe.style.width = `${MEASURE_IFRAME_WIDTH_PX}px`;
+  iframe.style.height = `${MEASURE_IFRAME_HEIGHT_PX}px`;
+  iframe.style.border = "0";
+  document.body.appendChild(iframe);
+  try {
+    const doc = iframe.contentDocument;
+    if (!doc) return MIN_PAGE_HEIGHT_MM;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    const contentHeightPx = doc.body.getBoundingClientRect().height;
+    return Math.max(MIN_PAGE_HEIGHT_MM, Math.ceil(contentHeightPx * MM_PER_PX) + PAGE_HEIGHT_SAFETY_MM);
+  } finally {
+    iframe.remove();
+  }
+}
+
+async function printHtmlViaQz(printerName: string, widthMm: number, buildHtml: (heightMm?: number) => string): Promise<void> {
   await connectQz();
 
   const available = await isPrinterAvailable(printerName);
   if (!available) throw new QzPrinterNotFoundError(printerName);
 
-  const { widthMm, heightMm } = measureTicketMm(ticketRoot);
-  const html = buildStandaloneHtml(ticketRoot);
+  const draftHtml = buildHtml(undefined); // "auto" prolaz, samo za merenje
+  const heightMm = await measureDocumentHeightMm(draftHtml);
+  const finalHtml = buildHtml(heightMm); // konačan prolaz sa TAČNOM izmerenom visinom
 
   const config = qz.configs.create(printerName, {
     units: "mm",
@@ -200,13 +224,12 @@ export async function printTicketViaQz(ticketRoot: HTMLElement, printerName: str
     // HTML u SOPSTVENOM procesu (ne u živoj strani), pa se izmerena visina
     // ovde može sitno razlikovati od QZ-ovog stvarnog renderovanja; scale
     // sprečava da ta razlika odseče sadržaj (gori ishod od blago manjeg
-    // teksta). Vidi napomenu u izveštaju — vizuelno proveriti na stvarnom
-    // POS-58 i po potrebi podesiti PAGE_HEIGHT_SAFETY_MM.
+    // teksta). Vizuelno proveriti na stvarnom POS-58.
     scaleContent: true,
   });
 
   try {
-    await qz.print(config, [{ type: "pixel", format: "html", flavor: "plain", data: html }]);
+    await qz.print(config, [{ type: "pixel", format: "html", flavor: "plain", data: finalHtml }]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new QzPrintFailedError(message);
@@ -214,41 +237,26 @@ export async function printTicketViaQz(ticketRoot: HTMLElement, printerName: str
 }
 
 /**
+ * Direktna štampa preko QZ-a na imenovani Windows/QZ štampač. Baca
+ * (nikad tiho ne guta) na svaki neuspeh — pozivalac (QzPrintTransport)
+ * mora videti grešku da NIKAD ne potvrdi uspeh koji se stvarno nije desio
+ * (zahtev: "Do not mark a print job successful before QZ reports that the
+ * job was accepted for printing").
+ *
+ * P0.19 — prima STRUKTURIRAN sadržaj (isti oblik kao PrintJob.content za
+ * KITCHEN/BAR tiket, uklj. već-zamrznut paperWidthMm), NE DOM element.
+ * Namerno napušteno kloniranje `.print-ticket-root`/app stylesheet-ova —
+ * to je bio uzrok lošeg 58mm renderovanja (vidi qz-ticket-html.ts).
+ */
+export async function printTicketViaQz(data: QzKitchenBarTicketData, printerName: string): Promise<void> {
+  await printHtmlViaQz(printerName, data.paperWidthMm, (heightMm) => buildKitchenBarTicketHtml(data, heightMm));
+}
+
+/**
  * TEST PRINT (zahtev specifikacije #TEST) — potpuno nezavisno od
- * PrintJob/porudžbine/baze, gradi sopstveni mali HTML string direktno (bez
- * .print-ticket-root u DOM-u), ne kreira NIKAKAV red u bazi.
+ * PrintJob/porudžbine/baze, gradi sopstveni mali HTML dokument (isti
+ * namenski template kao printTicketViaQz), ne kreira NIKAKAV red u bazi.
  */
 export async function qzTestPrint(printerName: string, paperWidthMm: 58 | 80): Promise<void> {
-  await connectQz();
-  const available = await isPrinterAvailable(printerName);
-  if (!available) throw new QzPrinterNotFoundError(printerName);
-
-  const now = new Date().toLocaleString("sr-RS");
-  const stylesheetLinks = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'))
-    .map((link) => `<link rel="stylesheet" href="${link.href}">`)
-    .join("\n");
-  const html = `<!doctype html><html><head><meta charset="utf-8">${stylesheetLinks}</head><body>
-    <div class="print-ticket-root${paperWidthMm === 58 ? " w58" : ""}" style="position:static;left:0;">
-      <div class="print-ticket">
-        <div class="t-header">TABLECORE</div>
-        <div class="t-station">QZ TEST</div>
-        <div class="t-meta">Štampač: ${printerName}</div>
-        <div class="t-meta">${now}</div>
-      </div>
-    </div>
-  </body></html>`;
-
-  const config = qz.configs.create(printerName, {
-    units: "mm",
-    size: { width: paperWidthMm, height: 40 },
-    margins: 0,
-    scaleContent: true,
-  });
-
-  try {
-    await qz.print(config, [{ type: "pixel", format: "html", flavor: "plain", data: html }]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new QzPrintFailedError(message);
-  }
+  await printHtmlViaQz(printerName, paperWidthMm, (heightMm) => buildTestPrintHtml(printerName, paperWidthMm, heightMm));
 }

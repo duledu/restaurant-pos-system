@@ -17,7 +17,7 @@ import { defaultPrintTransport, QzPrintTransport, type PrintTransport } from "./
 import { isQzAutoPrintConfigured, type QzPrintSettings } from "./qz-settings";
 import { connectQz, isQzLibraryLoaded } from "./qz-client";
 
-export async function resolveAutoPrintTransport(settings: QzPrintSettings): Promise<PrintTransport> {
+export async function resolveAutoPrintTransport(settings: QzPrintSettings, content: unknown): Promise<PrintTransport> {
   if (!isQzAutoPrintConfigured(settings)) return defaultPrintTransport;
   if (!isQzLibraryLoaded()) return defaultPrintTransport;
 
@@ -27,5 +27,5 @@ export async function resolveAutoPrintTransport(settings: QzPrintSettings): Prom
     return defaultPrintTransport;
   }
 
-  return new QzPrintTransport(settings.printerName as string);
+  return new QzPrintTransport(settings.printerName as string, content);
 }

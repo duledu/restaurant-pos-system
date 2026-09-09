@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "../ui/Card";
 import { getQzSettings, saveQzSettings, type QzPrintSettings } from "../../lib/qz-settings";
-import { connectQz, listPrinters, qzTestPrint, isQzLibraryLoaded, QzUnavailableError } from "../../lib/qz-client";
+import { connectQz, listPrinters, qzTestPrint, isQzLibraryLoaded, getQzSigningStatus, QzUnavailableError } from "../../lib/qz-client";
 
 /**
  * P0.16 / P0.17 — podešavanje QZ direktne štampe, PO UREĐAJU (localStorage,
@@ -25,9 +25,17 @@ export function QzSettingsPanel() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [signingConfigured, setSigningConfigured] = useState<boolean | null>(null);
 
   useEffect(() => {
     setSettings(getQzSettings());
+    // P0.20 — status potpisivanja se čita NEZAVISNO od "Pronađi QZ štampače"
+    // (ne zahteva aktivnu QZ konekciju) da admin vidi stanje i kad QZ Tray
+    // uopšte nije pokrenut na ovom računaru. Samo boolean sa servera —
+    // nikad sertifikat/ključ (vidi getQzSigningStatus u qz-client.ts).
+    getQzSigningStatus()
+      .then((res) => setSigningConfigured(res.signingConfigured))
+      .catch(() => setSigningConfigured(false));
   }, []);
 
   async function refreshPrinters() {
@@ -139,6 +147,40 @@ export function QzSettingsPanel() {
           {testResult && <p className="mt-2 text-xs text-inkSoft">{testResult}</p>}
         </div>
       )}
+
+      <div className="mb-4 rounded-md border border-line p-3 text-xs">
+        <p className="mb-2 font-semibold text-ink">Status poverenja QZ Tray-a</p>
+        <dl className="space-y-1">
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-inkSoft">Konekcija</dt>
+            <dd className="font-medium text-ink">
+              {status === "connected" ? "Povezano" : status === "connecting" ? "Povezivanje…" : status === "error" ? "Greška" : "Nepoznato (klikni „Pronađi QZ štampače“)"}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-inkSoft">Lokalni štampač</dt>
+            <dd className="font-medium text-ink">{settings.printerName ?? "Nije izabran"}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-inkSoft">Potpisivanje</dt>
+            <dd className={`font-medium ${signingConfigured ? "text-success" : "text-inkSoft"}`}>
+              {signingConfigured === null ? "Proveravam…" : signingConfigured ? "Pouzdano / tiha štampa spremna" : "Nepotpisano / potrebna potvrda"}
+            </dd>
+          </div>
+        </dl>
+        {signingConfigured === false && (
+          <p className="mt-2 border-t border-line pt-2 text-inkSoft">
+            Bez podešenog potpisivanja, QZ Tray će na SVAKOJ konekciji/štampi prikazati sopstveni prozor
+            &quot;Allow?&quot; koji neko na kuhinjskom računaru mora ručno potvrditi. Ovo je normalno i bezbedno
+            ponašanje QZ Tray-a bez sertifikata — ne pokušavamo da ga zaobiđemo. Za tihu štampu bez tog prozora,
+            administrator sistema treba da postavi <code className="rounded bg-cream-100 px-1">QZ_CERTIFICATE</code> i{" "}
+            <code className="rounded bg-cream-100 px-1">QZ_PRIVATE_KEY</code> kao server-side environment promenljive
+            (Vercel), koristeći QZ Tray sertifikat za potpisivanje (jedan sertifikat važi za sve restorane/računare —
+            preporučena opcija za TableCore). Privatni ključ se NIKAD ne unosi ovde niti se čuva u bazi/browseru —
+            ovaj ekran samo čita da li je već podešen na serveru.
+          </p>
+        )}
+      </div>
 
       <div className="rounded-md border border-line bg-cream-100 p-3 text-xs text-inkSoft">
         <p className="mb-1 font-semibold text-ink">Napomena</p>

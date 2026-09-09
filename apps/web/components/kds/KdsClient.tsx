@@ -149,7 +149,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
           // je stvarno dostupan SADA — vidi qz-auto-transport.ts za tačno
           // pravilo (QZ nedostupan -> tih povratak na browser; QZ povezan
           // ali sam ispis ne uspe -> greška se NE guta, ide u FAILED).
-          const transport = await resolveAutoPrintTransport(getQzSettings());
+          const transport = await resolveAutoPrintTransport(getQzSettings(), claimed.content);
           await new Promise<void>((resolve) => {
             printDoneResolveRef.current = resolve;
             setPendingPrint({ orderId: next.orderId, job: claimed, transport });

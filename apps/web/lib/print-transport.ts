@@ -166,14 +166,20 @@ export const defaultPrintTransport: PrintTransport = new BrowserPrintTransport()
  * transport NIKAD ne sme sam sebi da "proguta" grešku i tiho vrati uspeh.
  */
 export class QzPrintTransport implements PrintTransport {
-  constructor(private readonly printerName: string) {}
+  /**
+   * P0.19 — prima VEĆ ZAMRZNUT PrintJob.content (isti podatak koji
+   * BrowserPrintTransport vidi kao DOM preko TicketPrintPanel.tsx), NE čita
+   * DOM — vidi qz-ticket-html.ts zašto je kloniranje `.print-ticket-root`
+   * bilo uzrok lošeg 58mm renderovanja.
+   */
+  constructor(
+    private readonly printerName: string,
+    private readonly content: unknown
+  ) {}
 
   async print(): Promise<void> {
-    const ticketRoot = document.querySelector<HTMLElement>(".print-ticket-root");
-    if (!ticketRoot) {
-      throw new Error("Nema tiketa za QZ štampu u DOM-u");
-    }
     const { printTicketViaQz } = await import("./qz-client");
-    await printTicketViaQz(ticketRoot, this.printerName);
+    const { parseKitchenBarTicketData } = await import("./qz-ticket-html");
+    await printTicketViaQz(parseKitchenBarTicketData(this.content), this.printerName);
   }
 }
