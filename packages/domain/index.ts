@@ -17,6 +17,7 @@ export * as splitBilling from "./billing/split-bill-service";
 export * as production from "./production/production-service";
 export * as reporting from "./reporting/reporting-service";
 export * as printing from "./printing/print-service";
+export * as agentPrinting from "./printing/agent-print-service";
 export * as settings from "./settings/settings-service";
 export * as analytics from "./analytics/analytics-service";
 export * as inventory from "./inventory/inventory-service";
