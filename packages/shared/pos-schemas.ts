@@ -73,10 +73,18 @@ export const reprintReceiptSchema = z.object({
 export type ReprintReceiptInput = z.infer<typeof reprintReceiptSchema>;
 
 export const confirmPrintResultSchema = z.object({
-  success: z.boolean(),
+  attemptId: z.string().uuid(),
+  outcome: z.enum(["TRANSPORT_COMPLETED", "SUBMITTED_TO_SPOOLER", "FAILED_BEFORE_SUBMISSION", "SUBMISSION_UNKNOWN"]),
   errorMessage: z.string().trim().max(500).optional(),
 });
 export type ConfirmPrintResultInput = z.infer<typeof confirmPrintResultSchema>;
+
+export const startPrintSubmissionSchema = z.object({ attemptId: z.string().uuid() });
+export const manualStationPrintSchema = z.object({
+  station: z.enum(["KITCHEN", "BAR"]),
+  idempotencyKey: z.string().uuid(),
+  originalJobId: z.string().uuid().optional(),
+});
 
 // ── FAZA 8: SPLIT BILL / TRANSFER STAVKI ─────────────────────────────────
 

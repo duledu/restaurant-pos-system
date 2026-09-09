@@ -10,7 +10,10 @@ export interface PrintJob {
   orderId: string;
   type: "KITCHEN" | "BAR" | "RECEIPT";
   station: "KITCHEN" | "BAR" | null;
-  status: "PENDING" | "PRINTING" | "PRINTED" | "FAILED";
+  status: "PENDING" | "PRINTING" | "PRINTED" | "FAILED" | "SUBMISSION_UNKNOWN" | "SUPPRESSED";
+  attemptId: string | null;
+  isAutomatic: boolean;
+  resultOutcome: string | null;
   attemptCount: number;
   content: unknown;
   isReprint: boolean;
@@ -34,7 +37,7 @@ export async function fetchPrintJobs(orderId: string): Promise<PrintJob[]> {
 export async function confirmPrintJob(
   orderId: string,
   jobId: string,
-  result: { success: boolean; errorMessage?: string }
+  result: { attemptId: string; outcome: "TRANSPORT_COMPLETED" | "SUBMITTED_TO_SPOOLER" | "FAILED_BEFORE_SUBMISSION" | "SUBMISSION_UNKNOWN"; errorMessage?: string }
 ): Promise<PrintJob> {
   const body = await apiFetch(`/api/pos/orders/${orderId}/print-jobs/${jobId}/confirm`, {
     method: "POST",
@@ -55,7 +58,9 @@ export async function retryPrintJob(orderId: string, jobId: string): Promise<Pri
  * tiho preskočiti, ne prikazati kao grešku.
  */
 export async function beginPrintJob(orderId: string, jobId: string): Promise<PrintJob | null> {
-  const res = await fetch(`/api/pos/orders/${orderId}/print-jobs/${jobId}/begin`, { method: "POST" });
+  const res = await fetch(`/api/pos/orders/${orderId}/print-jobs/${jobId}/begin`, {
+    method: "POST", headers: { "X-TableCore-Print-Protocol": "2" },
+  });
   if (res.status === 409) return null;
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
@@ -65,12 +70,24 @@ export async function beginPrintJob(orderId: string, jobId: string): Promise<Pri
 export interface PendingStationPrintJobs {
   jobs: PrintJob[];
   autoPrintEligible: boolean;
+  // Faza 2B — QZ koegzistencija: true kad postoji bar jedna omogućena,
+  // neopozvana radna stanica sa nedavnim heartbeat-om za TAČNO ovu
+  // restoran/lokacija/stanica kombinaciju (agentPrinting.isAgentActiveForStation).
+  // KdsClient.tsx ovo koristi da PASIVNO povuče sopstveni auto-claim kad je
+  // Print Agent aktivan — browser/QZ i agent se NIKAD ne takmiče za iste
+  // redove (duplikat je već strukturno nemoguć preko beginPrintAttempt-a,
+  // ovo sprečava samo nasumično/nepotrebno takmičenje).
+  agentActiveForStation: boolean;
 }
 
 export async function fetchPendingStationPrintJobs(station: "KITCHEN" | "BAR", locationId: string): Promise<PendingStationPrintJobs> {
   const base = station === "KITCHEN" ? "/api/production/kitchen" : "/api/production/bar";
   const body = await apiFetch(`${base}/print-jobs?locationId=${locationId}`);
-  return { jobs: body.jobs as PrintJob[], autoPrintEligible: Boolean(body.autoPrintEligible) };
+  return {
+    jobs: body.jobs as PrintJob[],
+    autoPrintEligible: Boolean(body.autoPrintEligible),
+    agentActiveForStation: Boolean(body.agentActiveForStation),
+  };
 }
 
 export async function reprintReceipt(orderId: string): Promise<PrintJob> {
@@ -81,26 +98,29 @@ export async function reprintReceipt(orderId: string): Promise<PrintJob> {
   return body.printJob as PrintJob;
 }
 
-/**
- * Pokreće browser print dijalog nad elementom sa `printRootId` (mora imati
- * klasu print-ticket-root/print-report-root — vidi print-thermal.css/
- * print-report.css) i potvrđuje ishod na server. window.print() je
- * sinhrono blokirajući u većini browsera pa se "success" tretira kao
- * najbolji dostupan signal — korisnik i dalje može ručno da klikne
- * "Ponovi" ako fizička štampa nije uspela (npr. printer offline).
- *
- * Ako window.print() ili sam confirm poziv baci grešku (npr. browser bez
- * print podrške, mreža dole tokom confirm-a), red NIKAD ne sme ostati
- * "zaglavljen" bez ishoda — pokušava se best-effort da se markira FAILED
- * (vidljivo/retryable, zahtev #4) umesto da tiho ostane u prethodnom stanju.
- */
-export async function printAndConfirm(orderId: string, jobId: string, transport: PrintTransport = defaultPrintTransport): Promise<void> {
+/** Claim, receive one-shot start permission, invoke transport, then acknowledge that attempt. */
+export async function printAndConfirm(orderId: string, jobId: string, transport: PrintTransport = defaultPrintTransport, claimedAttemptId?: string | null): Promise<void> {
+  const attemptId = claimedAttemptId ?? (await beginPrintJob(orderId, jobId))?.attemptId;
+  if (!attemptId) throw new Error("Tiket nije preuzet; osvežite stanje ili zatražite novi otisak.");
+  // Must receive one-shot permission BEFORE invoking any physical/browser transport.
+  await apiFetch(`/api/pos/orders/${orderId}/print-jobs/${jobId}/start`, {
+    method: "POST", body: JSON.stringify({ attemptId }),
+  });
   try {
     await transport.print();
-    await confirmPrintJob(orderId, jobId, { success: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Greška pri štampi";
-    await confirmPrintJob(orderId, jobId, { success: false, errorMessage: message }).catch(() => {});
+    const beforeSubmission = err instanceof Error && ["QzUnavailableError", "QzPrinterNotFoundError"].includes(err.name);
+    await confirmPrintJob(orderId, jobId, { attemptId,
+      outcome: beforeSubmission ? "FAILED_BEFORE_SUBMISSION" : "SUBMISSION_UNKNOWN", errorMessage: message.slice(0, 500) }).catch(() => {});
     throw err;
   }
+  // A lost success acknowledgement must NEVER be followed by a failure report or another print.
+  await confirmPrintJob(orderId, jobId, { attemptId, outcome: "TRANSPORT_COMPLETED" });
+}
+
+export async function requestStationPrint(orderId: string, station: "KITCHEN" | "BAR", idempotencyKey: string, originalJobId?: string): Promise<PrintJob> {
+  const body = await apiFetch(`/api/pos/orders/${orderId}/print-jobs`, { method: "POST",
+    body: JSON.stringify({ station, idempotencyKey, originalJobId }) });
+  return body.printJob;
 }

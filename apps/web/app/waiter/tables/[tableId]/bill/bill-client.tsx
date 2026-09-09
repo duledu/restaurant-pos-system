@@ -6,7 +6,6 @@ import { LogoutButton } from "../../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
 import { TicketPrintPanel, type TicketContent } from "../../../../../components/printing/TicketPrintPanel";
 import { fetchPrintJobs, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
-import { defaultPrintTransport } from "../../../../../lib/print-transport";
 
 interface BillItem {
   id: string;
@@ -130,7 +129,7 @@ export function BillClient({ tableId }: { tableId: string }) {
     try {
       const job = await reprintReceipt(orderId);
       setPrintJob(job);
-      await defaultPrintTransport.print();
+      await printAndConfirm(orderId, job.id);
     } catch (e) {
       setPrintError(e instanceof Error ? e.message : "Greška pri ponovnoj štampi");
     } finally {

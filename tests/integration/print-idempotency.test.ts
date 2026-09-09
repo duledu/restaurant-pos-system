@@ -1,3 +1,4 @@
+import { confirmPrint } from "../setup/print-attempt";
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
@@ -101,13 +102,13 @@ describe("print idempotency: duplicate dispatch never creates duplicate PrintJob
 
     const jobs = await printing.listPrintJobs(waiter, submitted.id);
     const job = jobs.find((j) => j.type === "KITCHEN")!;
-    await printing.confirmPrintResult(waiter, submitted.id, job.id, { success: false, errorMessage: "Printer offline" });
+    await confirmPrint({ ...waiter, roles: ["KITCHEN"] }, submitted.id, job.id, { success: false, errorMessage: "Printer offline" });
 
     const failed = await prisma.printJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(failed.status).toBe("FAILED");
     expect(failed.failureReason).toBe("Printer offline");
 
-    const retried = await printing.retryPrintJob(waiter, submitted.id, job.id);
+    const retried = await printing.retryPrintJob({ ...waiter, roles: ["KITCHEN"] }, submitted.id, job.id);
     expect(retried.id).toBe(job.id);
     expect(retried.status).toBe("PENDING");
     expect(retried.failureReason).toBeNull();
@@ -121,7 +122,7 @@ describe("print idempotency: duplicate dispatch never creates duplicate PrintJob
     const jobs = await printing.listPrintJobs(waiter, submitted.id);
     const job = jobs.find((j) => j.type === "KITCHEN")!;
 
-    await expect(printing.retryPrintJob(waiter, submitted.id, job.id)).rejects.toThrow("može da se ponovi");
+    await expect(printing.retryPrintJob({ ...waiter, roles: ["KITCHEN"] }, submitted.id, job.id)).rejects.toThrow("može da se ponovi");
   });
 
   it("confirming a successful print sets PRINTED status and printedAt, and increments attemptCount", async () => {
@@ -131,7 +132,7 @@ describe("print idempotency: duplicate dispatch never creates duplicate PrintJob
     const jobs = await printing.listPrintJobs(waiter, submitted.id);
     const job = jobs.find((j) => j.type === "KITCHEN")!;
 
-    const confirmed = await printing.confirmPrintResult(waiter, submitted.id, job.id, { success: true });
+    const confirmed = await confirmPrint({ ...waiter, roles: ["KITCHEN"] }, submitted.id, job.id, { success: true });
     expect(confirmed.status).toBe("PRINTED");
     expect(confirmed.printedAt).not.toBeNull();
     expect(confirmed.attemptCount).toBe(1);

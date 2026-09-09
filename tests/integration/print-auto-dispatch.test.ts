@@ -1,3 +1,4 @@
+import { confirmPrint } from "../setup/print-attempt";
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
@@ -88,10 +89,10 @@ describe("automatic print dispatch: paper width snapshot per station", () => {
   it("Kitchen and Bar can carry independent paper widths (80mm vs 58mm) on the same order", async () => {
     const fixture = await createFixture();
     await prisma.printerConfig.create({
-      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", paperWidthMm: 80 },
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: true, paperWidthMm: 80 },
     });
     await prisma.printerConfig.create({
-      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "BAR", name: "Šank", paperWidthMm: 58 },
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "BAR", name: "Šank", autoPrint: true, paperWidthMm: 58 },
     });
     const waiter = context(fixture, ["WAITER"], "waiter-1");
     const submitted = await submitMixedOrder(fixture, waiter);
@@ -138,7 +139,7 @@ describe("automatic print dispatch: atomic claim (beginPrintAttempt) prevents du
 
     const first = await printing.beginPrintAttempt(kitchenStaff, submitted.id, kitchenJob.id);
     expect(first).not.toBeNull();
-    await printing.confirmPrintResult(kitchenStaff, submitted.id, kitchenJob.id, { success: true });
+    await confirmPrint(kitchenStaff, submitted.id, kitchenJob.id, { success: true });
 
     // Simulates the KDS screen re-discovering the same job on the next 4s
     // poll or a full page refresh — it must never fire window.print() again.
@@ -157,7 +158,7 @@ describe("automatic print dispatch: atomic claim (beginPrintAttempt) prevents du
     await expect(printing.beginPrintAttempt(kitchenStaff, submitted.id, barJob.id)).rejects.toThrow();
   });
 
-  it("recovers a stale PRINTING claim back to PENDING (tab/browser crash after claim, before confirm) — never permanently lost, never re-triggers business effects", async () => {
+  it("recovers a stale PRINTING claim back to PENDING (tab/browser crash after claim, before submission start) — never permanently lost, never re-triggers business effects", async () => {
     const fixture = await createFixture();
     const waiter = context(fixture, ["WAITER"], "waiter-1");
     const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
@@ -168,12 +169,12 @@ describe("automatic print dispatch: atomic claim (beginPrintAttempt) prevents du
     const claimed = await printing.beginPrintAttempt(kitchenStaff, submitted.id, kitchenJob.id);
     expect(claimed).not.toBeNull();
 
-    // Simulate the claiming tab/browser crashing before confirmPrintResult
-    // ever runs — backdate updatedAt past STALE_PRINT_LEASE_MS (90s), the
+    // Simulate the claiming tab/browser crashing before startPrintSubmission
+    // ever runs — backdate claimedAt past STALE_PRINT_LEASE_MS (90s), the
     // same signal listPendingStationPrintJobs checks (see print-service.ts).
     await prisma.printJob.update({
       where: { id: kitchenJob.id },
-      data: { updatedAt: new Date(Date.now() - 91_000) },
+      data: { claimedAt: new Date(Date.now() - 91_000) },
     });
 
     const result = await printing.listPendingStationPrintJobs(kitchenStaff, fixture.locationId, "KITCHEN");
@@ -221,7 +222,7 @@ describe("automatic print dispatch: station queue listing", () => {
     const submitted = await submitMixedOrder(fixture, waiter);
     const jobs = await printing.listPrintJobs(waiter, submitted.id);
     const barJob = jobs.find((j) => j.type === "BAR")!;
-    await printing.confirmPrintResult(manager, submitted.id, barJob.id, { success: false, errorMessage: "Printer offline" });
+    await confirmPrint(manager, submitted.id, barJob.id, { success: false, errorMessage: "Printer offline" });
 
     const kitchenResult = await printing.listPendingStationPrintJobs(manager, fixture.locationId, "KITCHEN");
     expect(kitchenResult.jobs.every((j) => j.station === "KITCHEN")).toBe(true);
@@ -239,7 +240,7 @@ describe("automatic print dispatch: station queue listing", () => {
     const submitted = await submitMixedOrder(fixture, waiter);
     const jobs = await printing.listPrintJobs(waiter, submitted.id);
     const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
-    await printing.confirmPrintResult(kitchenStaff, submitted.id, kitchenJob.id, { success: true });
+    await confirmPrint(kitchenStaff, submitted.id, kitchenJob.id, { success: true });
 
     const result = await printing.listPendingStationPrintJobs(kitchenStaff, fixture.locationId, "KITCHEN");
     expect(result.jobs).toHaveLength(0);

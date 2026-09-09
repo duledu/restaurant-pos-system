@@ -5,7 +5,10 @@
  * bez obzira ko štampa) — izmena zahteva "settings.manage".
  */
 import { prisma } from "@rcs/db";
-import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
+import { printerConfigSchema } from "@rcs/shared";
+import { lockPrintLocation, stationPolicy, suppressAutomaticJobs } from "../printing/print-policy";
+import { recordAuditEntry } from "../audit/audit-service";
 import { buildCacheKey, getOrSet, cacheDel } from "../cache/cache-client";
 
 const SETTINGS_MANAGE = "settings.manage";
@@ -93,6 +96,7 @@ export interface PrinterConfigInput {
 
 export async function listPrinterConfigs(ctx: AuthContext, locationId: string) {
   requirePermission(ctx, SETTINGS_MANAGE);
+  requireLocationAccess(ctx, locationId);
   return prisma.printerConfig.findMany({
     where: { locationId, ...scopeToRestaurant(ctx) },
     orderBy: { station: "asc" },
@@ -102,16 +106,32 @@ export async function listPrinterConfigs(ctx: AuthContext, locationId: string) {
 /** Jedna konfiguracija po (lokacija, stanica) — vidi @@unique u schema.prisma. */
 export async function upsertPrinterConfig(ctx: AuthContext, input: PrinterConfigInput) {
   requirePermission(ctx, SETTINGS_MANAGE);
-  return prisma.printerConfig.upsert({
-    where: { locationId_station: { locationId: input.locationId, station: input.station } },
-    create: { restaurantId: ctx.restaurantId, ...input },
-    update: input,
+  const data = printerConfigSchema.parse(input);
+  requireLocationAccess(ctx, data.locationId);
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, data.locationId);
+    const previous = await stationPolicy(tx, ctx.restaurantId, data.locationId, data.station);
+    const enabled = data.isEnabled && data.autoPrint;
+    const automaticSince = enabled && !(previous.isEnabled && previous.autoPrint) ? new Date() : previous.automaticSince;
+    const updated = await tx.printerConfig.upsert({
+      where: { locationId_station: { locationId: data.locationId, station: data.station } },
+      create: { ...data, restaurantId: ctx.restaurantId, automaticSince },
+      update: { ...data, automaticSince },
+    });
+    if (!enabled) await suppressAutomaticJobs(tx, ctx.restaurantId, data.locationId, data.station);
+    await recordAuditEntry(ctx, { entityType: "PrinterConfig", entityId: updated.id, action: "printer.policy_updated",
+      previousValue: previous, newValue: updated, locationId: data.locationId }, tx);
+    return updated;
   });
 }
 
 export async function deletePrinterConfig(ctx: AuthContext, id: string): Promise<void> {
   requirePermission(ctx, SETTINGS_MANAGE);
-  await prisma.printerConfig.deleteMany({ where: { id, ...scopeToRestaurant(ctx) } });
+  const config = await prisma.printerConfig.findFirst({ where: { id, ...scopeToRestaurant(ctx) } });
+  if (!config) return;
+  requireLocationAccess(ctx, config.locationId);
+  // Retain a disabled policy tombstone: deleting would restore the legacy ON default.
+  await upsertPrinterConfig(ctx, { ...config, isEnabled: false, autoPrint: false });
 }
 
 /**

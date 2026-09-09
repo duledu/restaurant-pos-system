@@ -8,6 +8,7 @@ import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPan
 import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../lib/client-cache";
 import {
   fetchPrintJobs,
+  requestStationPrint,
   printAndConfirm,
   beginPrintJob,
   fetchPendingStationPrintJobs,
@@ -216,11 +217,18 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
       // (beginPrintAttempt), ovo je samo da se izbegnu suvišni pokušaji.
       // FAILED tiketi se NIKAD automatski ne štampaju ponovo — samo se
       // prikazuju sa dugmetom "Pokušaj ponovo" (zahtev #4).
-      const failed = pendingPrintRes.jobs.filter((j) => j.status === "FAILED");
+      const failed = pendingPrintRes.jobs.filter((j) => j.status === "FAILED" || j.status === "SUBMISSION_UNKNOWN");
       setFailedPrintJobs(failed);
-      if (pendingPrintRes.autoPrintEligible) {
+      // Faza 2B — kad je TableCore Print Agent aktivan za ovu stanicu, browser
+      // (QZ ili plain print) se PASIVNO povlači iz automatskog preuzimanja —
+      // agent poll/claim (agent-print-service.ts) postaje jedini automatski
+      // put. Duplikat je već strukturno nemoguć (atomski beginPrintAttempt),
+      // ovo sprečava samo nasumično/nepredvidivo takmičenje dva transporta.
+      // FAILED/SUBMISSION_UNKNOWN lista iznad ostaje prikazana bez obzira —
+      // operater i dalje vidi status i može ručno da pokuša ponovo.
+      if (pendingPrintRes.autoPrintEligible && !pendingPrintRes.agentActiveForStation) {
         for (const job of pendingPrintRes.jobs) {
-          if (job.status === "PENDING" && !autoSeenRef.current.has(job.id)) {
+          if (job.isAutomatic && job.status === "PENDING" && !autoSeenRef.current.has(job.id)) {
             autoSeenRef.current.add(job.id);
             autoQueueRef.current.push({ orderId: job.orderId, job });
           }
@@ -255,38 +263,43 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   }
 
   async function handlePrintTicket(orderId: string) {
-    // Ručno dugme ostaje rezervni put (zahtev #1) — nezavisno od auto-reda
-    // čekanja, radi čak i za tiket koji je automatika već odštampala
-    // (reprint), pa NAMERNO ne prolazi kroz beginPrintAttempt claim.
+    // A deliberate manual request gets its own audited row and still uses claim/start.
+    if (printInFlightRef.current) return;
+    printInFlightRef.current = true;
     setPrintBusyId(orderId);
     setError(null);
     try {
       const jobs = await fetchPrintJobs(orderId);
-      const job = jobs.find((j) => j.station === station);
-      if (!job) {
-        setError("Nema tiketa za štampu za ovu porudžbinu");
-        return;
-      }
+      const original = jobs.find((j) => j.station === station);
+      const job = await requestStationPrint(orderId, station, crypto.randomUUID(), original?.id);
       printInFlightRef.current = true;
       setPendingPrint({ orderId, job });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju tiketa");
+      printInFlightRef.current = false;
     } finally {
       setPrintBusyId(null);
     }
   }
 
   async function handleRetryPrint(orderId: string, jobId: string) {
+    if (printInFlightRef.current) return;
+    printInFlightRef.current = true;
     setRetryBusyId(jobId);
     setError(null);
     try {
-      await retryPrintJob(orderId, jobId);
+      const original = failedPrintJobs.find((j) => j.id === jobId);
+      const job = original?.resultOutcome !== "FAILED_BEFORE_SUBMISSION"
+        ? await requestStationPrint(orderId, station, crypto.randomUUID(), jobId)
+        : await retryPrintJob(orderId, jobId);
       setFailedPrintJobs((prev) => prev.filter((j) => j.id !== jobId));
-      // Dozvoli da ga sledeći poll ciklus ponovo vidi kao PENDING i doda u
-      // auto-print red čekanja (server ga je upravo vratio na PENDING).
+      // Explicit manual retry is independent of automatic policy/polling.
       autoSeenRef.current.delete(jobId);
+      printInFlightRef.current = true;
+      setPendingPrint({ orderId, job });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri ponovnom pokušaju štampe");
+      printInFlightRef.current = false;
     } finally {
       setRetryBusyId(null);
     }
@@ -298,7 +311,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     // ostaje uvek na proverenom BrowserPrintTransport-u (zahtev: "Preserve
     // it as a manual fallback"), bez obzira da li je QZ podešen za automatsku
     // štampu.
-    printAndConfirm(pendingPrint.orderId, pendingPrint.job.id, pendingPrint.transport ?? defaultPrintTransport)
+    printAndConfirm(pendingPrint.orderId, pendingPrint.job.id, pendingPrint.transport ?? defaultPrintTransport, pendingPrint.job.attemptId)
       .catch((e) => setError(e instanceof Error ? e.message : "Greška pri štampi"))
       .finally(() => {
         setPendingPrint(null);
@@ -439,14 +452,14 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
 
                   {failedJob && (
                     <div className="flex items-center justify-between gap-2 border-b border-danger/20 bg-danger-soft px-4 py-2">
-                      <span className="text-xs font-semibold text-danger">Automatska štampa nije uspela</span>
+                      <span className="text-xs font-semibold text-danger">{failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Ishod štampe nije poznat — proverite papir pre novog otiska" : "Štampa nije uspela pre slanja"}</span>
                       <button
                         type="button"
                         onClick={() => handleRetryPrint(order.orderId, failedJob.id)}
                         disabled={retryBusyId === failedJob.id}
                         className="min-h-8 shrink-0 rounded-md bg-danger px-3 py-1 text-xs font-bold text-white disabled:opacity-40"
                       >
-                        {retryBusyId === failedJob.id ? "…" : "Pokušaj ponovo"}
+                        {retryBusyId === failedJob.id ? "…" : failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Provereno — novi otisak" : "Pokušaj ponovo"}
                       </button>
                     </div>
                   )}

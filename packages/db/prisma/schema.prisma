@@ -71,11 +71,13 @@ model Restaurant {
   updatedAt DateTime         @updatedAt
   createdBy String?
 
-  tenant              Tenant              @relation(fields: [tenantId], references: [id])
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
   locations           Location[]
   employees           Employee[]
   roles               Role[]
   devices             Device[]
+  workstations        Workstation[]
+  workstationPairings WorkstationPairing[]
   menuCategories      MenuCategory[]
   menuItems           MenuItem[]
   floors              Floor[]
@@ -108,14 +110,16 @@ model Location {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  restaurant        Restaurant         @relation(fields: [restaurantId], references: [id])
-  devices           Device[]
-  employeeLocations EmployeeLocation[]
-  floors            Floor[]
-  shifts            Shift[]
-  orders            Order[]
-  inventoryItems    InventoryItem[]
-  ingredientStocks  IngredientStock[]
+  restaurant          Restaurant           @relation(fields: [restaurantId], references: [id])
+  devices             Device[]
+  workstations        Workstation[]
+  workstationPairings WorkstationPairing[]
+  employeeLocations   EmployeeLocation[]
+  floors              Floor[]
+  shifts              Shift[]
+  orders              Order[]
+  inventoryItems      InventoryItem[]
+  ingredientStocks    IngredientStock[]
 
   @@index([restaurantId])
   @@map("locations")
@@ -1175,31 +1179,39 @@ enum PrintJobStatus {
   PRINTING
   PRINTED
   FAILED
+  SUBMISSION_UNKNOWN
+  SUPPRESSED
 }
 
 model PrintJob {
-  id            String             @id @default(uuid())
-  restaurantId  String
-  locationId    String
-  orderId       String
-  type          PrintJobType
+  id                  String             @id @default(uuid())
+  restaurantId        String
+  locationId          String
+  orderId             String
+  type                PrintJobType
   // KITCHEN | BAR za tiket-tipove; null za RECEIPT (račun nije vezan za
   // pojedinačnu stanicu).
-  station       ProductionStation?
-  dispatchKey   String
-  status        PrintJobStatus     @default(PENDING)
-  attemptCount  Int                @default(0)
+  station             ProductionStation?
+  dispatchKey         String
+  status              PrintJobStatus     @default(PENDING)
+  attemptCount        Int                @default(0)
+  attemptId           String?
+  claimedBy           String?
+  claimedAt           DateTime?
+  submissionStartedAt DateTime?
+  resultOutcome       String?
+  isAutomatic         Boolean            @default(false)
   // Renderovani sadržaj tiketa/računa u trenutku dispatch-a — zamrznut
   // snapshot, ista konvencija kao Receipt: reprint NIKAD ne preračunava
   // iz Order/OrderItem, samo ponovo ispisuje ovaj JSON.
-  content       Json
-  isReprint     Boolean            @default(false)
-  reprintOfId   String?
-  requestedBy   String // employeeId, bez FK — ista konvencija kao Order.openedBy
-  failureReason String?
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-  printedAt     DateTime?
+  content             Json
+  isReprint           Boolean            @default(false)
+  reprintOfId         String?
+  requestedBy         String // employeeId, bez FK — ista konvencija kao Order.openedBy
+  failureReason       String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  printedAt           DateTime?
 
   order     Order      @relation(fields: [orderId], references: [id])
   reprintOf PrintJob?  @relation("PrintJobReprints", fields: [reprintOfId], references: [id])
@@ -1240,25 +1252,136 @@ model RestaurantSettings {
 }
 
 model PrinterConfig {
-  id           String       @id @default(uuid())
-  restaurantId String
-  locationId   String
-  station      PrintJobType // KITCHEN | BAR | RECEIPT
-  name         String
-  printerType  PrinterType  @default(BROWSER)
-  paperWidthMm Int          @default(80) // 58mm podržan bez migracije — samo druga vrednost
-  isEnabled    Boolean      @default(true)
-  autoPrint    Boolean      @default(false)
-  copies       Int          @default(1)
-  ipAddress    String? // rezervisano za budući ESC_POS_LAN/NETWORK adapter
-  port         Int?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  id             String       @id @default(uuid())
+  restaurantId   String
+  locationId     String
+  station        PrintJobType // KITCHEN | BAR | RECEIPT
+  name           String
+  printerType    PrinterType  @default(BROWSER)
+  paperWidthMm   Int          @default(80) // 58mm podržan bez migracije — samo druga vrednost
+  isEnabled      Boolean      @default(true)
+  autoPrint      Boolean      @default(false)
+  automaticSince DateTime?
+  copies         Int          @default(1)
+  ipAddress      String? // rezervisano za budući ESC_POS_LAN/NETWORK adapter
+  port           Int?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   @@unique([locationId, station])
   @@index([restaurantId])
   @@index([locationId])
   @@map("printer_configs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAZA 2A — TableCore Print Agent radne stanice (workstations) + uparivanje
+//
+// Namerno ODVOJENO od postojećeg Device modela (koji je identitet
+// browser-a/telefona konobara za PIN prijavu — id je NAMERNO ne-tajni UUID
+// čuvan u localStorage, @unique po Employee, bez ikakvog polja za
+// kredencijal/kapacitet/heartbeat u autorizacionom smislu). Workstation je
+// suprotno: id NIJE tajna, ali `credentialHash` JESTE — trajni, otkaziv
+// bearer kredencijal nezavisnog Windows agent procesa, koji nikad ne
+// pripada jednom zaposlenom i mora preživeti restart/re-login zaposlenih.
+// Deljene šablone (isEnabled, revocation, audit akcije, dozvola u domain
+// servisu) svesno ponavlja iz Device/PrinterConfig konvencije.
+//
+// Ponovo koristi POSTOJEĆI ProductionStation enum (već tačno KITCHEN|BAR,
+// bez RECEIPT — radna stanica u ovoj fazi štampa isključivo kuhinjske/šank
+// tikete, nikad račun) umesto novog enuma.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum PairingStatus {
+  PENDING
+  CONSUMED
+  CANCELLED
+}
+
+// Kratkotrajna, jednokratna sesija uparivanja koju admin kreira u Admin →
+// Settings → Printers → Workstations. `codeHash` je SHA-256 heš koda koji
+// agent unosi — sam kod se NIKAD ne čuva u bazi u čistom tekstu (isti
+// zahtev kao za trajni kredencijal ispod), samo se vraća JEDNOM u odgovoru
+// na kreiranje. Isticanje (`expiresAt`) se proverava dinamički pri
+// potrošnji — nema odvojenog EXPIRED statusa niti pozadinskog posla koji ga
+// upisuje, da status reda nikad ne zastari.
+model WorkstationPairing {
+  id            String            @id @default(uuid())
+  restaurantId  String
+  locationId    String
+  station       ProductionStation
+  name          String?
+  codeHash      String            @unique
+  status        PairingStatus     @default(PENDING)
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  workstationId String?
+  createdBy     String // employeeId admina koji je kreirao sesiju
+  createdAt     DateTime          @default(now())
+
+  restaurant  Restaurant   @relation(fields: [restaurantId], references: [id])
+  location    Location     @relation(fields: [locationId], references: [id])
+  workstation Workstation? @relation(fields: [workstationId], references: [id])
+
+  @@index([restaurantId])
+  @@index([status])
+  @@map("workstation_pairings")
+}
+
+// Trajan identitet jednog fizičkog Windows Print Agent procesa. `credentialHash`
+// je SHA-256 heš trajnog bearer kredencijala (vidi packages/auth/workstation-auth.ts
+// za tačan format/verziju/obrazloženje zašto SHA-256 a ne scrypt) — sirov
+// kredencijal se vraća agentu TAČNO JEDNOM, u odgovoru na uspešnu potrošnju
+// uparivanja, i nikad više nije čitljiv iz baze. `isEnabled` je reverzibilna
+// administratorska pauza; `revokedAt` je trajno/nepovratno oduzimanje
+// pristupa (nova radna stanica zahteva novo uparivanje). `paperWidthMm` je
+// null dok se ne konfiguriše/prijavi (58 ili 80, ista konvencija kao
+// PrinterConfig.paperWidthMm) — agent NIKAD ne bira sopstvenu širinu papira
+// bez administratorske potvrde/konfiguracije.
+model Workstation {
+  id                            String            @id @default(uuid())
+  restaurantId                  String
+  locationId                    String
+  name                          String
+  station                       ProductionStation
+  configuredPrinterName         String?
+  // Faza 2B — agent lokalno proverava da li configuredPrinterName zaista
+  // postoji u Windows spisku štampača (nikad tiho ne bira drugi) i
+  // prijavljuje ovo preko heartbeat-a. Null = još nije prijavljeno.
+  printerAvailable              Boolean?
+  paperWidthMm                  Int?
+  agentVersion                  String?
+  osDescription                 String?
+  isEnabled                     Boolean           @default(true)
+  lastSeenAt                    DateTime?
+  lastSuccessfulCommunicationAt DateTime?
+  lastPrintAt                   DateTime?
+  // Faza 2C — Admin "Test Print" dugme. Namerno ODVOJENO od PrintJob (koji
+  // zahteva realan orderId FK — vidi packages/db/prisma/schema.prisma
+  // model PrintJob): test štampa nikad ne sme dotaći Order/Payment/
+  // izveštaje. Agent ovo vidi kroz heartbeat odgovor (ne novi poll red),
+  // fizički odštampa preko iste WindowsPrinter.Print putanje, i prijavljuje
+  // ishod nazad preko POST /api/agent/test-print/result. `testPrintStatus`:
+  // null (nikad zatraženo) | "PENDING" | "SUCCEEDED" | "FAILED".
+  testPrintRequestedAt          DateTime?
+  testPrintRequestedBy          String?
+  testPrintStatus               String?
+  testPrintCompletedAt          DateTime?
+  testPrintError                String?
+  credentialHash                String            @unique
+  credentialVersion             Int               @default(1)
+  pairedAt                      DateTime          @default(now())
+  revokedAt                     DateTime?
+  createdAt                     DateTime          @default(now())
+  updatedAt                     DateTime          @updatedAt
+
+  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  location   Location             @relation(fields: [locationId], references: [id])
+  pairings   WorkstationPairing[]
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@map("workstations")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

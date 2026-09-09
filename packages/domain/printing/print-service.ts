@@ -18,6 +18,8 @@
  * Order.idempotencyKey) — svaki reprint je zaseban, auditovan red.
  */
 import { prisma, Prisma } from "@rcs/db";
+import { randomUUID } from "node:crypto";
+import { lockPrintLocation, stationPolicy, suppressAutomaticJobs } from "./print-policy";
 import { requireLocationAccess, requirePermission, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { getRestaurantSettings, getPrinterConfigForDispatch } from "../settings/settings-service";
@@ -96,7 +98,7 @@ export async function dispatchStationPrintJobs(
     },
     include: {
       orderItem: {
-        select: { name: true, quantity: true, note: true, modifiers: { orderBy: { sortOrder: "asc" } } },
+        select: { name: true, quantity: true, note: true, submittedAt: true, modifiers: { orderBy: { sortOrder: "asc" } } },
       },
     },
   });
@@ -121,44 +123,51 @@ export async function dispatchStationPrintJobs(
   }
 
   for (const [station, rows] of byStation) {
-    // Snapshot širine papira ZA OVU STANICU u trenutku dispatch-a (zahtev
-    // #10/#17: kuhinja i šank mogu imati nezavisnu 58mm/80mm konfiguraciju)
-    // — nikad globalna/tvrdo ukucana vrednost, nikad naknadno preračunata.
-    const { paperWidthMm } = await getPrinterConfigForDispatch(ctx.restaurantId, order.locationId, station);
-    const content = buildKitchenBarTicketContent({
-      station,
-      restaurantName: order.restaurant.name,
-      tableLabel: order.table.label,
-      waiterName,
-      orderNumber,
-      submittedAt,
-      items: rows.map((r) => ({
-        quantity: r.orderItem.quantity,
-        name: r.orderItem.name,
-        note: r.orderItem.note,
-        modifiers: formatModifiersForTicket(r.orderItem.modifiers),
-      })),
-      // VIŠE-KRUŽNO NARUČIVANJE: dispatchKeySuffix je izostavljen ISKLJUČIVO
-      // za prvo slanje (vidi order-service.ts submitOrder) — prisustvo
-      // ovog argumenta je zato tačan, već postojeći signal da je ovo NAREDNI
-      // (dodatni) krug, ne novi parametar koji treba posebno prosleđivati.
-      isAdditional: Boolean(options?.dispatchKeySuffix),
-      paperWidthMm,
-    });
-    const dispatchKey = options?.dispatchKeySuffix ? `submit:${station}:${options.dispatchKeySuffix}` : `submit:${station}`;
-    await prisma.printJob.upsert({
-      where: { orderId_dispatchKey: { orderId, dispatchKey } },
-      create: {
-        restaurantId: ctx.restaurantId,
-        locationId: order.locationId,
-        orderId,
-        type: station,
+    await prisma.$transaction(async (tx) => {
+      await lockPrintLocation(tx, ctx.restaurantId, order.locationId);
+      // Snapshot širine papira ZA OVU STANICU u trenutku dispatch-a (zahtev
+      // #10/#17: kuhinja i šank mogu imati nezavisnu 58mm/80mm konfiguraciju)
+      // — nikad globalna/tvrdo ukucana vrednost, nikad naknadno preračunata.
+      const policy = await stationPolicy(tx, ctx.restaurantId, order.locationId, station);
+      const eventAt = new Date(Math.min(...rows.map((r) => (r.orderItem.submittedAt ?? order.submittedAt ?? new Date(0)).getTime())));
+      if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && eventAt <= policy.automaticSince)) return;
+      const { paperWidthMm } = policy;
+      const content = buildKitchenBarTicketContent({
         station,
-        dispatchKey,
-        content: toJson(content),
-        requestedBy: ctx.employeeId,
-      },
-      update: {},
+        restaurantName: order.restaurant.name,
+        tableLabel: order.table.label,
+        waiterName,
+        orderNumber,
+        submittedAt,
+        items: rows.map((r) => ({
+          quantity: r.orderItem.quantity,
+          name: r.orderItem.name,
+          note: r.orderItem.note,
+          modifiers: formatModifiersForTicket(r.orderItem.modifiers),
+        })),
+        // VIŠE-KRUŽNO NARUČIVANJE: dispatchKeySuffix je izostavljen ISKLJUČIVO
+        // za prvo slanje (vidi order-service.ts submitOrder) — prisustvo
+        // ovog argumenta je zato tačan, već postojeći signal da je ovo NAREDNI
+        // (dodatni) krug, ne novi parametar koji treba posebno prosleđivati.
+        isAdditional: Boolean(options?.dispatchKeySuffix),
+        paperWidthMm,
+      });
+      const dispatchKey = options?.dispatchKeySuffix ? `submit:${station}:${options.dispatchKeySuffix}` : `submit:${station}`;
+      await tx.printJob.upsert({
+        where: { orderId_dispatchKey: { orderId, dispatchKey } },
+        create: {
+          restaurantId: ctx.restaurantId,
+          locationId: order.locationId,
+          orderId,
+          type: station,
+          station,
+          dispatchKey,
+          content: toJson(content),
+          requestedBy: ctx.employeeId,
+          isAutomatic: true,
+        },
+        update: {},
+      });
     });
   }
 }
@@ -192,30 +201,36 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
   const modifierLines = formatModifiersForTicket(itemModifiers);
 
   for (const row of stationRows) {
-    const { paperWidthMm } = await getPrinterConfigForDispatch(ctx.restaurantId, voidRecord.locationId, row.station);
-    const content = buildCancellationTicketContent({
-      station: row.station,
-      tableLabel: voidRecord.tableLabel,
-      orderNumber: shortOrderNumber(voidRecord.orderId),
-      voidedAt: voidRecord.voidedAt.toISOString(),
-      items: [{ quantity: voidRecord.voidedQuantity, name: voidRecord.itemName, modifiers: modifierLines }],
-      reasonLabel,
-      paperWidthMm,
-    });
-    const dispatchKey = `void:${voidRecord.id}:${row.station}`;
-    await prisma.printJob.upsert({
-      where: { orderId_dispatchKey: { orderId: voidRecord.orderId, dispatchKey } },
-      create: {
-        restaurantId: ctx.restaurantId,
-        locationId: voidRecord.locationId,
-        orderId: voidRecord.orderId,
-        type: row.station,
+    await prisma.$transaction(async (tx) => {
+      await lockPrintLocation(tx, ctx.restaurantId, voidRecord.locationId);
+      const policy = await stationPolicy(tx, ctx.restaurantId, voidRecord.locationId, row.station);
+      if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && voidRecord.voidedAt <= policy.automaticSince)) return;
+      const { paperWidthMm } = policy;
+      const content = buildCancellationTicketContent({
         station: row.station,
-        dispatchKey,
-        content: toJson(content),
-        requestedBy: ctx.employeeId,
-      },
-      update: {},
+        tableLabel: voidRecord.tableLabel,
+        orderNumber: shortOrderNumber(voidRecord.orderId),
+        voidedAt: voidRecord.voidedAt.toISOString(),
+        items: [{ quantity: voidRecord.voidedQuantity, name: voidRecord.itemName, modifiers: modifierLines }],
+        reasonLabel,
+        paperWidthMm,
+      });
+      const dispatchKey = `void:${voidRecord.id}:${row.station}`;
+      await tx.printJob.upsert({
+        where: { orderId_dispatchKey: { orderId: voidRecord.orderId, dispatchKey } },
+        create: {
+          restaurantId: ctx.restaurantId,
+          locationId: voidRecord.locationId,
+          orderId: voidRecord.orderId,
+          type: row.station,
+          station: row.station,
+          dispatchKey,
+          content: toJson(content),
+          requestedBy: ctx.employeeId,
+          isAutomatic: true,
+        },
+        update: {},
+      });
     });
   }
 }
@@ -343,98 +358,180 @@ export async function confirmPrintResult(
   ctx: AuthContext,
   orderId: string,
   printJobId: string,
-  result: { success: boolean; errorMessage?: string }
+  result: { attemptId: string; outcome: "TRANSPORT_COMPLETED" | "SUBMITTED_TO_SPOOLER" | "FAILED_BEFORE_SUBMISSION" | "SUBMISSION_UNKNOWN"; errorMessage?: string }
 ) {
   requirePrintAccess(ctx);
   const { job } = await loadOwnedPrintJob(ctx, orderId, printJobId);
-
-  return prisma.printJob.update({
-    where: { id: job.id },
-    data: result.success
-      ? { status: "PRINTED", printedAt: new Date(), attemptCount: { increment: 1 } }
-      : { status: "FAILED", failureReason: result.errorMessage ?? "Nepoznata greška", attemptCount: { increment: 1 } },
+  if (job.station) assertStationAccess(ctx, job.station);
+  if (!["TRANSPORT_COMPLETED", "SUBMITTED_TO_SPOOLER", "FAILED_BEFORE_SUBMISSION", "SUBMISSION_UNKNOWN"].includes(result.outcome)) throw new Error("Invalid print outcome");
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
+    const current = await tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
+    if (!result.attemptId || current.attemptId !== result.attemptId || current.claimedBy !== ctx.employeeId) throw new Error("Stale print attempt");
+    if (current.resultOutcome) {
+      if (current.resultOutcome === result.outcome) return current;
+      throw new Error("Print result already finalized");
+    }
+    if (current.status !== "PRINTING" && current.status !== "SUBMISSION_UNKNOWN") throw new Error("Print attempt is not active");
+    if (result.outcome !== "FAILED_BEFORE_SUBMISSION" && !current.submissionStartedAt) throw new Error("Submission was not started");
+    const updated = await tx.printJob.update({ where: { id: job.id }, data: {
+      status: (result.outcome === "SUBMITTED_TO_SPOOLER" || result.outcome === "TRANSPORT_COMPLETED") ? "PRINTED" : result.outcome === "FAILED_BEFORE_SUBMISSION" ? "FAILED" : "SUBMISSION_UNKNOWN",
+      resultOutcome: result.outcome,
+      printedAt: (result.outcome === "SUBMITTED_TO_SPOOLER" || result.outcome === "TRANSPORT_COMPLETED") ? new Date() : null,
+      failureReason: (result.outcome === "SUBMITTED_TO_SPOOLER" || result.outcome === "TRANSPORT_COMPLETED") ? null : result.errorMessage?.slice(0, 500) ?? result.outcome,
+    } });
+    await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.result",
+      newValue: { attemptId: result.attemptId, outcome: result.outcome }, locationId: job.locationId }, tx);
+    return updated;
   });
 }
 
 export async function retryPrintJob(ctx: AuthContext, orderId: string, printJobId: string) {
   requirePrintAccess(ctx);
   const { job } = await loadOwnedPrintJob(ctx, orderId, printJobId);
-  if (job.status !== "FAILED") {
-    throw new Error("Samo neuspeo pokušaj štampe može da se ponovi");
-  }
-  return prisma.printJob.update({ where: { id: job.id }, data: { status: "PENDING", failureReason: null } });
+  if (job.station) assertStationAccess(ctx, job.station);
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
+    const changed = await tx.printJob.updateMany({
+      where: { id: job.id, status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" },
+      data: { status: "PENDING", failureReason: null, attemptId: null, claimedBy: null, claimedAt: null,
+        submissionStartedAt: null, resultOutcome: null, isAutomatic: false },
+    });
+    if (!changed.count) throw new Error("Samo neuspeo pokušaj pre slanja može da se ponovi; neizvestan ishod zahteva novi otisak");
+    await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.retry_requested",
+      previousValue: { isAutomatic: job.isAutomatic, attemptId: job.attemptId }, locationId: job.locationId }, tx);
+    return tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
+  });
 }
 
-/**
- * AUTOMATSKA ŠTAMPA (zahtev #1/#3): KDS/šank ekran poziva ovo TAČNO PRE nego
- * što sam pokrene window.print() za PENDING tiket — nikad posle. Atomski
- * `updateMany` sa `status: "PENDING"` u WHERE je JEDINA brava koja postoji:
- * osvežena stranica, drugi poll ciklus, drugi otvoren tab iste stanice, ili
- * konkurentan zahtev — svaki NEUSPEO "claim" (count === 0) znači da je red
- * već preuzet/odštampan/nije više PENDING, pa pozivalac MORA tiho odustati,
- * nikad ponoviti window.print(). Ovo je namerno ODVOJENO od confirmPrintResult
- * (koje sledi POSLE window.print()-a) — status prolazi PENDING -> PRINTING
- * (claimed, u toku) -> PRINTED/FAILED (ishod), nikad direktno PENDING ->
- * PRINTED, tako da ostatak PRINTING nikad ne liči na "još nije ni pokušano".
- */
+/** Atomic claim; attemptCount is owned only by this successful transition. */
 export async function beginPrintAttempt(ctx: AuthContext, orderId: string, printJobId: string) {
   requirePrintAccess(ctx);
   const { job } = await loadOwnedPrintJob(ctx, orderId, printJobId);
   if (job.station) assertStationAccess(ctx, job.station);
 
-  const claimed = await prisma.printJob.updateMany({
-    where: { id: job.id, status: "PENDING" },
-    data: { status: "PRINTING", attemptCount: { increment: 1 } },
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
+    const policy = await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
+    if (!policy.isEnabled) return null;
+    // Also recover an individual manual/receipt claim without requiring KDS polling.
+    await tx.printJob.updateMany({ where: { id: job.id, status: "PRINTING", attemptId: { not: null }, submissionStartedAt: null,
+      claimedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
+      data: { status: "PENDING", attemptId: null, claimedBy: null, claimedAt: null } });
+    const current = await tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
+    if (current.isAutomatic && !policy.autoPrint) return null;
+    const claimed = await tx.printJob.updateMany({
+      where: { id: job.id, status: "PENDING" },
+      data: { status: "PRINTING", attemptId: randomUUID(), claimedBy: ctx.employeeId, claimedAt: new Date(),
+        submissionStartedAt: null, resultOutcome: null, attemptCount: { increment: 1 } },
+    });
+    if (!claimed.count) return null;
+    const attempt = await tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
+    await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.claimed",
+      newValue: { attemptId: attempt.attemptId, attemptCount: attempt.attemptCount }, locationId: job.locationId }, tx);
+    return attempt;
   });
-  if (claimed.count === 0) return null;
-  return prisma.printJob.findUniqueOrThrow({ where: { id: job.id } });
 }
 
-/**
- * KDS/šank ekran poll-uje ovo (uz listStationOrders) da bi znao koje tikete
- * treba automatski da odštampa (PENDING) i koje da prikaže kao neuspele uz
- * dugme "Pokušaj ponovo" (FAILED) — vidi beginPrintAttempt iznad za idempotentan
- * "claim" korak koji sprečava duplu automatsku štampu. `autoPrintEligible`
- * prati PrinterConfig.isEnabled za tu stanicu (podrazumevano true kad
- * podešavanje nikad nije otvoreno) — admin i dalje može ugasiti automatsku
- * štampu za stanicu bez fizičkog štampača, ručno Print dugme ostaje rezervni
- * put nezavisno od ove zastavice.
- */
-// P0.4 — stale claim recovery. beginPrintAttempt() claims PENDING -> PRINTING
-// right before window.print(); if the client crashes/closes the tab before
-// confirmPrintResult ever runs, the job would otherwise stay PRINTING
-// forever (invisible to the auto-print queue, not retryable). No new schema
-// field: PrintJob.updatedAt already advances on every status write, so it
-// doubles as the claim timestamp for free. A claim held longer than this
-// lease is treated as abandoned and silently returned to PENDING — normal
-// browser print (dialog + confirm round-trip) finishes in well under this.
-const STALE_PRINT_LEASE_MS = 90_000;
+/** One-shot permission to invoke a transport. A lost response is NOT permission to retry. */
+export async function startPrintSubmission(ctx: AuthContext, orderId: string, printJobId: string, attemptId: string) {
+  requirePrintAccess(ctx);
+  if (typeof attemptId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(attemptId)) throw new Error("Invalid print attempt");
+  const { job } = await loadOwnedPrintJob(ctx, orderId, printJobId);
+  if (job.station) assertStationAccess(ctx, job.station);
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
+    const policy = await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
+    if (!policy.isEnabled) throw new Error("Štampač je isključen");
+    const changed = await tx.printJob.updateMany({
+      where: { id: job.id, status: "PRINTING", attemptId, claimedBy: ctx.employeeId, submissionStartedAt: null,
+        claimedAt: { gte: new Date(Date.now() - STALE_PRINT_LEASE_MS) },
+        ...(policy.autoPrint ? {} : { isAutomatic: false }) },
+      data: { submissionStartedAt: new Date() },
+    });
+    if (!changed.count) throw new Error("Submission not authorized: expired, started, disabled or stale attempt");
+    await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.submission_started",
+      newValue: { attemptId }, locationId: job.locationId }, tx);
+    return tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
+  });
+}
+
+// Only an unstarted claim can expire back to PENDING. Started claims require reconciliation.
+// Exported (Faza 2B) so agent-print-service.ts's own stale-recovery sweep —
+// needed because the agent may be the ONLY consumer of a station when no
+// KDS tab is open — uses the EXACT same threshold, never a duplicated
+// magic number that could drift.
+export const STALE_PRINT_LEASE_MS = 90_000;
 
 export async function listPendingStationPrintJobs(ctx: AuthContext, locationId: string, station: "KITCHEN" | "BAR") {
   requirePermission(ctx, PRODUCTION_MANAGE);
   requireLocationAccess(ctx, locationId);
   assertStationAccess(ctx, station);
 
-  await prisma.printJob.updateMany({
-    where: {
-      ...scopeToRestaurant(ctx),
-      locationId,
-      station,
-      status: "PRINTING",
-      updatedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) },
-    },
-    data: { status: "PENDING" },
-  });
-
-  const [jobs, printerConfig] = await Promise.all([
-    prisma.printJob.findMany({
-      where: { ...scopeToRestaurant(ctx), locationId, station, status: { in: ["PENDING", "FAILED"] } },
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, locationId);
+    const policy = await stationPolicy(tx, ctx.restaurantId, locationId, station);
+    if (!policy.isEnabled || !policy.autoPrint) await suppressAutomaticJobs(tx, ctx.restaurantId, locationId, station);
+    const scope = { ...scopeToRestaurant(ctx), locationId, station, status: "PRINTING" as const };
+    await tx.printJob.updateMany({
+      where: { ...scope, attemptId: { not: null }, submissionStartedAt: null,
+        claimedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
+      data: { status: "PENDING", attemptId: null, claimedBy: null, claimedAt: null },
+    });
+    await tx.printJob.updateMany({
+      where: { ...scope, submissionStartedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
+      data: { status: "SUBMISSION_UNKNOWN", failureReason: "Potvrda štampe nedostaje; proverite štampač pre novog otiska." },
+    });
+    const jobs = await tx.printJob.findMany({
+      where: { ...scopeToRestaurant(ctx), locationId, station, status: { in: ["PENDING", "FAILED", "SUBMISSION_UNKNOWN"] } },
       orderBy: { createdAt: "asc" },
-    }),
-    prisma.printerConfig.findUnique({ where: { locationId_station: { locationId, station } } }),
-  ]);
+    });
+    return { jobs, autoPrintEligible: policy.isEnabled && policy.autoPrint };
+  });
+}
 
-  return { jobs, autoPrintEligible: printerConfig ? printerConfig.isEnabled : true };
+/** Explicit station print/reprint. Auto-order policy is intentionally not consulted. */
+export async function requestStationPrint(ctx: AuthContext, orderId: string, station: Station, idempotencyKey: string, originalJobId?: string) {
+  requirePrintAccess(ctx);
+  assertStationAccess(ctx, station);
+  if (!/^[0-9a-f-]{36}$/i.test(idempotencyKey)) throw new Error("Invalid print request key");
+  const order = await loadOwnedOrder(ctx, orderId);
+  return prisma.$transaction(async (tx) => {
+    await lockPrintLocation(tx, ctx.restaurantId, order.locationId);
+    const policy = await stationPolicy(tx, ctx.restaurantId, order.locationId, station);
+    if (!policy.isEnabled) throw new Error("Štampač je isključen");
+    const dispatchKey = `manual:${station}:${idempotencyKey}`;
+    const existing = await tx.printJob.findUnique({ where: { orderId_dispatchKey: { orderId, dispatchKey } } });
+    if (existing) {
+      if (existing.reprintOfId !== (originalJobId ?? null) || existing.requestedBy !== ctx.employeeId) throw new Error("Print request key conflict");
+      return existing;
+    }
+    const original = originalJobId ? await tx.printJob.findFirst({ where: {
+      id: originalJobId, orderId, station, ...scopeToRestaurant(ctx),
+    } }) : null;
+    if (originalJobId && !original) throw new Error("Print job nije pronađen");
+    let content: Prisma.InputJsonValue;
+    if (original) content = original.content as Prisma.InputJsonValue;
+    else {
+      const rows = await tx.orderItemStation.findMany({ where: { station, status: { not: "CANCELLED" }, orderItem: { orderId } },
+        include: { orderItem: { include: { modifiers: { orderBy: { sortOrder: "asc" } } } } } });
+      if (!rows.length) throw new Error("Nema poslatih stavki za štampu");
+      const table = await tx.restaurantTable.findUniqueOrThrow({ where: { id: order.tableId } });
+      const restaurant = await tx.restaurant.findUniqueOrThrow({ where: { id: ctx.restaurantId } });
+      const waiter = await tx.employee.findUnique({ where: { id: order.openedBy }, select: { firstName: true, lastName: true } });
+      content = toJson(buildKitchenBarTicketContent({ station, restaurantName: restaurant.name, tableLabel: table.label,
+        waiterName: waiter ? `${waiter.firstName} ${waiter.lastName}` : "?", orderNumber: shortOrderNumber(order.id), submittedAt: (order.submittedAt ?? new Date()).toISOString(),
+        paperWidthMm: policy.paperWidthMm, items: rows.map(({ orderItem: i }) => ({
+          quantity: i.quantity, name: i.name, note: i.note, modifiers: formatModifiersForTicket(i.modifiers),
+        })) }));
+    }
+    const job = await tx.printJob.create({ data: { restaurantId: ctx.restaurantId, locationId: order.locationId, orderId,
+      type: station, station, dispatchKey, content, isAutomatic: false, isReprint: !!original, reprintOfId: original?.id,
+      requestedBy: ctx.employeeId } });
+    await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: original ? "print.reprinted" : "print.manual_requested",
+      newValue: { orderId, originalJobId: original?.id, station }, locationId: order.locationId }, tx);
+    return job;
+  });
 }
 
 /**
