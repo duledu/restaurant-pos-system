@@ -15,13 +15,22 @@ import { fileURLToPath } from "url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+// 2026-09-09 skladišna istraga (docs/printing-storage-investigation-2026-09-09.md):
+// ista TRUNCATE radna opterećenja (identičan Postgres 16, fsync=on,
+// full_page_writes=on, synchronous_commit=on) pouzdano su prošla 2/2 na
+// odvojenom lokalnom fiksnom volumenu, a 4/4 puta zaglavila na
+// `IO / DataFileImmediateSync` na podrazumevanom volumenu ove mašine.
+// `RCS_TEST_PG_DATA_DIR` je NAMERNO opcioni, po-mašini opt-in override —
+// NIKAD hardkodovano slovo diska ovde, jer bi to pokvarilo test infrastrukturu
+// za bilo kog drugog developera/CI čija mašina nema baš taj volumen.
+// Podrazumevana putanja (bez env promenljive) ostaje potpuno nepromenjena.
 export const TEST_DB = {
   host: "127.0.0.1",
   port: 55433, // NAMERNO različit od DEV (55432) — vidi napomenu na vrhu fajla.
   user: "rcs_test",
   password: "rcs_test_password",
   database: "rcs_test",
-  databaseDir: path.join(ROOT, ".local-postgres-data-test"),
+  databaseDir: process.env.RCS_TEST_PG_DATA_DIR || path.join(ROOT, ".local-postgres-data-test"),
 };
 
 // Marker tabela koju NIKAD ne kreira Prisma migracija — ovo je namerno van
