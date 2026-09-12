@@ -453,7 +453,7 @@ export async function startPrintSubmission(ctx: AuthContext, orderId: string, pr
     await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.submission_started",
       newValue: { attemptId }, locationId: job.locationId }, tx);
     return tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
-  });
+  }, { timeout: 15000 });
 }
 
 // Only an unstarted claim can expire back to PENDING. Started claims require reconciliation.

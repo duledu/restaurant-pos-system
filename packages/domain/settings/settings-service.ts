@@ -122,7 +122,7 @@ export async function upsertPrinterConfig(ctx: AuthContext, input: PrinterConfig
     await recordAuditEntry(ctx, { entityType: "PrinterConfig", entityId: updated.id, action: "printer.policy_updated",
       previousValue: previous, newValue: updated, locationId: data.locationId }, tx);
     return updated;
-  });
+  }, { timeout: 15000 });
 }
 
 export async function deletePrinterConfig(ctx: AuthContext, id: string): Promise<void> {
