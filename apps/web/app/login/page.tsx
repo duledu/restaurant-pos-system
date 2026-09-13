@@ -234,7 +234,7 @@ function StaffLoginForm({ deviceId, onDeviceInvalid }: { deviceId: string; onDev
                 setError(null);
               }}
             >
-              {!staff && <option>Učitavanje…</option>}
+              {!staff && <option>Preuzimamo spisak zaposlenih…</option>}
               {staff?.length === 0 && <option>Nema dostupnog osoblja</option>}
               {staff?.map((s) => (
                 <option key={s.id} value={s.id}>

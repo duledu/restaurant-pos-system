@@ -137,7 +137,7 @@ export function ShiftClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportContent]);
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
+  if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Pripremamo pregled smene…</div>;
 
   if (noShift) {
     return (
