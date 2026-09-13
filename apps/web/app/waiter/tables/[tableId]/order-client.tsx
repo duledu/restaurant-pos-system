@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
@@ -8,68 +8,12 @@ import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, typ
 import { sameModifierSelection } from "../../../../lib/order-cart";
 import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
-import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../../../lib/client-cache";
+import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "../../../../lib/waiter-performance";
+import { createWaiterCartMutations } from "../../../../lib/waiter-cart-mutations";
+import { useWaiterShell } from "../../../../lib/waiter-shell";
 
-interface Category {
-  id: string;
-  name: string;
-  type: "FOOD" | "DRINK";
-}
+import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../lib/waiter-menu";
 
-interface ModifierOption {
-  id: string;
-  name: string;
-  priceDelta: string;
-  isActive: boolean;
-}
-interface ModifierGroup {
-  id: string;
-  name: string;
-  required: boolean;
-  minSelect: number;
-  maxSelect: number;
-  isActive: boolean;
-  options: ModifierOption[];
-}
-interface MenuItemStock {
-  trackingEnabled: boolean;
-  currentStock: string | null;
-  minimumStock: string | null;
-  stockStatus: "NEGATIVE" | "OUT" | "LOW" | "OK" | null;
-}
-interface RecipeAvailability {
-  status: "NEGATIVE" | "AVAILABLE" | "LOW" | "OUT";
-  availablePortions: number;
-  limitingIngredientName: string | null;
-  // P1.6: false = artikal je u RECIPE modu ali nema definisan normativ
-  // ("Normativ nije podešen") — odvojeno od običnog "nema dovoljno sirovina".
-  configured: boolean;
-  // P1.7: true iff configured — negativna/nedovoljna zaliha više NE
-  // sprečava prodaju, samo prikazuje savetodavno upozorenje.
-  sellAllowed: boolean;
-}
-interface MenuItem {
-  id: string;
-  name: string;
-  price: string;
-  categoryId: string | null;
-  // Sirovi Prisma include oblik (MenuItemModifierGroup join) — vidi
-  // menu-service.ts listMenuItems. Prazan niz za artikle bez dodataka.
-  modifierGroups: { group: ModifierGroup }[];
-  // P3.3: prisutno SAMO kad je meni zatražen sa locationId (vidi load()
-  // ispod) — null dok se ne učita, nikad se ne tumači kao OUT.
-  stock: MenuItemStock | null;
-  // P1.4: recepturisan (sirovinski) artikal — prisutno SAMO za artikle sa
-  // konfigurisanim normativom, isto "null = ne primenjuje se" pravilo kao
-  // stock. Nikad oba polja istovremeno smisleno "aktivna" (recepturisan
-  // artikal ima trackStock isključen — vidi inventory-service.ts double-
-  // deduction odbranu), ali oba se čitaju nezavisno radi jasnoće.
-  recipeAvailability: RecipeAvailability | null;
-  // Operativna (Kuhinja/Šank "NIJE DOSTUPNO") dostupnost — POTPUNO nezavisno
-  // od stock/recipeAvailability iznad (nikad null, uvek prisutno kad je
-  // meni zatražen sa locationId — vidi availability-service.ts).
-  availability: { isAvailable: boolean; reasonCode: string | null; reasonLabel: string | null } | null;
-}
 interface OrderItemModifier {
   id: string;
   modifierOptionId: string | null;
@@ -407,17 +351,24 @@ function ModifierSelectionModal({
 }
 
 export function OrderClient({ tableId }: { tableId: string }) {
+  return <TableOrderClient key={tableId} tableId={tableId} />;
+}
+
+function TableOrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
+  useEffect(() => { waiterNavigationVisible("menu"); }, []);
+  const { data: shell, refreshAvailability } = useWaiterShell();
+  const categories = shell.categories;
+  const roles = shell.roles;
+  const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
+
   const [order, setOrder] = useState<OrderData | null>(null);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [items, setItems] = useState<MenuItem[]>([]);
-  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [roles, setRoles] = useState<string[]>([]);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
@@ -427,109 +378,82 @@ export function OrderClient({ tableId }: { tableId: string }) {
   const [modifierPickerItem, setModifierPickerItem] = useState<MenuItem | null>(null);
   // Postojeća DRAFT stavka čiji se dodaci uređuju (umesto dodavanja nove).
   const [editingModifiersFor, setEditingModifiersFor] = useState<OrderItem | null>(null);
-  // P3.3: lokacija porudžbine — čuva se da bi pozadinsko osvežavanje statusa
-  // zaliha (ispod) moglo da ponovi isti upit bez ponovnog otvaranja porudžbine.
-  const [locationId, setLocationId] = useState<string | null>(null);
 
   const canVoid = useMemo(() => roles.some((r) => MANAGEMENT_ROLES.has(r)), [roles]);
 
   // Generisan JEDNOM po ekranu porudžbine i ponovo korišćen na svaki retry
   // — ovo je klijentska strana zaštite od dvostrukog slanja (server strana
   // je @@unique([restaurantId, idempotencyKey]) na Order tabeli).
+  const submittingRef = useRef(false);
+  const submitRevision = useRef(0);
+  const mutationsRef = useRef<ReturnType<typeof createWaiterCartMutations> | null>(null);
+  mutationsRef.current ??= createWaiterCartMutations();
+  const mutations = mutationsRef.current;
+  useEffect(() => () => { void mutations.flush().catch(() => {}); }, [mutations]);
   const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      // PERF: categories/me depend on NEITHER the order nor its location —
-      // fire them immediately, concurrently with opening/loading the order
-      // itself, instead of waiting for that round trip to resolve first (the
-      // old code awaited openOrder, THEN started these two — a fully
-      // avoidable sequential hop on every table entry). Both go through the
-      // shared client cache (60s) — a warm hit skips the network call
-      // entirely. Deliberately NOT applied to the item list below: it
-      // carries live per-location stock/availability state (see
-      // availability-service.ts) that must stay accurate on every table
-      // entry (and is separately re-polled every 15s further down) — caching
-      // it here would silently defeat that freshness guarantee.
-      const categoriesPromise = getOrFetch(CLIENT_CACHE_KEYS.categories, CLIENT_CACHE_TTL_MS, () => apiFetch(`/api/admin/menu/categories`));
-      const mePromise = getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch(`/api/pos/me`));
-
-      const orderRes = await apiFetch("/api/pos/orders", {
-        method: "POST",
-        body: JSON.stringify({ tableId }),
-      });
-      const orderId = orderRes.order.id;
-      const orderLocationId = orderRes.order.locationId;
-      setLocationId(orderLocationId);
-
-      // P3.3: locationId prosleđen ovde — server dodaje status zalihe (OUT/
-      // LOW/OK) SAMO za OVU lokaciju uz svaki artikal (specifikacija #41/#43).
-      const [orderDetail, categoriesRes, itemsRes, meRes] = await Promise.all([
-        apiFetch(`/api/pos/orders/${orderId}`),
-        categoriesPromise,
-        apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${orderLocationId}`),
-        mePromise,
-      ]);
-
-      setOrder(orderDetail.order);
-      setCategories(categoriesRes.categories);
-      setItems(itemsRes.items);
-      setRoles(meRes.roles ?? []);
-      if (!activeCategoryId && categoriesRes.categories.length > 0) {
-        setActiveCategoryId(categoriesRes.categories[0].id);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Neočekivana greška");
-    } finally {
-      setLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tableId]);
-
+  const loadRequest = useRef<Promise<OrderData> | null>(null);
   useEffect(() => {
-    load();
-  }, [load]);
+    let active = true;
+    loadRequest.current ??= (async () => {
+      const finishTiming = waiterTiming("order-open");
+      const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
+      if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
+      const detail = await apiFetch(`/api/pos/orders/${opened.order.id}`);
+      finishTiming();
+      return detail.order as OrderData;
+    })();
+    loadRequest.current.then(value => { if (active) setOrder(value); })
+      .catch(e => { if (active) setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [tableId, shell.locationId]);
 
   // Nakon slanja porudžbine, poll-uj status stavki da konobar vidi promene
   // sa kuhinje/šanka bez ručnog osvežavanja stranice (isti MVP pristup kao
   // KDS ekrani — polling na par sekundi, bez SSE potrošnje za sada).
   useEffect(() => {
     if (!order || order.status === "DRAFT") return;
+    let active = true;
+    let pending = false;
     const interval = setInterval(async () => {
+      if (pending || mutations.pending || submittingRef.current) return;
+      pending = true;
+      const revision = mutations.revision;
+      const submission = submitRevision.current;
       try {
         const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        setOrder(refreshed.order);
+        if (active && !mutations.pending && !submittingRef.current && revision === mutations.revision && submission === submitRevision.current) setOrder(refreshed.order);
       } catch {
         // Tiha greška na pozadinskom osvežavanju — ne prekidaj rad konobara.
       }
+      finally { pending = false; }
     }, 4000);
-    return () => clearInterval(interval);
+    return () => { active = false; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.id, order?.status]);
 
-  // P3.3: dok je porudžbina OTVORENA, status zalihe se osvežava umereno u
-  // pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s). VIŠE-
+  // P3.3/P0.3: dok je porudžbina OTVORENA, status zalihe se osvežava umereno
+  // u pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s). VIŠE-
   // KRUŽNO NARUČIVANJE: NIKAD se ne gasi samo zato što je porudžbina već
   // BAR JEDNOM poslata — konobar može dodati naredni krug u bilo kom
   // trenutku dok je sto otvoren, pa svež meni/dostupnost i dalje mora da
   // stiže. Gasi se SAMO kad je porudžbina zatvorena (naplaćena/otkazana).
-  // Ne dira order/cart stanje, samo listu artikala menija.
+  // P0.3: sada zove ljusku (refreshAvailability, /api/pos/menu/availability
+  // — mali live-only odgovor) umesto sopstvenog /api/admin/menu/items poziva
+  // — isti okidač/kadenca, ali ažurira DELJENI overlay, pa sto na koji se
+  // konobar vrati posle ovoga odmah vidi već svež overlay bez čekanja.
   useEffect(() => {
-    if (!locationId || !order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
-    const interval = setInterval(async () => {
-      try {
-        const itemsRes = await apiFetch(`/api/admin/menu/items?activeOnly=true&locationId=${locationId}`);
-        setItems(itemsRes.items);
-      } catch {
-        // Tiha greška na pozadinskom osvežavanju — konobar i dalje može da radi
-        // sa poslednjim poznatim stanjem; server ionako presuđuje pri dodavanju.
-      }
+    if (!order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
+    const interval = setInterval(() => {
+      refreshAvailability().catch(() => {
+        // Tiha greška — vidi napomenu u waiter-shell.tsx refreshAvailability:
+        // zadržava poslednje poznato autoritativno stanje, server ionako
+        // presuđuje pri dodavanju.
+      });
     }, 15000);
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order?.status, locationId]);
+  }, [order?.status, refreshAvailability]);
 
   const visibleItems = useMemo(
     () => filterMenuItems(items, search, activeCategoryId),
@@ -555,14 +479,14 @@ export function OrderClient({ tableId }: { tableId: string }) {
   // coalesce into ONE network call (the last requested quantity wins)
   // instead of firing a request per tap, while every tap still updates the
   // visible count instantly (see changeQuantity below). Keyed by orderItemId.
-  const quantityDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
 
   async function withCartLock(fn: () => Promise<void>) {
-    if (cartMutationRef.current) return;
+    if (cartMutationRef.current || submittingRef.current) return;
     cartMutationRef.current = true;
     setCartBusy(true);
     try {
-      await fn();
+      await mutations.enqueue(fn);
     } finally {
       cartMutationRef.current = false;
       setCartBusy(false);
@@ -587,7 +511,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
    * repeated taps on the same menu item ALSO benefit from its debounce.
    */
   async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
-    if (!order) return;
+    if (!order || submittingRef.current || items.find(item => item.id === menuItemId)?.availability?.isAvailable !== true) return;
     setError(null);
     // VIŠE-KRUŽNO NARUČIVANJE: poklapanje "postoji, samo inkrementiraj"
     // gleda ISKLJUČIVO postojeće DRAFT redove — nikad već poslatu stavku
@@ -628,20 +552,20 @@ export function OrderClient({ tableId }: { tableId: string }) {
    * no configured normative at all — TableCore genuinely doesn't know what
    * to deduct, that's a configuration failure, not a stock shortage. */
   function handleTapMenuItem(item: MenuItem) {
-    if (cartBusy) return;
+    if (cartBusy || submittingRef.current || item.availability?.isAvailable !== true) return;
     if (item.recipeAvailability !== null && !item.recipeAvailability.configured) {
       setError(`${item.name} — normativ nije podešen.`);
       return;
     }
     if (item.modifierGroups.length === 0) {
-      addItemWithModifiers(item.id, []);
+      void addItemWithModifiers(item.id, []).catch(() => {}); // The mutation handler displays the error.
     } else {
       setModifierPickerItem(item);
     }
   }
 
   async function saveModifiersForExistingItem(item: OrderItem, modifierOptionIds: string[]) {
-    if (!order) return;
+    if (!order || submittingRef.current) return;
     setError(null);
     await withCartLock(async () => {
       try {
@@ -664,31 +588,23 @@ export function OrderClient({ tableId }: { tableId: string }) {
    * a SUBMITTED item, only DRAFT rows, same as before).
    */
   async function removeItem(itemId: string) {
-    if (!order) return;
+    if (!order || submittingRef.current) return;
     const removed = order.items.find((i) => i.id === itemId);
     if (!removed) return;
     setOrder((prev) => (prev ? { ...prev, items: prev.items.filter((i) => i.id !== itemId) } : prev));
-    const timers = quantityDebounceRef.current;
-    const pending = timers.get(itemId);
-    if (pending) {
-      clearTimeout(pending);
-      timers.delete(itemId);
-    }
-    try {
-      await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Greška — stavka nije uklonjena");
-      // Re-fetch rather than splice `removed` back in locally — the server
-      // order is authoritative for row ORDER (createdAt asc), and a manual
-      // splice would silently reshuffle the visible list on this rare
-      // failure path.
+    mutations.cancel(itemId);
+    await mutations.enqueue(async () => {
       try {
-        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        setOrder(refreshed.order);
-      } catch {
-        // Pozadinsko usklađivanje nakon greške — tiho preskoči.
+        await apiFetch(`/api/pos/orders/${order.id}/items/${itemId}`, { method: "DELETE" });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Stavka nije uklonjena");
+        try {
+          const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+          setOrder(refreshed.order);
+        } catch { /* Keep the error visible; Submit will refuse this failed mutation. */ }
+        throw e;
       }
-    }
+    }).catch(() => {});
   }
 
   /**
@@ -700,7 +616,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
    * local state back to ground truth and a clear error is shown.
    */
   async function changeQuantity(item: OrderItem, nextQuantity: number) {
-    if (!order) return;
+    if (!order || submittingRef.current) return;
     if (nextQuantity <= 0) {
       await removeItem(item.id);
       return;
@@ -710,13 +626,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
     setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, quantity: nextQuantity } : i)) } : prev));
 
     const orderId = order.id;
-    const timers = quantityDebounceRef.current;
-    const existingTimer = timers.get(item.id);
-    if (existingTimer) clearTimeout(existingTimer);
-    timers.set(
-      item.id,
-      setTimeout(async () => {
-        timers.delete(item.id);
+    mutations.schedule(item.id, async () => {
         try {
           await apiFetch(`/api/pos/orders/${orderId}/items/${item.id}`, {
             method: "PATCH",
@@ -731,9 +641,9 @@ export function OrderClient({ tableId }: { tableId: string }) {
             // Pozadinsko usklađivanje nakon greške — tiho preskoči, konobar
             // već vidi poruku o grešci iznad i može ručno da osveži.
           }
+          throw e;
         }
-      }, 350)
-    );
+    });
   }
 
   async function confirmVoid(quantity: number, reasonCode: VoidReasonCode, explanation: string) {
@@ -776,12 +686,15 @@ export function OrderClient({ tableId }: { tableId: string }) {
     // klika ostaje (submitting), plus "nema šta da se pošalje" provera na
     // UI nivou (server je i dalje autoritativan i bezbedno je no-op i bez
     // ovoga, vidi submitOrder).
-    if (!order || submitting) return;
+    if (!order || submittingRef.current) return;
     const hasDraftItems = order.items.some((i) => i.status === "DRAFT");
     if (!hasDraftItems) return;
+    submittingRef.current = true;
+    submitRevision.current++;
     setSubmitting(true);
     setError(null);
     try {
+      await mutations.flush();
       const res = await apiFetch(`/api/pos/orders/${order.id}/submit`, {
         method: "POST",
         body: JSON.stringify({ idempotencyKey: idempotencyKeyRef.current }),
@@ -794,12 +707,20 @@ export function OrderClient({ tableId }: { tableId: string }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri slanju porudžbine");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
-  if (!order) return <div className="p-6 text-danger">{error ?? "Porudžbina nije pronađena"}</div>;
+  if (!order) return (
+    <div className="min-h-screen bg-cream-200 p-3">
+      <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
+      <h1 className="text-xl font-bold">{shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina"}</h1>
+      <p role="status" className="py-3">{loading ? "Otvaramo porudžbinu…" : error ?? "Porudžbina nije pronađena"}</p>
+      <div className="flex gap-2 overflow-x-auto">{categories.map(c => <button key={c.id} onClick={() => setActiveCategoryId(c.id)} className="min-h-11 rounded-md bg-white px-4">{c.name}</button>)}</div>
+      <div className="grid grid-cols-2 gap-3 py-3 sm:grid-cols-3 lg:grid-cols-4">{visibleItems.map(item => <button key={item.id} disabled className="min-h-24 rounded-lg border border-line bg-white p-4 text-left"><span className="block font-semibold">{item.name}</span><span>{Number(item.price).toFixed(2)} RSD</span></button>)}</div>
+    </div>
+  );
 
   const hasEverSubmitted = order.status !== "DRAFT";
   const sentItems = order.items.filter((i) => i.status !== "DRAFT");
@@ -814,7 +735,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
   return (
     <div className="flex min-h-screen flex-col bg-cream-200 pb-[28rem]">
       <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
-        <button onClick={() => router.push("/waiter/tables")} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
+        <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
           ← Stolovi
         </button>
         <div className="flex items-center justify-between gap-3">
@@ -986,7 +907,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
             // Operativna dostupnost (Kuhinja/Šank "NIJE DOSTUPNO") — tvrd
             // blok, POTPUNO nezavisan od zalihe/normativa iznad. Vidi
             // availability-service.ts.
-            const isUnavailable = item.availability !== null && !item.availability.isAvailable;
+            const isUnavailable = item.availability?.isAvailable !== true;
             const isBlocked = notConfigured || isUnavailable;
             const level = item.stock?.stockStatus ?? item.recipeAvailability?.status ?? null;
             const isNegativeOrOut = level === "NEGATIVE" || level === "OUT";
@@ -1000,7 +921,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
               <button
                 key={item.id}
                 onClick={() => handleTapMenuItem(item)}
-                disabled={cartBusy || isBlocked}
+                disabled={cartBusy || submitting || isBlocked}
                 aria-disabled={isBlocked}
                 className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
                   isUnavailable
@@ -1090,7 +1011,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                       <button
                         type="button"
                         onClick={() => setEditingModifiersFor(item)}
-                        disabled={cartBusy}
+                        disabled={cartBusy || submitting}
                         className="text-left font-medium text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
                       >
                         {item.name}
@@ -1117,6 +1038,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity - 1)}
+                    disabled={submitting}
                     aria-label={`Umanji količinu — ${item.name}`}
                     className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                   >
@@ -1126,7 +1048,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity + 1)}
-                    disabled={item.quantity >= 50}
+                    disabled={submitting || item.quantity >= 50}
                     aria-label={`Povećaj količinu — ${item.name}`}
                     className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
                   >
@@ -1135,6 +1057,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
                 </div>
                 <button
                   onClick={() => removeItem(item.id)}
+                  disabled={submitting}
                   aria-label={`Ukloni — ${item.name}`}
                   className="px-2 py-2 text-xs text-danger/55 disabled:opacity-40"
                 >

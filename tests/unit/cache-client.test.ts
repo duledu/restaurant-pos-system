@@ -8,9 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mockGet = vi.fn();
 const mockSet = vi.fn();
 const mockDel = vi.fn();
+const mockIncr = vi.fn();
 
 vi.mock("@upstash/redis", () => ({
-  Redis: vi.fn().mockImplementation(() => ({ get: mockGet, set: mockSet, del: mockDel })),
+  Redis: vi.fn().mockImplementation(() => ({ get: mockGet, set: mockSet, del: mockDel, incr: mockIncr })),
 }));
 
 const ENV_URL = "UPSTASH_REDIS_REST_URL";
@@ -120,6 +121,84 @@ describe("invalidation", () => {
     const { cacheDel } = await import("../../packages/domain/cache/cache-client");
     await expect(cacheDel("some:key")).resolves.toBeUndefined();
     expect(mockDel).not.toHaveBeenCalled();
+  });
+});
+
+describe("cacheIncr — P0.2a atomic increment primitive", () => {
+  it("is a safe no-op (returns null) when Redis is not configured", async () => {
+    const { cacheIncr } = await import("../../packages/domain/cache/cache-client");
+    await expect(cacheIncr("some:counter")).resolves.toBeNull();
+    expect(mockIncr).not.toHaveBeenCalled();
+  });
+
+  it("delegates to redis.incr() — never synthesizes the increment via get+set", async () => {
+    withRedisConfigured();
+    mockIncr.mockResolvedValue(1);
+    const { cacheIncr } = await import("../../packages/domain/cache/cache-client");
+
+    const result = await cacheIncr("tablecore:restaurant:r1:menu-version");
+
+    expect(result).toBe(1);
+    expect(mockIncr).toHaveBeenCalledWith("tablecore:restaurant:r1:menu-version");
+    // Ključni dokaz atomarnosti: implementacija NIKAD ne čita pa piše nazad
+    // (što bi otvorilo trku između dva konkurentna admin uređivanja) — samo
+    // deleguje na Redis-ov sopstveni atomarni INCR.
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("returns null (never throws) when redis.incr() fails, and does not otherwise misbehave", async () => {
+    withRedisConfigured();
+    mockIncr.mockRejectedValue(new Error("Upstash timeout"));
+    const { cacheIncr } = await import("../../packages/domain/cache/cache-client");
+
+    await expect(cacheIncr("k")).resolves.toBeNull();
+  });
+});
+
+describe("cacheEnsureCounter — P0.2a correction: distinguishes 'newly initialized' from 'already existed' from 'unknown'", () => {
+  it("is a safe no-op (returns null) when Redis is not configured", async () => {
+    const { cacheEnsureCounter } = await import("../../packages/domain/cache/cache-client");
+    await expect(cacheEnsureCounter("counter", 1)).resolves.toBeNull();
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("calls SET key initialValue with { nx: true, get: true } — never a plain get-then-set", async () => {
+    withRedisConfigured();
+    mockSet.mockResolvedValue(null); // simulira: ključ nije postojao
+    const { cacheEnsureCounter } = await import("../../packages/domain/cache/cache-client");
+
+    const result = await cacheEnsureCounter("tablecore:restaurant:r1:menu-version", 1);
+
+    expect(result).toBe(1);
+    expect(mockSet).toHaveBeenCalledWith("tablecore:restaurant:r1:menu-version", 1, { nx: true, get: true });
+    expect(mockGet).not.toHaveBeenCalled(); // nema odvojenog čitanja pre pisanja — jedan atomaran poziv
+  });
+
+  it("returns the EXISTING value, unchanged, when the key already exists (SET...GET returns the old value)", async () => {
+    withRedisConfigured();
+    mockSet.mockResolvedValue(7); // simulira: ključ je već postojao sa vrednošću 7
+    const { cacheEnsureCounter } = await import("../../packages/domain/cache/cache-client");
+
+    const result = await cacheEnsureCounter("tablecore:restaurant:r1:menu-version", 1);
+
+    expect(result).toBe(7); // NIKAD resetovano na 1
+  });
+
+  it("returns null (never throws, never a fabricated number) when redis.set() fails", async () => {
+    withRedisConfigured();
+    mockSet.mockRejectedValue(new Error("Upstash timeout"));
+    const { cacheEnsureCounter } = await import("../../packages/domain/cache/cache-client");
+
+    await expect(cacheEnsureCounter("k", 1)).resolves.toBeNull();
+  });
+
+  it("defensively returns null (never a wrong-typed value) if the reply is not a number or null", async () => {
+    withRedisConfigured();
+    mockSet.mockResolvedValue("OK"); // tip komande dozvoljava "OK" iako se u praksi ne dešava sa get:true
+    const { cacheEnsureCounter } = await import("../../packages/domain/cache/cache-client");
+
+    await expect(cacheEnsureCounter("k", 1)).resolves.toBeNull();
   });
 });
 

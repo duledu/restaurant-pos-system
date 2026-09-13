@@ -1,51 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { waiterNavigationStart, waiterNavigationVisible } from "../../../lib/waiter-performance";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../components/ui/QuickLockButton";
 import { AppLogo } from "../../../components/branding/AppLogo";
 import { isTableHeldByAnotherWaiter } from "../../../lib/table-ownership";
-import { myReadyItemIds, hasNewReadyId } from "../../../lib/ready-notifications";
-import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../../lib/client-cache";
+import { useWaiterShell } from "../../../lib/waiter-shell";
 
-interface ReadyItem {
-  id: string;
-  name: string;
-}
-interface Table {
-  id: string;
-  label: string;
-  capacity: number;
-  status: "FREE" | "OCCUPIED" | "AWAITING_BILL" | "NEEDS_CLEANING";
-  // Hitna ispravka: employeeId konobara koji trenutno vodi aktivnu
-  // porudžbinu na ovom stolu (null ako nema aktivne porudžbine) — vidi
-  // table-service.ts listTables. Nikad ime/lični podaci, samo ID za
-  // poređenje sa sopstvenim nalogom PRE navigacije.
-  activeOrderOwnerId: string | null;
-  // FAZA 10: stavke SPREMNE za preuzimanje na aktivnoj porudžbini ovog
-  // stola (prazan niz kad nema nijedne) — vidi table-service.ts listTables.
-  readyItems: ReadyItem[];
-}
-
-const READY_SOUND_PREF_KEY = "tablecore.waiterReadySound";
-
-function readySoundEnabled(): boolean {
-  try {
-    return localStorage.getItem(READY_SOUND_PREF_KEY) !== "off"; // podrazumevano UKLJUČEN
-  } catch {
-    return true;
-  }
-}
-interface FloorWithTables {
-  id: string;
-  name: string;
-  tables: Table[];
-}
-interface Shift {
-  id: string;
-  status: string;
-}
+import type { Table } from "../../../lib/waiter-tables";
 
 function MoreIcon() {
   return (
@@ -120,12 +84,16 @@ async function apiFetch(url: string, options?: RequestInit) {
 
 export function PosClient() {
   const router = useRouter();
-  const [locationId, setLocationId] = useState<string | null>(null);
-  const [employeeId, setEmployeeId] = useState<string | null>(null);
-  const [employeeName, setEmployeeName] = useState<string | null>(null);
-  const [floors, setFloors] = useState<FloorWithTables[]>([]);
-  const [shift, setShift] = useState<Shift | null>(null);
-  const [loading, setLoading] = useState(true);
+  useEffect(() => { waiterNavigationVisible("tables"); }, []);
+  // P0.3: identitet/lokacija/smena/stolovi dolaze iz persistent Waiter Shell-a
+  // (apps/web/lib/waiter-shell.tsx) — pripremljeni JEDNOM po smeni u layout.tsx
+  // koji Next.js nikad ne remontira dok se konobar kreće stolovi<->porudžbina.
+  // Ovaj ekran ih SAMO čita, nikad sam ne pokreće pripremu niti ih ponovo
+  // preuzima na svaki mount.
+  const { data, setShift, readySoundOn, toggleReadySound } = useWaiterShell();
+  const { locationId, employeeId, employeeName } = data;
+  const shift = data.shift;
+  const floors = data.floors;
   const [error, setError] = useState<string | null>(null);
   const [openingCash, setOpeningCash] = useState("");
   const [opening, setOpening] = useState(false);
@@ -133,115 +101,6 @@ export function PosClient() {
   // Hitna ispravka: sto koji je zauzet od strane DRUGOG konobara — tap
   // otvara ovaj popup umesto navigacije (vidi selectTable ispod).
   const [blockedTable, setBlockedTable] = useState<Table | null>(null);
-  const [readySoundOn, setReadySoundOn] = useState(true);
-
-  // FAZA 10 — SPREMNO zvuk: `null` = bazna linija još nije uspostavljena
-  // (prvi poziv posle mount-a NIKAD ne zvoni — postojeće SPREMNO stavke iz
-  // ranije nisu "nov" događaj za OVU sesiju ekrana). Posle toga, zvoni SAMO
-  // kad se pojavi id koji ranije nije bio u skupu — nikad ponovo za isti,
-  // već poznat id (bez obzira koliko puta poll ponovi isti odgovor).
-  const knownReadyIdsRef = useRef<Set<string> | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const employeeIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    setReadySoundOn(readySoundEnabled());
-  }, []);
-
-  useEffect(() => {
-    employeeIdRef.current = employeeId;
-  }, [employeeId]);
-
-  function beepReady() {
-    if (!readySoundEnabled()) return;
-    try {
-      audioCtxRef.current ??= new AudioContext();
-      const ctx = audioCtxRef.current;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.frequency.value = 660;
-      gain.gain.setValueAtTime(0.12, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.35);
-    } catch {
-      // Audio blokiran/nepodržan u ovom browseru (autoplay politika i sl.)
-      // — vizuelno obaveštenje (bedž/pulsiranje) i dalje radi bez zvuka.
-    }
-  }
-
-  function toggleReadySound() {
-    const next = !readySoundOn;
-    setReadySoundOn(next);
-    try {
-      localStorage.setItem(READY_SOUND_PREF_KEY, next ? "on" : "off");
-    } catch {
-      // localStorage nedostupan (privatni režim i sl.) — podešavanje važi
-      // samo za trenutnu sesiju, bez greške konobaru.
-    }
-  }
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
-      const loc = me.locationIds[0];
-      if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
-      setLocationId(loc);
-      setEmployeeId(me.employeeId ?? null);
-      employeeIdRef.current = me.employeeId ?? null;
-      setEmployeeName(me.firstName ? `${me.firstName} ${me.lastName ?? ""}`.trim() : null);
-
-      const [shiftRes, tablesRes] = await Promise.all([
-        apiFetch(`/api/pos/shift?locationId=${loc}`),
-        apiFetch(`/api/pos/tables?locationId=${loc}`),
-      ]);
-      setShift(shiftRes.shift);
-      setFloors(tablesRes.floors);
-      // Bazna linija — vidi napomenu uz knownReadyIdsRef iznad.
-      const allTables = tablesRes.floors.flatMap((f: FloorWithTables) => f.tables);
-      knownReadyIdsRef.current = myReadyItemIds(allTables, me.employeeId ?? null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Neočekivana greška");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // PERF: lagan periodični poll SAMO za stolove (ne me/smena, koji se retko
-  // menjaju) — isti red veličine kao ostali "uživo" prikazi (KDS 4s, waiter
-  // stock 15s). Tiho (bez loading spinnera) i nezavisno od `loading`
-  // state-a da ne treperi ekran; greška na jednom ciklusu se tiho preskače
-  // (server ionako ostaje autoritativan pri sledećem tapu na sto).
-  const refreshTables = useCallback(async () => {
-    if (!locationId) return;
-    try {
-      const tablesRes = await apiFetch(`/api/pos/tables?locationId=${locationId}`);
-      const nextFloors: FloorWithTables[] = tablesRes.floors;
-      const nextReadyIds = myReadyItemIds(nextFloors.flatMap((f) => f.tables), employeeIdRef.current);
-      if (knownReadyIdsRef.current !== null && hasNewReadyId(knownReadyIdsRef.current, nextReadyIds)) {
-        beepReady();
-      }
-      knownReadyIdsRef.current = nextReadyIds;
-      setFloors(nextFloors);
-    } catch {
-      // Tiho pozadinsko osvežavanje — vidi napomenu iznad.
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationId]);
-
-  useEffect(() => {
-    if (!locationId) return;
-    const interval = setInterval(refreshTables, 5000);
-    return () => clearInterval(interval);
-  }, [locationId, refreshTables]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
   async function openShift() {
     if (!locationId) return;
     setOpening(true);
@@ -272,11 +131,8 @@ export function PosClient() {
       setBlockedTable(table);
       return;
     }
+    waiterNavigationStart();
     router.push(`/waiter/tables/${table.id}`);
-  }
-
-  if (loading) {
-    return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
   }
 
   if (!shift) {

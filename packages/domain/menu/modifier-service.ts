@@ -15,6 +15,12 @@
 import { prisma, Prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
+// P0.2a: modifierGroups/options su UGNJEŽDENI u SVAKI keširani menu-item red
+// (menu-service.ts listMenuItems include) — ova mutacija menja P0.1a
+// snapshot iako živi u drugom fajlu, pa MORA zvati ISTU invalidaciju/bump
+// funkciju, nikad sopstvenu paralelnu verziju (jedno mesto = jedan bump po
+// logičkoj izmeni).
+import { invalidateMenuSnapshotCache } from "./menu-service";
 import type {
   CreateModifierGroupInput,
   UpdateModifierGroupInput,
@@ -154,6 +160,7 @@ export async function createModifierGroup(ctx: AuthContext, input: CreateModifie
   const group = await prisma.modifierGroup.create({
     data: { ...input, restaurantId: ctx.restaurantId },
   });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierGroup",
     entityId: group.id,
@@ -179,6 +186,7 @@ export async function updateModifierGroup(ctx: AuthContext, groupId: string, inp
   }
 
   const updated = await prisma.modifierGroup.update({ where: { id: groupId }, data: input });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierGroup",
     entityId: groupId,
@@ -193,6 +201,7 @@ export async function setModifierGroupActive(ctx: AuthContext, groupId: string, 
   requirePermission(ctx, MENU_MANAGE);
   const existing = await getOwnedGroup(ctx, groupId);
   const updated = await prisma.modifierGroup.update({ where: { id: groupId }, data: { isActive } });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierGroup",
     entityId: groupId,
@@ -219,6 +228,7 @@ export async function createModifierOption(ctx: AuthContext, groupId: string, in
   const option = await prisma.modifierOption.create({
     data: { ...input, modifierGroupId: groupId },
   });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierOption",
     entityId: option.id,
@@ -233,6 +243,7 @@ export async function updateModifierOption(ctx: AuthContext, optionId: string, i
   const existing = await getOwnedOption(ctx, optionId);
 
   const updated = await prisma.modifierOption.update({ where: { id: optionId }, data: input });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierOption",
     entityId: optionId,
@@ -249,6 +260,7 @@ export async function setModifierOptionActive(ctx: AuthContext, optionId: string
   requirePermission(ctx, MENU_MANAGE);
   const existing = await getOwnedOption(ctx, optionId);
   const updated = await prisma.modifierOption.update({ where: { id: optionId }, data: { isActive } });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
   await recordAuditEntry(ctx, {
     entityType: "ModifierOption",
     entityId: optionId,
@@ -278,6 +290,7 @@ export async function attachModifierGroupToItem(ctx: AuthContext, menuItemId: st
   const link = await prisma.menuItemModifierGroup.create({
     data: { menuItemId, modifierGroupId: groupId, sortOrder: (maxSort._max.sortOrder ?? -1) + 1 },
   });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",
@@ -294,6 +307,7 @@ export async function detachModifierGroupFromItem(ctx: AuthContext, menuItemId: 
   if (!item) throw new Error("Artikal nije pronađen");
 
   await prisma.menuItemModifierGroup.deleteMany({ where: { menuItemId, modifierGroupId: groupId } });
+  await invalidateMenuSnapshotCache(ctx.restaurantId);
 
   await recordAuditEntry(ctx, {
     entityType: "MenuItem",

@@ -189,7 +189,7 @@ function StaffLoginForm({ deviceId, onDeviceInvalid }: { deviceId: string; onDev
         if (res.status === 423 || res.status === 429) throw new Error("Previše neuspešnih pokušaja. Pokušajte ponovo kasnije.");
         throw new Error(body.error ?? "Prijava nije uspela");
       }
-      prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
+      if (!body.redirectTo?.startsWith("/waiter/tables")) prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
       router.push(body.redirectTo ?? "/login");
       router.refresh();
     } catch (err) {
@@ -396,7 +396,7 @@ function PasswordLoginForm() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Prijava nije uspela");
-      prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
+      if (!body.redirectTo?.startsWith("/waiter/tables")) prefetchPosReferenceData(); // fire-and-forget — vidi lib/prefetch.ts
       router.push(body.redirectTo ?? "/login");
       router.refresh();
     } catch (err) {
