@@ -7,6 +7,7 @@ import { readAvailability } from "./waiter-menu";
 import { myReadyItemIds, hasNewReadyId } from "./ready-notifications";
 import { createWaiterLocalDraft, type WaiterLocalDraft } from "./waiter-local-draft";
 import { createWaiterFavorites } from "./waiter-table-memory";
+import { shareWaiterSnapshot } from "./waiter-snapshot";
 
 async function apiFetch(url: string) {
   const res = await fetch(url);
@@ -147,7 +148,10 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
       try {
         const result = await apiFetch(`/api/pos/tables?locationId=${encodeURIComponent(locationId)}`);
         if (!Array.isArray(result.floors)) throw new Error("Stolovi nisu potpuni");
-        if (active) setData(previous => ({ ...previous, floors: result.floors }));
+        if (active) setData(previous => {
+          const floors = shareWaiterSnapshot(previous.floors, result.floors);
+          return floors === previous.floors ? previous : { ...previous, floors };
+        });
       } catch { /* Keep last authoritative floors. */ }
       finally { pending = false; }
     }, 5000);
@@ -160,7 +164,15 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
       try {
         const result = await apiFetch(`/api/pos/menu/availability?locationId=${encodeURIComponent(locationId)}`);
         const overlay = readAvailability(result, locationId, initial.items);
-        if (alive.current) setData(previous => ({ ...previous, availabilityByItemId: overlay }));
+        if (alive.current) setData(previous => {
+          let changed = previous.availabilityByItemId.size !== overlay.size;
+          for (const [id, value] of overlay) {
+            const shared = shareWaiterSnapshot(previous.availabilityByItemId.get(id), value)!;
+            overlay.set(id, shared);
+            if (shared !== previous.availabilityByItemId.get(id)) changed = true;
+          }
+          return changed ? { ...previous, availabilityByItemId: overlay } : previous;
+        });
       } catch { /* Failed or incomplete snapshots must retain the last authoritative map. */ }
     })();
     availabilityRequest.current = request;

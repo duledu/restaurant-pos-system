@@ -1,6 +1,7 @@
 import { createWaiterCartMutations } from "./waiter-cart-mutations";
 import { sameModifierSelection } from "./order-cart";
 import { waiterTiming } from "./waiter-performance";
+import { shareWaiterSnapshot } from "./waiter-snapshot";
 import type { MenuItem } from "./waiter-menu";
 import type { OrderData, OrderItem } from "./waiter-order-types";
 
@@ -52,7 +53,8 @@ export function createWaiterLocalDraft() {
   function acceptRead(order: OrderData, read: ReturnType<typeof beginRead>) {
     if (read.blocked || read.sequence !== readSequence || pending() || submittingRef.current || readHolds > 0
       || read.mutation !== mutations.revision || read.submission !== submitRevision.current) return false;
-    setOrder(order);
+    const shared = shareWaiterSnapshot(snapshot.order, order);
+    if (shared !== snapshot.order) setOrder(shared);
     return true;
   }
   const visibleTimings: Array<() => void> = [];

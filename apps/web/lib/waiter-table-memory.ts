@@ -38,7 +38,10 @@ export function resolveQuickSelection(selection: Pick<MemorySelection, "menuItem
 export function quickSuggestions(recent: MemorySelection[], favorites: MemorySelection[], menu: MenuItem[]) {
   const result: Array<MemorySelection & { source: "table" | "favorite" }> = [];
   for (const [values, source] of [[recent, "table"], [favorites, "favorite"]] as const) {
-    for (const value of values) if (resolveQuickSelection(value, menu) && !result.some(previous => matches(previous, value))) result.push({ ...value, source });
+    for (const value of values) if (resolveQuickSelection(value, menu) && !result.some(previous => matches(previous, value))) {
+      result.push({ ...value, source });
+      if (result.length === 8) return result;
+    }
   }
   return result.slice(0, 8);
 }

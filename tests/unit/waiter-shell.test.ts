@@ -64,6 +64,14 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("unchanged order, table and availability polls preserve accepted references", async () => {
+    await render(h(OrderClient, { tableId: "5" }));
+    const data = shell.data;
+    const snapshot = shell.getDraft("5").getSnapshot();
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    expect(shell.data).toBe(data);
+    expect(shell.getDraft("5").getSnapshot()).toBe(snapshot);
+  });
   describe("complete active order restore", () => {
     it("a late READY poll cannot undo pickup confirmation", async () => {
       const ready = { ...order(), items: [{ ...line, status: "READY" }] };

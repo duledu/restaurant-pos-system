@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo, useSyncExternalStore, useLayoutEffect } from "react";
+import { useEffect, useState, useRef, useMemo, useSyncExternalStore, useLayoutEffect, useCallback, memo } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
@@ -341,6 +341,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const categories = shell.categories;
   const roles = shell.roles;
   const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
+  const itemById = useMemo(() => new Map(items.map(item => [item.id, item])), [items]);
   const view = useMemo(() => activeOrderView(order), [order]);
   const memory = useMemo(() => tableMemory(view.sentItems), [view]);
   const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
@@ -349,7 +350,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !draft.getSnapshot().order);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
@@ -486,7 +487,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    */
   function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]): boolean {
     if (submittingRef.current || !draft.getSnapshot().order) return false;
-    const menu = items.find(item => item.id === menuItemId);
+    const menu = itemById.get(menuItemId);
     if (!menu || menu.availability?.isAvailable !== true) return false;
     const existing = draft.add(menu, modifierOptionIds);
     if (existing && existing.quantity >= 50) return false;
@@ -672,6 +673,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     }
   }
 
+  const tapMenu = useCommittedCallback(handleTapMenuItem);
+  const updateQuantity = useCommittedCallback(changeQuantity);
+  const deleteItem = useCommittedCallback(removeItem);
+
   if (!order) return (
     <div className="min-h-screen bg-cream-200 p-3">
       <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
@@ -749,29 +754,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
                 što je izgledalo kao da pretraga "ne vraća ništa" iako je meni
                 bio ispravno učitan — samo nedostupan bez dužeg skrolovanja. */}
             <div className="max-h-[24dvh] space-y-2 overflow-y-auto rounded-md border border-line bg-white p-3">
-              {sentItems.map((item) => (
-                <div key={item.id} className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
-                  <div>
-                    <div className="font-medium text-ink">
-                      {item.quantity}× {item.name}
-                    </div>
-                    {item.modifiers.length > 0 && (
-                      <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
-                    )}
-                    {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${ITEM_STATUS_TONE[item.status]}`}>
-                      {ITEM_STATUS_LABEL[item.status]}
-                    </span>
-                    {canVoid && item.status !== "CANCELLED" && item.quantity > 0 && (
-                      <button onClick={() => setVoidingItem(item)} className="text-xs font-medium text-danger/70">
-                        Poništi
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
+              {sentItems.map(item => <HistoryRow key={item.id} item={item} canVoid={canVoid} setVoidingItem={setVoidingItem} />)}
             </div>
 
             {allServed && draftItems.length === 0 && (
@@ -860,22 +843,95 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           onChange={(e) => setSearch(e.target.value)}
         />
 
-        {!search && (
-          <div className="sticky top-[73px] z-10 flex gap-2 overflow-x-auto border-y border-line/70 bg-cream-200/95 px-3 py-2 backdrop-blur">
-            {categories.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => setActiveCategoryId(c.id)}
-                className={`min-h-11 whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-semibold transition-all ${
-                  activeCategoryId === c.id ? "bg-graphite text-white shadow-card" : "border border-line bg-white text-ink/75 hover:border-gold/50"
-                }`}
-              >
-                {c.name}
-            </button>
-          ))}
-        </div>
-      )}
+        {!search && <CategoryNavigation categories={categories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
 
+        <MenuGrid visibleItems={visibleItems} submitting={submitting} handleTapMenuItem={tapMenu} />
+      </div>
+
+      {/* Sticky pregled porudžbine — FLEX KOLONA sa eksplicitnim gornjim
+          ograničenjem visine (max-h na SPOLJNOM panelu, ne na stavkama
+          pojedinačno kao ranije). Header/footer su shrink-0 (fiksne
+          visine, nikad se ne skupljaju); JEDINO stavke (flex-1 min-h-0
+          overflow-y-auto) rastu/skupljaju se da popune šta god preostane
+          UNUTAR tog ograničenja. min-h-0 je OBAVEZAN — flex stavka bez
+          njega ne može da se skupi ispod svoje "prirodne" (sadržajem
+          određene) visine ni kad ima flex-1, što bi (stari bug) gurnulo
+          footer (Ukupno/dugme) DOLE, van vidljivog panela, kad ima dosta
+          stavki. Ranija verzija je bodovala max-h SAMO na listi stavki
+          (32dvh), a spoljni panel nije imao sopstveni plafon — na kraćim
+          telefonima/sa dosta stavki, ceo panel (header+lista+footer+dugme)
+          je mogao da preraste vidljivi deo ekrana, gurajući poslednje
+          stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
+          (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
+      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{view.count} stavki</span></div>
+        {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
+            -webkit-overflow-scrolling: touch je neophodan na starijem iOS
+            Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
+            uopšte bio touch-skrolabilan (poznato ograničenje) — bez ovoga
+            konobar fizički ne može da dođe do poslednjih stavki na nekim
+            uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
+            poslednje stavke pre linije/Ukupno ispod. */}
+        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
+          {activeItems.length === 0 && (
+            <div className="py-2 text-center text-sm text-ink/55">
+              {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
+            </div>
+          )}
+          {/* The panel represents the whole active order. Submitted rows are
+              read-only; only the separate DRAFT rows below expose mutations. */}
+          {activeSentItems.map(item => <SubmittedRow key={item.id} item={item} />)}
+          {draftItems.map(item => <DraftRow key={item.id} item={item} canEditModifiers={(itemById.get(item.menuItemId ?? "")?.modifierGroups.length ?? 0) > 0} cartBusy={cartBusy} submitting={submitting} hasEverSubmitted={hasEverSubmitted} setEditingModifiersFor={setEditingModifiersFor} changeQuantity={updateQuantity} removeItem={deleteItem} />)}
+        </div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line px-3 py-2.5">
+          <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
+          <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
+          </span>
+        </div>
+        <div className="mx-auto w-full max-w-5xl shrink-0 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
+          <button
+            onClick={submit}
+            disabled={submitting || draftItems.length === 0}
+            className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
+          >
+            {submitting ? "Slanje…" : hasEverSubmitted ? "Pošalji nove stavke" : "Pošalji porudžbinu"}
+          </button>
+        </div>
+      </div>
+
+      {modifierPickerItem && (
+        <ModifierSelectionModal
+          item={modifierPickerItem}
+          onCancel={() => setModifierPickerItem(null)}
+          onConfirm={async (optionIds) => {
+            await addItemWithModifiers(modifierPickerItem.id, optionIds);
+            setModifierPickerItem(null);
+          }}
+        />
+      )}
+      {editingModifiersFor && (() => {
+        const menuItem = items.find((mi) => mi.id === editingModifiersFor.menuItemId);
+        if (!menuItem) return null;
+        return (
+          <ModifierSelectionModal
+            item={menuItem}
+            initialSelectedIds={editingModifiersFor.modifiers.map((m) => m.modifierOptionId).filter((id): id is string => id !== null)}
+            confirmVerb="Sačuvaj"
+            onCancel={() => setEditingModifiersFor(null)}
+            onConfirm={async (optionIds) => {
+              await saveModifiersForExistingItem(editingModifiersFor, optionIds);
+              setEditingModifiersFor(null);
+            }}
+          />
+        );
+      })()}
+    </div>
+  );
+}
+
+
+const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMenuItem }: { visibleItems: MenuItem[]; submitting: boolean; handleTapMenuItem: (item: MenuItem) => void }) {
+  return (
         <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
           {visibleItems.map((item) => {
             // P1.7: recorded stock level is advisory ONLY — never disables
@@ -947,42 +1003,24 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           })}
           {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
         </div>
-      </div>
+  );
+});
 
-      {/* Sticky pregled porudžbine — FLEX KOLONA sa eksplicitnim gornjim
-          ograničenjem visine (max-h na SPOLJNOM panelu, ne na stavkama
-          pojedinačno kao ranije). Header/footer su shrink-0 (fiksne
-          visine, nikad se ne skupljaju); JEDINO stavke (flex-1 min-h-0
-          overflow-y-auto) rastu/skupljaju se da popune šta god preostane
-          UNUTAR tog ograničenja. min-h-0 je OBAVEZAN — flex stavka bez
-          njega ne može da se skupi ispod svoje "prirodne" (sadržajem
-          određene) visine ni kad ima flex-1, što bi (stari bug) gurnulo
-          footer (Ukupno/dugme) DOLE, van vidljivog panela, kad ima dosta
-          stavki. Ranija verzija je bodovala max-h SAMO na listi stavki
-          (32dvh), a spoljni panel nije imao sopstveni plafon — na kraćim
-          telefonima/sa dosta stavki, ceo panel (header+lista+footer+dugme)
-          je mogao da preraste vidljivi deo ekrana, gurajući poslednje
-          stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
-          (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{view.count} stavki</span></div>
-        {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
-            -webkit-overflow-scrolling: touch je neophodan na starijem iOS
-            Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
-            uopšte bio touch-skrolabilan (poznato ograničenje) — bez ovoga
-            konobar fizički ne može da dođe do poslednjih stavki na nekim
-            uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
-            poslednje stavke pre linije/Ukupno ispod. */}
-        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
-          {activeItems.length === 0 && (
-            <div className="py-2 text-center text-sm text-ink/55">
-              {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
-            </div>
-          )}
-          {/* The panel represents the whole active order. Submitted rows are
-              read-only; only the separate DRAFT rows below expose mutations. */}
-          {activeSentItems.map((item) => (
-            <div key={item.id} className="flex items-start justify-between gap-2 border-b border-line/50 py-2.5 text-sm">
+const CategoryNavigation = memo(function CategoryNavigation({ categories, activeCategoryId, setActiveCategoryId }: { categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; activeCategoryId: string | null; setActiveCategoryId: (id: string) => void }) { return (<div className="sticky top-[73px] z-10 flex gap-2 overflow-x-auto border-y border-line/70 bg-cream-200/95 px-3 py-2 backdrop-blur">
+            {categories.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setActiveCategoryId(c.id)}
+                className={`min-h-11 whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-semibold transition-all ${
+                  activeCategoryId === c.id ? "bg-graphite text-white shadow-card" : "border border-line bg-white text-ink/75 hover:border-gold/50"
+                }`}
+              >
+                {c.name}
+            </button>
+          ))}
+        </div>); });
+
+const SubmittedRow = memo(function SubmittedRow({ item }: { item: OrderItem }) { return (<div className="flex items-start justify-between gap-2 border-b border-line/50 py-2.5 text-sm">
               <div className="min-w-0">
                 <p className="font-medium text-ink">{item.quantity}× {item.name}</p>
                 {item.modifiers.length > 0 && <p className="text-xs text-inkSoft">{item.modifiers.map(m => m.optionName).join(", ")}</p>}
@@ -990,12 +1028,31 @@ function TableOrderClient({ tableId }: { tableId: string }) {
                 <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${ITEM_STATUS_TONE[item.status]}`}>{ITEM_STATUS_LABEL[item.status]}</span>
               </div>
               <span className="shrink-0 font-semibold tabular-nums text-ink">{(Number(item.price) * item.quantity).toFixed(2)} <span className="text-xs font-normal text-inkSoft">RSD</span></span>
-            </div>
-          ))}
-          {draftItems.map((item) => {
-            const canEditModifiers = (items.find((mi) => mi.id === item.menuItemId)?.modifierGroups.length ?? 0) > 0;
-            return (
-            <div key={item.id} className="border-b border-line/50 py-2.5 text-sm last:border-0">
+            </div>); });
+
+const HistoryRow = memo(function HistoryRow({ item, canVoid, setVoidingItem }: { item: OrderItem; canVoid: boolean; setVoidingItem: (item: OrderItem) => void }) { return (<div className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
+                  <div>
+                    <div className="font-medium text-ink">
+                      {item.quantity}× {item.name}
+                    </div>
+                    {item.modifiers.length > 0 && (
+                      <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
+                    )}
+                    {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${ITEM_STATUS_TONE[item.status]}`}>
+                      {ITEM_STATUS_LABEL[item.status]}
+                    </span>
+                    {canVoid && item.status !== "CANCELLED" && item.quantity > 0 && (
+                      <button onClick={() => setVoidingItem(item)} className="text-xs font-medium text-danger/70">
+                        Poništi
+                      </button>
+                    )}
+                  </div>
+                </div>); });
+
+const DraftRow = memo(function DraftRow({ item, canEditModifiers, cartBusy, submitting, hasEverSubmitted, setEditingModifiersFor, changeQuantity, removeItem }: { item: OrderItem; canEditModifiers: boolean; cartBusy: boolean; submitting: boolean; hasEverSubmitted: boolean; setEditingModifiersFor: (item: OrderItem) => void; changeQuantity: (item: OrderItem, quantity: number) => Promise<void>; removeItem: (id: string) => Promise<void> }) { return (<div className="border-b border-line/50 py-2.5 text-sm last:border-0">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
@@ -1056,52 +1113,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
                   Ukloni
                 </button>
               </div>
-            </div>
-            );
-          })}
-        </div>
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line px-3 py-2.5">
-          <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
-          <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
-          </span>
-        </div>
-        <div className="mx-auto w-full max-w-5xl shrink-0 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
-          <button
-            onClick={submit}
-            disabled={submitting || draftItems.length === 0}
-            className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
-          >
-            {submitting ? "Slanje…" : hasEverSubmitted ? "Pošalji nove stavke" : "Pošalji porudžbinu"}
-          </button>
-        </div>
-      </div>
+            </div>); });
 
-      {modifierPickerItem && (
-        <ModifierSelectionModal
-          item={modifierPickerItem}
-          onCancel={() => setModifierPickerItem(null)}
-          onConfirm={async (optionIds) => {
-            await addItemWithModifiers(modifierPickerItem.id, optionIds);
-            setModifierPickerItem(null);
-          }}
-        />
-      )}
-      {editingModifiersFor && (() => {
-        const menuItem = items.find((mi) => mi.id === editingModifiersFor.menuItemId);
-        if (!menuItem) return null;
-        return (
-          <ModifierSelectionModal
-            item={menuItem}
-            initialSelectedIds={editingModifiersFor.modifiers.map((m) => m.modifierOptionId).filter((id): id is string => id !== null)}
-            confirmVerb="Sačuvaj"
-            onCancel={() => setEditingModifiersFor(null)}
-            onConfirm={async (optionIds) => {
-              await saveModifiersForExistingItem(editingModifiersFor, optionIds);
-              setEditingModifiersFor(null);
-            }}
-          />
-        );
-      })()}
-    </div>
-  );
+function useCommittedCallback<Args extends unknown[], Result>(callback: (...args: Args) => Result) {
+  const ref = useRef(callback);
+  useLayoutEffect(() => { ref.current = callback; });
+  return useCallback((...args: Args) => ref.current(...args), []);
 }
