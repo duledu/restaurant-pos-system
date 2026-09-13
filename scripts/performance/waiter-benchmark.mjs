@@ -1,5 +1,6 @@
 // Database-free Chromium benchmark: real components/CSS, synthetic 200 ms APIs.
-// Usage: node scripts/performance/waiter-benchmark.mjs baseline|after
+// Usage: node scripts/performance/waiter-benchmark.mjs baseline|after [baseline-ref] [output-directory]
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { createServer } from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
@@ -8,12 +9,13 @@ import { resolve } from 'node:path';
 import { WebSocket } from 'ws';
 const label = process.argv[2];
 if (!['baseline', 'after'].includes(label)) throw new Error('Use baseline or after');
-const out = resolve('.tmp/waiter-hot-path'); await mkdir(out, { recursive: true });
+const baselineRef = process.argv[3] ?? '717d59d9b8d5dfad54468ef4c4cbe543a68e95db';
+const out = resolve(process.argv[4] ?? '.tmp/waiter-hot-path'); await mkdir(out, { recursive: true });
 const bundle = await build({ entryPoints: ['scripts/performance/waiter-fixture.tsx'], bundle: true, write: false, platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, plugins: [{ name: 'fixture', setup(b) {
   // Reproducible baseline without checking out files or changing the worktree.
   if (label === 'baseline') b.onLoad({ filter: /apps[\\/]web[\\/].*\.(ts|tsx)$/ }, async a => {
     const path = a.path.slice(resolve('.').length + 1).replaceAll('\\', '/');
-    const contents = execFileSync('git', ['show', `717d59d9b8d5dfad54468ef4c4cbe543a68e95db:${path}`], { encoding: 'utf8' });
+    const contents = execFileSync('git', ['show', `${baselineRef}:${path}`], { encoding: 'utf8' });
     return { contents, loader: path.endsWith('.tsx') ? 'tsx' : 'ts', resolveDir: resolve(a.path, '..') };
   });
   b.onResolve({ filter: /^next\/navigation$|\/AppLogo$|\/QuickLockButton$|\/LogoutButton$/ }, a => ({ path: a.path, namespace: 'stub' }));
@@ -104,6 +106,6 @@ try {
     })()`);
     runs.push(result); console.log(`${label} run ${run + 1} complete`);
   }
-  await writeFile(`${out}/${label}.json`, JSON.stringify({ environment: 'Chrome headless, production React profiling build, 4x CPU throttle, 412x915, 240 menu items/12 categories, 24 tables/80 submitted rows, synthetic 200ms API, external fonts disabled; not Android', runs }, null, 2));
-  console.log(`Results: .tmp/waiter-hot-path/${label}.json`);
+  await writeFile(`${out}/${label}.json`, JSON.stringify({ baselineRef, source: label === 'baseline' ? baselineRef : 'worktree', bundleSha256: createHash('sha256').update(bundle.outputFiles[0].text).digest('hex'), cssSha256: createHash('sha256').update(css).digest('hex'), environment: 'Chrome headless, production React profiling build, 4x CPU throttle, 412x915, 240 menu items/12 categories, 24 tables/80 submitted rows, synthetic 200ms API, external fonts disabled; not Android', runs }, null, 2));
+  console.log(`Results: ${out}/${label}.json`);
 } finally { ws?.close(); browser.kill(); server.close(); }
