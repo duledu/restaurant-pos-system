@@ -64,6 +64,76 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("P0.5 modifier quick chip enters the P0.4 draft before confirmation with current price", async () => {
+    const drink = { ...menuItem, modifierGroups: [{ group: { id: "g", name: "Dodaci", required: false, minSelect: 0, maxSelect: 1, isActive: true, options: [{ id: "lemon", name: "Limun", priceDelta: "25", isActive: true }] } }] };
+    const previous = { ...line, status: "SERVED", submittedAt: "2026-09-13T10:00:00Z", modifiers: [{ id: "mod", modifierOptionId: "lemon", groupName: "Dodaci", optionName: "Limun", priceDelta: "10" }] };
+    const pending = deferred<Response>();
+    custom = url => url.includes("/snapshot") ? response({ ...menu, items: [drink] }) : url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [previous] } }) : url === "/api/pos/orders/o5/items" ? pending.promise : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    await labelClick("Brzo dodaj — Coffee · Limun");
+    expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status === "DRAFT")).toMatchObject([{ quantity: 1, price: "225.00", modifiers: [{ modifierOptionId: "lemon" }] }]);
+    await click("Ponovi poslednju rundu"); await click("Ponovi poslednju rundu");
+    expect(shell.getDraft("5").getSnapshot().order!.items.find(i => i.status === "DRAFT")?.quantity).toBe(3);
+    await act(async () => pending.resolve(response({ item: { ...previous, id: "confirmed", status: "DRAFT", price: "225" } })));
+    const posts = calls("/api/pos/orders/o5/items"); expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0][1].body).modifierOptionIds).toEqual(["lemon"]);
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PATCH").map(([, options]) => JSON.parse(options.body))).toContainEqual({ quantity: 3 });
+  });
+  it("P0.5 Table 5 round repeats instantly, sequences rapid +1, waits on Submit and skips unavailable Pivo", async () => {
+    const drinks = ["Rakija", "Pivo", "Kisela"].map((name, i) => ({ ...menuItem, id: `m${i + 1}`, name }));
+    const history = drinks.map((drink, i) => ({ ...line, id: `submitted${i}`, menuItemId: drink.id, name: drink.name, quantity: i === 2 ? 1 : 2, status: "SERVED", submittedAt: "2026-09-13T10:00:00Z" }));
+    const pending = deferred<Response>();
+    let blocked = false, delay = false, creates = 0, submitted = false;
+    custom = (url, options) => {
+      if (url.includes("/snapshot")) return response({ ...menu, items: drinks });
+      if (url.includes("/availability")) return response({ ...overlay, items: drinks.map(drink => ({ ...overlay.items[0], menuItemId: drink.id, availability: { ...overlay.items[0].availability, isAvailable: !(blocked && drink.name === "Pivo") } })) });
+      if (url === "/api/pos/orders/o5") return response({ order: { ...order(), items: submitted ? history : [] } });
+      if (url === "/api/pos/orders/o12") return response({ order: { ...order("12"), items: [] } });
+      if (url === "/api/pos/orders/o5/items") {
+        const body = JSON.parse(String(options?.body)); const drink = drinks.find(d => d.id === body.menuItemId)!;
+        creates++;
+        if (delay && creates === 1) return pending.promise;
+        return response({ item: { ...line, id: `new${creates}`, menuItemId: drink.id, name: drink.name } });
+      }
+      if (url.endsWith("/submit")) { submitted = true; return response({ order: { ...order(), items: history } }); }
+      return undefined;
+    };
+    await render(h(OrderClient, { tableId: "5" }));
+    for (const name of ["Rakija", "Rakija", "Pivo", "Pivo", "Kisela"]) await click(name);
+    expect(shell.getDraft("5").getSnapshot().order!.items.map(i => i.quantity)).toEqual([2, 2, 1]);
+    await click("Pošalji nove stavke");
+    await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+    creates = 0; delay = true;
+    for (const drink of drinks) expect(host.querySelector(`[aria-label="Brzo dodaj — ${drink.name}"]`)).not.toBeNull();
+    const start = performance.now(); await click("Ponovi poslednju rundu");
+    for (const drink of drinks) expect(host.querySelector(`[aria-label="Ukloni — ${drink.name}"]`)).not.toBeNull();
+    expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status === "DRAFT").map(i => i.quantity)).toEqual([2, 2, 1]);
+    console.info(`P0.5 repeat to committed DOM: ${(performance.now() - start).toFixed(2)} ms; server unresolved`);
+    const chipStart = performance.now(); await labelClick("Brzo dodaj — Pivo");
+    console.info(`P0.5 quick +1 to committed DOM: ${(performance.now() - chipStart).toFixed(2)} ms; server unresolved`);
+    expect(shell.getDraft("5").getSnapshot().order!.items.find(i => i.status === "DRAFT" && i.name === "Pivo")?.quantity).toBe(3);
+    await click("Pošalji nove stavke"); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
+    await act(async () => pending.resolve(response({ item: { ...line, id: "new1", name: "Rakija" } })));
+    expect(calls("/api/pos/orders/o5/submit")).toHaveLength(2);
+    blocked = true; delay = false;
+    await act(async () => shell.refreshAvailability());
+    expect(host.querySelector('[aria-label="Brzo dodaj — Pivo"]')).toBeNull();
+    await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+    await click("Ponovi poslednju rundu");
+    expect(host.textContent).toContain("Nije moguće ponoviti: Pivo");
+    expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status === "DRAFT").map(i => i.name)).toEqual(["Rakija", "Kisela"]);
+    await render(h(OrderClient, { tableId: "12" }));
+    expect(host.textContent).not.toContain("Ponovi poslednju rundu");
+    expect(host.querySelector('[aria-label="Brzo dodaj"]')?.textContent).toContain("★");
+    expect(calls("/api/pos/menu/snapshot")).toHaveLength(1);
+  });
+  it("P0.5 favorites clear on shell unmount and another waiter starts empty", async () => {
+    await render(h(OrderClient, { tableId: "5" })); await click("Coffee");
+    const previous = shell.favorites; expect(previous.get()[0].quantity).toBe(1);
+    await act(async () => root.render(null)); expect(previous.get()).toEqual([]);
+    custom = url => url === "/api/pos/me" ? response({ restaurantId: "r1", employeeId: "e2", roles: ["WAITER"], locationIds: ["l1"] }) : undefined;
+    await render(); expect(shell.data.employeeId).toBe("e2"); expect(shell.favorites.get()).toEqual([]);
+  });
   it("gates children until complete preparation and prepares once across child navigation", async () => {
     const pending = deferred<Response>(); custom = url => url.includes("/snapshot") ? pending.promise : undefined;
     await render(); expect(host.querySelector("[data-probe]")).toBeNull();

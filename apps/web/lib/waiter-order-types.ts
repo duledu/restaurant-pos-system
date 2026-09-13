@@ -6,6 +6,7 @@ export interface OrderItemModifier {
   priceDelta: string;
 }
 export interface OrderItem {
+  submittedAt?: string | null;
   id: string;
   menuItemId: string | null;
   name: string;

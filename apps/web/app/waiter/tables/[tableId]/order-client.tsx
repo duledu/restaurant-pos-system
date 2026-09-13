@@ -13,6 +13,7 @@ import { useWaiterShell } from "../../../../lib/waiter-shell";
 import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../lib/waiter-menu";
 
 import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
+import { tableMemory, quickSuggestions, repeatRound, resolveQuickSelection } from "../../../../lib/waiter-table-memory";
 
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
@@ -331,7 +332,7 @@ export function OrderClient({ tableId }: { tableId: string }) {
 function TableOrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
   useEffect(() => { waiterNavigationVisible("menu"); }, []);
-  const { data: shell, refreshAvailability, getDraft } = useWaiterShell();
+  const { data: shell, refreshAvailability, getDraft, favorites } = useWaiterShell();
   const draft = getDraft(tableId);
   const { order, error, submitting } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
   const { setOrder, setError, mutations, submittingRef, submitRevision, idempotencyKeyRef, setSubmitting } = draft;
@@ -339,6 +340,9 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const categories = shell.categories;
   const roles = shell.roles;
   const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
+  const memory = useMemo(() => tableMemory(order?.items ?? []), [order]);
+  const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
+  const [quickFeedback, setQuickFeedback] = useState("");
 
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [search, setSearch] = useState("");
@@ -487,12 +491,15 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * optimistic changeQuantity path below instead of its own PATCH, so rapid
    * repeated taps on the same menu item ALSO benefit from its debounce.
    */
-  async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
-    if (submittingRef.current) return;
+  function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]): boolean {
+    if (submittingRef.current || !draft.getSnapshot().order) return false;
     const menu = items.find(item => item.id === menuItemId);
-    if (!menu || menu.availability?.isAvailable !== true) return;
+    if (!menu || menu.availability?.isAvailable !== true) return false;
     const existing = draft.add(menu, modifierOptionIds);
-    if (existing && existing.quantity < 50) changeQuantity(existing, existing.quantity + 1);
+    if (existing && existing.quantity >= 50) return false;
+    if (existing) void changeQuantity(existing, existing.quantity + 1);
+    favorites.record(menuItemId, modifierOptionIds);
+    return true;
   }
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
@@ -510,7 +517,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       return;
     }
     if (item.modifierGroups.length === 0) {
-      void addItemWithModifiers(item.id, []).catch(() => {}); // The mutation handler displays the error.
+      addItemWithModifiers(item.id, []); // The draft controller displays background errors.
     } else {
       setModifierPickerItem(item);
     }
@@ -803,6 +810,28 @@ function TableOrderClient({ tableId }: { tableId: string }) {
 
         {voidingItem && (
           <VoidItemModal item={voidingItem} onCancel={() => setVoidingItem(null)} onConfirm={confirmVoid} />
+        )}
+
+        {(suggestions.length > 0 || memory.lastRound.length > 0) && (
+          <section aria-label="Brzo dodaj" className="mx-3 mt-3 rounded-lg border border-line bg-white p-3">
+            <p className="mb-2 text-xs font-bold uppercase tracking-wide text-inkSoft">Brzo dodaj · Prethodno / Moji favoriti</p>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {suggestions.map((selection, index) => {
+                const menu = resolveQuickSelection(selection, items)!;
+                const names = menu.modifierGroups.flatMap(({ group }) => group.options.filter(option => selection.options.includes(option.id)).map(option => option.name));
+                const label = [menu.name, ...names].join(" · ");
+                return <button key={index} type="button" aria-label={`Brzo dodaj — ${label}`} disabled={submitting}
+                  onClick={() => { if (resolveQuickSelection(selection, items)) addItemWithModifiers(selection.menuItemId, selection.options); }}
+                  className="min-h-12 shrink-0 rounded-md border border-line px-4 text-sm font-semibold text-ink disabled:opacity-50">
+                  {label} <span className="text-gold-dark">+1</span>{selection.source === "favorite" && <span className="ml-1 text-xs text-inkSoft">★</span>}
+                </button>;
+              })}
+            </div>
+            {memory.lastRound.length > 0 && <button type="button" disabled={submitting}
+              onClick={() => setQuickFeedback(repeatRound(memory.lastRound, items, addItemWithModifiers))}
+              className="mt-2 min-h-12 w-full rounded-md bg-gold-soft px-4 font-semibold text-gold-dark disabled:opacity-50">Ponovi poslednju rundu</button>}
+            {quickFeedback && <p role="status" className="mt-2 text-sm text-inkSoft">{quickFeedback}</p>}
+          </section>
         )}
 
         {hasEverSubmitted ? (
