@@ -20,6 +20,8 @@ export const openOrderSchema = z.object({
 export type OpenOrderInput = z.infer<typeof openOrderSchema>;
 
 export const addOrderItemSchema = z.object({
+  // Optional for older clients; retries of one logical add must reuse this UUID.
+  clientMutationId: z.string().uuid().optional(),
   menuItemId: z.string().uuid(),
   quantity: z.number().int().min(1).max(50).default(1),
   note: z.string().trim().max(300).optional(),

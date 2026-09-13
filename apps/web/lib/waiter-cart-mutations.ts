@@ -22,15 +22,16 @@ export function createWaiterCartMutations() {
     const run = () => { cancel(id); void enqueue(action).catch(() => {}); };
     scheduled.set(id, { timer: setTimeout(run, 350), run });
   }
-  async function flush() {
+  async function flush(acknowledgeFailure = true) {
     for (const entry of [...scheduled.values()]) entry.run();
     await tail;
     if (failed) {
-      failed = false;
+      if (acknowledgeFailure) failed = false;
       throw new Error("Izmena porudžbine nije sačuvana. Proverite porudžbinu i pokušajte ponovo.");
     }
   }
   return { enqueue, schedule, cancel, flush,
+    acknowledgeFailure: () => { failed = false; },
     get pending() { return count > 0 || scheduled.size > 0; },
     get revision() { return revision; },
   };

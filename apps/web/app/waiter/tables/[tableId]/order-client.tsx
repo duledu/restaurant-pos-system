@@ -1,44 +1,18 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, useSyncExternalStore, useLayoutEffect } from "react";
 import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../components/ui/QuickLockButton";
 import { VOID_REASON_CODES, VOID_REASON_LABELS, isMeaningfulVoidExplanation, type VoidReasonCode } from "@rcs/shared";
-import { sameModifierSelection } from "../../../../lib/order-cart";
 import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
 import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "../../../../lib/waiter-performance";
-import { createWaiterCartMutations } from "../../../../lib/waiter-cart-mutations";
 import { useWaiterShell } from "../../../../lib/waiter-shell";
 
 import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../lib/waiter-menu";
 
-interface OrderItemModifier {
-  id: string;
-  modifierOptionId: string | null;
-  groupName: string;
-  optionName: string;
-  priceDelta: string;
-}
-interface OrderItem {
-  id: string;
-  menuItemId: string | null;
-  name: string;
-  price: string;
-  quantity: number;
-  note: string | null;
-  status: "DRAFT" | "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
-  modifiers: OrderItemModifier[];
-}
-
-interface OrderData {
-  id: string;
-  status: string;
-  guestCount: number | null;
-  items: OrderItem[];
-  table: { label: string };
-}
+import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
 
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
@@ -357,18 +331,19 @@ export function OrderClient({ tableId }: { tableId: string }) {
 function TableOrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
   useEffect(() => { waiterNavigationVisible("menu"); }, []);
-  const { data: shell, refreshAvailability } = useWaiterShell();
+  const { data: shell, refreshAvailability, getDraft } = useWaiterShell();
+  const draft = getDraft(tableId);
+  const { order, error, submitting } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
+  const { setOrder, setError, mutations, submittingRef, submitRevision, idempotencyKeyRef, setSubmitting } = draft;
+  useLayoutEffect(() => { draft.markVisible(); }, [draft, order]);
   const categories = shell.categories;
   const roles = shell.roles;
   const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
 
-  const [order, setOrder] = useState<OrderData | null>(null);
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
@@ -384,18 +359,18 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // Generisan JEDNOM po ekranu porudžbine i ponovo korišćen na svaki retry
   // — ovo je klijentska strana zaštite od dvostrukog slanja (server strana
   // je @@unique([restaurantId, idempotencyKey]) na Order tabeli).
-  const submittingRef = useRef(false);
-  const submitRevision = useRef(0);
-  const mutationsRef = useRef<ReturnType<typeof createWaiterCartMutations> | null>(null);
-  mutationsRef.current ??= createWaiterCartMutations();
-  const mutations = mutationsRef.current;
-  useEffect(() => () => { void mutations.flush().catch(() => {}); }, [mutations]);
-  const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
+  useEffect(() => () => { void draft.flush(false).catch(() => {}); }, [draft]);
 
   const loadRequest = useRef<Promise<OrderData> | null>(null);
   useEffect(() => {
     let active = true;
+    const revision = mutations.revision;
+    const submission = submitRevision.current;
+    const startedSubmitting = submittingRef.current;
     loadRequest.current ??= (async () => {
+      // Returning while a create is pending keeps the local cart visible;
+      // the authoritative read must start after that known work has settled.
+      if (draft.pending) await draft.flush(false);
       const finishTiming = waiterTiming("order-open");
       const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
       if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
@@ -403,7 +378,9 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       finishTiming();
       return detail.order as OrderData;
     })();
-    loadRequest.current.then(value => { if (active) setOrder(value); })
+    loadRequest.current.then(value => {
+      if (active && !draft.pending && revision === mutations.revision && !startedSubmitting && !submittingRef.current && submission === submitRevision.current) setOrder(value);
+    })
       .catch(e => { if (active) setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -417,13 +394,13 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     let active = true;
     let pending = false;
     const interval = setInterval(async () => {
-      if (pending || mutations.pending || submittingRef.current) return;
+      if (pending || draft.pending || submittingRef.current) return;
       pending = true;
       const revision = mutations.revision;
       const submission = submitRevision.current;
       try {
         const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        if (active && !mutations.pending && !submittingRef.current && revision === mutations.revision && submission === submitRevision.current) setOrder(refreshed.order);
+        if (active && !draft.pending && !submittingRef.current && revision === mutations.revision && submission === submitRevision.current) setOrder(refreshed.order);
       } catch {
         // Tiha greška na pozadinskom osvežavanju — ne prekidaj rad konobara.
       }
@@ -511,36 +488,11 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * repeated taps on the same menu item ALSO benefit from its debounce.
    */
   async function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]) {
-    if (!order || submittingRef.current || items.find(item => item.id === menuItemId)?.availability?.isAvailable !== true) return;
-    setError(null);
-    // VIŠE-KRUŽNO NARUČIVANJE: poklapanje "postoji, samo inkrementiraj"
-    // gleda ISKLJUČIVO postojeće DRAFT redove — nikad već poslatu stavku
-    // (iz ovog ili ranijeg kruga). "Još jedan Omlet" posle prvog slanja NE
-    // sme tiho povećati količinu VEĆ poslatog/spremanog reda (to bi
-    // izgledalo kao da je originalno poslato 3, ne 2, i pokvarilo KDS/audit
-    // istoriju) — mora postati NOV, zaseban DRAFT red (server updateItem
-    // ionako sad odbija izmenu ne-DRAFT stavke, ovo je isti gard na klijentu
-    // da se izbegne nepotreban round-trip koji bi svakako pao).
-    const existing = order.items.find(
-      (i) => i.menuItemId === menuItemId && i.status === "DRAFT" && sameModifierSelection(i.modifiers, modifierOptionIds)
-    );
-    if (existing) {
-      if (existing.quantity >= 50) return; // isto ograničenje kao addOrderItemSchema/updateOrderItemSchema
-      changeQuantity(existing, existing.quantity + 1);
-      return;
-    }
-    await withCartLock(async () => {
-      try {
-        const res = await apiFetch(`/api/pos/orders/${order.id}/items`, {
-          method: "POST",
-          body: JSON.stringify({ menuItemId, quantity: 1, modifierOptionIds }),
-        });
-        setOrder((prev) => (prev ? { ...prev, items: [...prev.items, res.item] } : prev));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Greška pri dodavanju artikla");
-        throw e; // modal treba da prikaže grešku i ostane otvoren
-      }
-    });
+    if (submittingRef.current) return;
+    const menu = items.find(item => item.id === menuItemId);
+    if (!menu || menu.availability?.isAvailable !== true) return;
+    const existing = draft.add(menu, modifierOptionIds);
+    if (existing && existing.quantity < 50) changeQuantity(existing, existing.quantity + 1);
   }
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
@@ -552,7 +504,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * no configured normative at all — TableCore genuinely doesn't know what
    * to deduct, that's a configuration failure, not a stock shortage. */
   function handleTapMenuItem(item: MenuItem) {
-    if (cartBusy || submittingRef.current || item.availability?.isAvailable !== true) return;
+    if (submittingRef.current || item.availability?.isAvailable !== true) return;
     if (item.recipeAvailability !== null && !item.recipeAvailability.configured) {
       setError(`${item.name} — normativ nije podešen.`);
       return;
@@ -589,6 +541,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    */
   async function removeItem(itemId: string) {
     if (!order || submittingRef.current) return;
+    if (draft.changePending(itemId, 0)) return;
     const removed = order.items.find((i) => i.id === itemId);
     if (!removed) return;
     setOrder((prev) => (prev ? { ...prev, items: prev.items.filter((i) => i.id !== itemId) } : prev));
@@ -600,7 +553,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
         setError(e instanceof Error ? e.message : "Stavka nije uklonjena");
         try {
           const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-          setOrder(refreshed.order);
+          draft.reconcileItem(refreshed.order, itemId);
         } catch { /* Keep the error visible; Submit will refuse this failed mutation. */ }
         throw e;
       }
@@ -617,6 +570,8 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    */
   async function changeQuantity(item: OrderItem, nextQuantity: number) {
     if (!order || submittingRef.current) return;
+    if (draft.changePending(item.id, nextQuantity)) return;
+    draft.markQuantity();
     if (nextQuantity <= 0) {
       await removeItem(item.id);
       return;
@@ -636,7 +591,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           setError(e instanceof Error ? e.message : "Greška pri izmeni količine — vraćeno na prethodno stanje");
           try {
             const refreshed = await apiFetch(`/api/pos/orders/${orderId}`);
-            setOrder(refreshed.order);
+            draft.reconcileItem(refreshed.order, item.id);
           } catch {
             // Pozadinsko usklađivanje nakon greške — tiho preskoči, konobar
             // već vidi poruku o grešci iznad i može ručno da osveži.
@@ -653,7 +608,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       body: JSON.stringify({ quantity, reasonCode, explanation }),
     });
     const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-    setOrder(refreshed.order);
+    draft.reconcileItem(refreshed.order, voidingItem.id);
     setVoidingItem(null);
   }
 
@@ -694,7 +649,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      await mutations.flush();
+      await draft.flush();
       const res = await apiFetch(`/api/pos/orders/${order.id}/submit`, {
         method: "POST",
         body: JSON.stringify({ idempotencyKey: idempotencyKeyRef.current }),
@@ -748,7 +703,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       </div>
 
       <div className="mx-auto w-full max-w-5xl">
-        {error && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error}</div>}
+        {(error || draft.retryable) && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error ?? "Izmena nije potvrđena."}{draft.retryable && <button onClick={draft.retry} className="ml-3 min-h-11 underline">Pokušaj ponovo</button>}</div>}
 
         {/* FAZA 10: najistaknutija sekcija na ekranu kad postoji bar jedna
             SPREMNA stavka — konobar mora ovo da primeti PRE menija/istorije.
@@ -921,7 +876,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
               <button
                 key={item.id}
                 onClick={() => handleTapMenuItem(item)}
-                disabled={cartBusy || submitting || isBlocked}
+                disabled={submitting || isBlocked}
                 aria-disabled={isBlocked}
                 className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
                   isUnavailable
@@ -1011,7 +966,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
                       <button
                         type="button"
                         onClick={() => setEditingModifiersFor(item)}
-                        disabled={cartBusy || submitting}
+                        disabled={cartBusy || submitting || Boolean(item.localStatus)}
                         className="text-left font-medium text-ink underline decoration-dotted underline-offset-2 disabled:opacity-60"
                       >
                         {item.name}

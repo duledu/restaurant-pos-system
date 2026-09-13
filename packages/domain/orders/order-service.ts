@@ -167,6 +167,25 @@ export async function getOrder(ctx: AuthContext, orderId: string) {
 export async function addItem(ctx: AuthContext, orderId: string, input: AddOrderItemInput) {
   const order = await getOwnedOpenOrder(ctx, orderId);
 
+  // The append-only event's existing PK is the durable add receipt. Its insert
+  // and the item insert commit together; it survives removal of a draft item.
+  const addIdentity = JSON.stringify({ menuItemId: input.menuItemId, quantity: input.quantity,
+    note: input.note ?? null, modifierOptionIds: [...(input.modifierOptionIds ?? [])].sort() });
+  async function replayAdd() {
+    if (!input.clientMutationId) return null;
+    const event = await prisma.orderEvent.findUnique({ where: { id: input.clientMutationId } });
+    if (!event) return null;
+    const receipt = event.payload as { addIdentity?: string; itemId?: string } | null;
+    if (event.orderId !== orderId || event.type !== "item_added" || receipt?.addIdentity !== addIdentity || !receipt.itemId) {
+      throw new Error("Zahtev za dodavanje nije usklađen. Pokušajte ponovo.");
+    }
+    const item = await prisma.orderItem.findFirst({ where: { id: receipt.itemId, orderId }, include: ORDER_ITEM_INCLUDE });
+    if (!item) throw new Error("Stavka je već uklonjena iz porudžbine.");
+    return item;
+  }
+  const replay = await replayAdd();
+  if (replay) return replay;
+
   const menuItem = await prisma.menuItem.findFirst({
     where: { id: input.menuItemId, restaurantId: ctx.restaurantId, deletedAt: null },
   });
@@ -209,37 +228,49 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
   // Cena se PONOVO snapshot-uje (ne menja) pri submitOrder ispod, na
   // slučaj da je cena (osnovna ili dodataka) promenjena između dodavanja u
   // draft i slanja.
-  return prisma.$transaction(async (tx) => {
-    const item = await tx.orderItem.create({
-      data: {
-        orderId,
-        menuItemId: menuItem.id,
-        name: menuItem.name,
-        price: effectivePrice,
-        taxRate: menuItem.taxRate,
-        quantity: input.quantity,
-        note: input.note,
-        preparationStation: menuItem.preparationStation,
-        modifiers: snapshotRows.length > 0 ? { createMany: { data: snapshotRows } } : undefined,
-      },
-      include: ORDER_ITEM_INCLUDE,
-    });
-
-    await tx.orderEvent.create({
-      data: {
-        orderId,
-        type: "item_added",
-        createdBy: ctx.employeeId,
-        payload: {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const item = await tx.orderItem.create({
+        data: {
+          orderId,
           menuItemId: menuItem.id,
           name: menuItem.name,
+          price: effectivePrice,
+          taxRate: menuItem.taxRate,
           quantity: input.quantity,
-          modifiers: snapshotRows.map((r) => r.optionName),
+          note: input.note,
+          preparationStation: menuItem.preparationStation,
+          modifiers: snapshotRows.length > 0 ? { createMany: { data: snapshotRows } } : undefined,
         },
-      },
+        include: ORDER_ITEM_INCLUDE,
+      });
+
+      await tx.orderEvent.create({
+        data: {
+          id: input.clientMutationId,
+          orderId,
+          type: "item_added",
+          createdBy: ctx.employeeId,
+          payload: {
+            ...(input.clientMutationId ? { addIdentity, itemId: item.id } : {}),
+            menuItemId: menuItem.id,
+            name: menuItem.name,
+            quantity: input.quantity,
+            modifiers: snapshotRows.map((r) => r.optionName),
+          },
+        },
+      });
+      return item;
     });
-    return item;
-  });
+  } catch (error) {
+    // A concurrent identical request won the event PK. Our whole transaction
+    // rolled back, including its item and modifiers; return the committed one.
+    if (input.clientMutationId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const winner = await replayAdd();
+      if (winner) return winner;
+    }
+    throw error;
+  }
 }
 
 /**

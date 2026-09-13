@@ -218,12 +218,12 @@ describe("mounted persistent waiter shell", () => {
     expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PATCH")).toHaveLength(0);
     expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "DELETE")).toHaveLength(1);
   });
-  it("Submit waits for a server-backed first add without making it optimistic", async () => {
+  it("Submit waits for the optimistic first add to be confirmed", async () => {
     const second = { ...menuItem, id: "m2", name: "Tea" };
     custom = url => url.includes("/snapshot") ? response({ ...menu, items: [menuItem, second] }) : url.includes("/availability") ? response({ ...overlay, items: [overlay.items[0], { ...overlay.items[0], menuItemId: "m2" }] }) : undefined;
     await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();
     custom = url => url === "/api/pos/orders/o5/items" ? pending.promise : undefined;
-    await click("Tea"); expect(host.querySelector('[aria-label="Ukloni — Tea"]')).toBeNull();
+    await click("Tea"); expect(host.querySelector('[aria-label="Ukloni — Tea"]')).not.toBeNull();
     await click("Pošalji nove stavke"); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(0);
     await act(async () => pending.resolve(response({ item: { ...line, id: "i2", menuItemId: "m2", name: "Tea" } })));
     expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
@@ -239,6 +239,56 @@ describe("mounted persistent waiter shell", () => {
     custom = url => url === "/api/pos/orders/o5" ? pending.promise : url.endsWith("/submit") ? response({ order: { ...order(), items: [{ ...line, status: "SUBMITTED" }] } }) : undefined;
     await act(async () => vi.advanceTimersByTimeAsync(4000)); await click("Pošalji nove stavke");
     await act(async () => pending.resolve(response({ order: order() })));
+    expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
+  });
+  it("first add paints before delayed POST, and + before confirmation stays visible", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [] } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();
+    custom = url => url === "/api/pos/orders/o5/items" ? pending.promise : undefined;
+    const start = performance.now(); await click("Coffee");
+    expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).not.toBeNull();
+    const firstAddMs = performance.now() - start;
+    await labelClick("Povećaj količinu — Coffee"); expect(host.textContent).toContain("400.00");
+    await act(async () => pending.resolve(response({ item: { ...line, id: "server-new", price: "210" } })));
+    expect(host.textContent).toContain("420.00");
+    const patches = fetchMock.mock.calls.filter(([, options]) => options?.method === "PATCH");
+    expect(patches[0][0]).toBe("/api/pos/orders/o5/items/server-new"); expect(JSON.parse(patches[0][1].body).quantity).toBe(2);
+    console.info(`P0.4 mocked-DOM first tap to committed cart: ${firstAddMs.toFixed(2)} ms (server response unresolved)`);
+  });
+  it("navigation retains pending create and remove completes against its eventual server ID", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [] } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();
+    custom = url => url === "/api/pos/orders/o5/items" ? pending.promise : undefined;
+    await click("Coffee"); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+    expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).not.toBeNull();
+    await labelClick("Ukloni — Coffee"); expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
+    await act(async () => pending.resolve(response({ item: { ...line, id: "server-new" } })));
+    expect(fetchMock.mock.calls.some(([url, options]) => url === "/api/pos/orders/o5/items/server-new" && options.method === "DELETE")).toBe(true);
+  });
+  it("status polling cannot overwrite a newly optimistic row", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [] } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" })); const poll = deferred<Response>(); const create = deferred<Response>();
+    custom = url => url === "/api/pos/orders/o5" ? poll.promise : url === "/api/pos/orders/o5/items" ? create.promise : undefined;
+    await act(async () => vi.advanceTimersByTimeAsync(4000)); await click("Coffee");
+    await act(async () => poll.resolve(response({ order: { ...order(), items: [] } })));
+    expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).not.toBeNull();
+    await act(async () => create.resolve(response({ item: { ...line, id: "server-new" } })));
+  });
+  it("rejected optimistic add rolls back without reloading reference data", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [] } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    // A 400 is a definite business rejection; 500 remains retryable.
+    custom = url => url === "/api/pos/orders/o5/items" ? { ok: false, status: 400, json: async () => ({ error: "unavailable" }) } as Response : undefined;
+    await click("Coffee"); expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
+    expect(host.textContent).toContain("Nije moguće dodati artikal"); expect(calls("/api/pos/menu/snapshot")).toHaveLength(1);
+  });
+  it("Submit guard survives navigating away and reopening the same table", async () => {
+    await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();
+    custom = url => url.endsWith("/submit") ? pending.promise : undefined;
+    await click("Pošalji nove stavke"); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+    const button = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Slanje"));
+    expect(button?.disabled).toBe(true); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
+    await act(async () => pending.resolve(response({ order: { ...order(), items: [{ ...line, status: "SUBMITTED" }] } })));
     expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
   });
 });

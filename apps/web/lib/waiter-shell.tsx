@@ -5,6 +5,7 @@ import { AppLogo } from "../components/branding/AppLogo";
 import { useShiftPreparation, type PreparationResult, type PreparationStage } from "./waiter-shift-preparation";
 import { readAvailability } from "./waiter-menu";
 import { myReadyItemIds, hasNewReadyId } from "./ready-notifications";
+import { createWaiterLocalDraft, type WaiterLocalDraft } from "./waiter-local-draft";
 
 async function apiFetch(url: string) {
   const res = await fetch(url);
@@ -19,6 +20,7 @@ export interface WaiterShellContextValue {
   refreshAvailability: () => Promise<void>;
   readySoundOn: boolean;
   toggleReadySound: () => void;
+  getDraft: (tableId: string) => WaiterLocalDraft;
 }
 const WaiterShellContext = createContext<WaiterShellContextValue | null>(null);
 export function useWaiterShell() {
@@ -59,6 +61,12 @@ export function WaiterShellProvider({ children }: { children: ReactNode }) {
 
 const SOUND_KEY = "tablecore.waiterReadySound";
 function PreparedShell({ initial, children }: { initial: PreparationResult; children: ReactNode }) {
+  const drafts = useRef(new Map<string, WaiterLocalDraft>());
+  const getDraft = useCallback((tableId: string) => {
+    let draft = drafts.current.get(tableId);
+    if (!draft) { draft = createWaiterLocalDraft(); drafts.current.set(tableId, draft); }
+    return draft;
+  }, []);
   const [data, setData] = useState(initial);
   const [readySoundOn, setReadySoundOn] = useState(true);
   const [notice, setNotice] = useState("Smena je spremna");
@@ -158,8 +166,8 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
 
   const setFloors = useCallback((floors: PreparationResult["floors"]) => setData(previous => ({ ...previous, floors })), []);
   const setShift = useCallback((shift: PreparationResult["shift"]) => setData(previous => ({ ...previous, shift })), []);
-  const value = useMemo(() => ({ data, setFloors, setShift, refreshAvailability, readySoundOn, toggleReadySound }),
-    [data, setFloors, setShift, refreshAvailability, readySoundOn, toggleReadySound]);
+  const value = useMemo(() => ({ data, setFloors, setShift, refreshAvailability, readySoundOn, toggleReadySound, getDraft }),
+    [data, setFloors, setShift, refreshAvailability, readySoundOn, toggleReadySound, getDraft]);
   return <WaiterShellContext.Provider value={value}>
     {notice && <div role="status" className="fixed right-3 top-3 z-50 rounded-md bg-gold-soft px-4 py-3 text-sm text-gold-dark shadow-card">{notice}</div>}
     {children}
