@@ -13,9 +13,13 @@ const baselineRef = process.argv[3] ?? '717d59d9b8d5dfad54468ef4c4cbe543a68e95db
 const out = resolve(process.argv[4] ?? '.tmp/waiter-hot-path'); await mkdir(out, { recursive: true });
 const bundle = await build({ entryPoints: ['scripts/performance/waiter-fixture.tsx'], bundle: true, write: false, platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, plugins: [{ name: 'fixture', setup(b) {
   // Reproducible baseline without checking out files or changing the worktree.
-  if (label === 'baseline') b.onLoad({ filter: /apps[\\/]web[\\/].*\.(ts|tsx)$/ }, async a => {
+  b.onLoad({ filter: /apps[\\/]web[\\/].*\.(ts|tsx)$/ }, async a => {
     const path = a.path.slice(resolve('.').length + 1).replaceAll('\\', '/');
-    const contents = execFileSync('git', ['show', `${baselineRef}:${path}`], { encoding: 'utf8' });
+    let contents = label === 'baseline' ? execFileSync('git', ['show', `${baselineRef}:${path}`], { encoding: 'utf8' }) : await readFile(a.path, 'utf8');
+    // Fixture-only call counts: no instrumentation is shipped in the application.
+    for (const name of ['MenuGrid', 'CategoryNavigation', 'SubmittedRow', 'DraftRow', 'QuickActionSlider']) {
+      contents = contents.replace(new RegExp('(function '+name+'\\([\\s\\S]*?\\) \\{)'), '$1 globalThis.__waiterCounts ??= {}; globalThis.__waiterCounts.'+name+' = (globalThis.__waiterCounts.'+name+' ?? 0) + 1;');
+    }
     return { contents, loader: path.endsWith('.tsx') ? 'tsx' : 'ts', resolveDir: resolve(a.path, '..') };
   });
   b.onResolve({ filter: /^next\/navigation$|\/AppLogo$|\/QuickLockButton$|\/LogoutButton$/ }, a => ({ path: a.path, namespace: 'stub' }));
@@ -63,6 +67,7 @@ try {
       const results=[];
       const count=()=>Number(document.querySelector('.fixed.bottom-0 > div:first-child > span')?.textContent.split(' ')[0] ?? 0);
       async function measure(action,fn,usable=false,delta){
+        const previousCounts={...globalThis.__waiterCounts};
         const beforeCount=count();
         const index=bench.renders.length,requestIndex=bench.requests.length;let start=performance.now(),marked=false;
         const mark=()=>{if(!marked){start=performance.now();marked=true;}};
@@ -72,7 +77,7 @@ try {
         const end=performance.now(), renders=bench.renders.slice(index);
         if(delta!==undefined && count()!==beforeCount+delta)throw new Error(action+' count mismatch: '+beforeCount+' -> '+count());
         const visibleCommit=usable?renders.find(r=>r.usableOrder||r.inspectedEmpty):renders[0];
-        results.push({action,start,firstCommitMs:renders[0]?.commitTime-start,commitMs:visibleCommit?visibleCommit.commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>({method:r.method,url:r.url,start:r.start-start,end:r.duration?r.start+r.duration-start:null}))});
+        results.push({action,start,componentCalls:Object.fromEntries(Object.entries(globalThis.__waiterCounts??{}).map(([key,value])=>[key,value-(previousCounts[key]??0)])),firstCommitMs:renders[0]?.commitTime-start,commitMs:visibleCommit?visibleCommit.commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>({method:r.method,url:r.url,start:r.start-start,end:r.duration?r.start+r.duration-start:null}))});
       }
       await measure('occupied cold open',()=>button('Table 1')?.click() || bench.navigate('/waiter/tables/1'),true);
       await wait(500);
@@ -88,6 +93,8 @@ try {
       await measure('modifier open',()=>[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Drink 0')).click());
       await measure('modifier confirm',()=>[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Dodaj')&&b.textContent.includes('RSD')).click(),false,1);await wait(700);
       await measure('quick +1',()=>named('Brzo dodaj').click(),false,1);await wait(700);
+      await measure('Kitchen quick action',()=>named('Brzo dodaj — Drink 78').click(),false,1);await wait(700);
+      await measure('Bar quick action',()=>named('Brzo dodaj — Drink 79').click(),false,1);await wait(700);
       await measure('repeat last round',()=>button('Ponovi poslednju rundu').click(),false,3);await wait(900);
       await measure('back to tables',()=>bench.navigate('/waiter/tables'));
       await measure('empty cold open',()=>bench.navigate('/waiter/tables/24'),true);await wait(500);
@@ -101,8 +108,15 @@ try {
       bench.navigate('/waiter/tables');await frames();const traceIndex=bench.requests.length;
       bench.navigate('/waiter/tables/1');await wait(550);
       for(const id of [12,24,36]){[...document.querySelectorAll('button')].find(b=>b.firstElementChild?.textContent==='Drink '+id).click();await wait(250);}
+      named('Povećaj').click();await frames();
       bench.navigate('/waiter/tables');await frames();bench.navigate('/waiter/tables/2');await wait(550);bench.navigate('/waiter/tables/1');await wait(550);
-      return {results,idle:{commits:idle.length,reactMs:idle.reduce((s,r)=>s+r.actualDuration,0)},readyDetectionMs,readyReactMs:readyRenders.reduce((s,r)=>s+r.actualDuration,0),navigationTrace:bench.requests.slice(traceIndex),requests:bench.requests,renders:bench.renders};
+      const submitStart=performance.now();button('Pošalji nove stavke').click();
+      while(!button('Pošalji nove stavke')?.disabled || document.body.textContent.includes('Slanje…')){if(performance.now()-submitStart>10000)throw new Error('Submit timed out');await frames();}
+      // Wait for the actual response and the authoritative replacement, not the busy button.
+      while(!bench.requests.find(r=>r.url.endsWith('/submit')&&r.start>=submitStart&&r.duration)){if(performance.now()-submitStart>10000)throw new Error('Submit response missing');await frames();}
+      await frames();
+      const submitRequest=bench.requests.find(r=>r.url.endsWith('/submit')&&r.start>=submitStart);
+      return {results,submit:{queueAndRequestStartMs:submitRequest.start-submitStart,httpMs:submitRequest.duration,waiterVisibleMs:performance.now()-submitStart},idle:{commits:idle.length,reactMs:idle.reduce((s,r)=>s+r.actualDuration,0)},readyDetectionMs,readyReactMs:readyRenders.reduce((s,r)=>s+r.actualDuration,0),navigationTrace:bench.requests.slice(traceIndex),requests:bench.requests,renders:bench.renders};
     })()`);
     runs.push(result); console.log(`${label} run ${run + 1} complete`);
   }

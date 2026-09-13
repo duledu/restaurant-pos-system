@@ -7,7 +7,7 @@ import { PosClient } from '../../apps/web/app/waiter/tables/pos-client';
 
 const bench = (window as any).bench = { renders: [], requests: [], delay: 200, navigate: (_: string) => {}, ready: () => {} };
 const categories = Array.from({ length: 12 }, (_, i) => ({ id: `c${i}`, name: `Category ${i}`, type: 'DRINK' }));
-const items = Array.from({ length: 240 }, (_, i) => ({ id: `m${i}`, name: `Drink ${i}`, categoryId: `c${i % 12}`, price: '200', modifierGroups: i === 0 ? [{ group: { id: 'g', name: 'Extras', isActive: true, required: false, minSelect: 0, maxSelect: 1, options: [{ id: 'lemon', name: 'Lemon', isActive: true, priceDelta: '20' }] } }] : [] }));
+const items = Array.from({ length: 240 }, (_, i) => ({ id: `m${i}`, name: `Drink ${i}`, preparationStation: i % 2 ? 'BAR' : 'KITCHEN', categoryId: `c${i % 12}`, price: '200', modifierGroups: i === 0 ? [{ group: { id: 'g', name: 'Extras', isActive: true, required: false, minSelect: 0, maxSelect: 1, options: [{ id: 'lemon', name: 'Lemon', isActive: true, priceDelta: '20' }] } }] : [] }));
 const floors = [{ id: 'f', name: 'Main', tables: Array.from({ length: 24 }, (_, i) => ({ id: `${i + 1}`, label: `Table ${i + 1}`, capacity: 4, status: i === 23 ? 'FREE' : 'OCCUPIED', activeOrderOwnerId: i === 23 ? null : 'e', readyItems: [] as any[] })) }];
 const orders = new Map(floors[0].tables.map(t => [t.id, { id: `o${t.id}`, tableId: t.id, locationId: 'l', status: t.status === 'FREE' ? 'DRAFT' : 'SUBMITTED', table: { label: t.label }, items: t.status === 'FREE' ? [] : Array.from({ length: 80 }, (_, i) => ({ id: `${t.id}-i${i}`, menuItemId: `m${i + 1}`, name: `Drink ${i + 1}`, price: '200', quantity: 1, status: 'SUBMITTED', note: null, modifiers: [], submittedAt: i < 77 ? '2026-09-13T10:00:00Z' : '2026-09-13T11:00:00Z' })) as any[] }]));
 bench.ready = () => { orders.get('1')!.items[0].status = 'READY'; floors[0].tables[0].readyItems = [{ id: '1-i0', name: 'Drink 1' }]; };
@@ -35,7 +35,10 @@ window.fetch = async (input, options = {}) => {
     const match = url.match(/\/orders\/o(\d+)(?:\/items(?:\/([^/]+))?)?/);
     if (!match) throw new Error('Unmocked API');
     const order = orders.get(match[1])!;
-    if (method === 'POST' && url.endsWith('/items')) {
+    if (method === 'POST' && url.endsWith('/submit')) {
+      order.items = order.items.map(item => item.status === 'DRAFT' ? { ...item, status: 'SUBMITTED', submittedAt: new Date().toISOString() } : item);
+      result = { order }; // Synthetic response only; does not model DB/KDS/printing.
+    } else if (method === 'POST' && url.endsWith('/items')) {
       const menu = items.find(i => i.id === body.menuItemId)!;
       const item = { id: `new${++sequence}`, menuItemId: menu.id, name: menu.name, price: body.modifierOptionIds?.length ? '220' : menu.price, quantity: body.quantity, status: 'DRAFT', note: null, modifiers: (body.modifierOptionIds ?? []).map((id: string) => ({ modifierOptionId: id, optionName: 'Lemon', priceDelta: '20' })) };
       order.items.push(item); result = { item };

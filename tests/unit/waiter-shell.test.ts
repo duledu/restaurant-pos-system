@@ -12,7 +12,7 @@ vi.mock("../../apps/web/components/branding/AppLogo", () => ({ AppLogo: () => nu
 vi.mock("../../apps/web/components/ui/QuickLockButton", () => ({ QuickLockButton: () => null }));
 vi.mock("../../apps/web/components/ui/LogoutButton", () => ({ LogoutButton: () => null }));
 
-const menuItem = { id: "m1", name: "Coffee", price: "200", categoryId: "c1", modifierGroups: [] };
+const menuItem = { id: "m1", name: "Coffee", price: "200", categoryId: "c1", preparationStation: "BAR", modifierGroups: [] };
 const menu = { restaurantId: "r1", locationId: "l1", menuVersion: 1, categories: [{ id: "c1", name: "Drinks", type: "DRINK" }], items: [menuItem] };
 const overlay = { locationId: "l1", items: [{ menuItemId: "m1", stock: null, recipeAvailability: null, availability: { isAvailable: true, reasonCode: null, reasonLabel: null } }] };
 const floors = [{ id: "f1", name: "Main", tables: ["5", "12"].map(id => ({ id, label: `Table ${id}`, status: "FREE", capacity: 4, activeOrderOwnerId: "e1", readyItems: [] })) }];
@@ -72,6 +72,56 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("station sliders add through the same optimistic queue and repeat a mixed round before responses", async () => {
+    const food = { ...menuItem, id: 'food', name: 'Omlet', preparationStation: 'KITCHEN' };
+    const history = [{ ...line, status: 'SERVED', submittedAt: '2026-09-13T10:00:00Z' }, { ...line, id: 'food-line', menuItemId: 'food', name: 'Omlet', quantity: 2, status: 'SUBMITTED', submittedAt: '2026-09-13T10:00:00Z' }];
+    const gate = deferred<void>(); let sequence = 0;
+    custom = (url, options) => {
+      if (url.includes('/snapshot')) return response({ ...menu, items: [menuItem, food] });
+      if (url.includes('/availability')) return response({ ...overlay, items: ['m1', 'food'].map(menuItemId => ({ ...overlay.items[0], menuItemId })) });
+      if (url === '/api/pos/orders/o5') return response({ order: { ...order(), items: history } });
+      if (url.endsWith('/items') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
+        return gate.promise.then(() => response({ item: { ...line, id: `added-${++sequence}`, menuItemId: body.menuItemId, name: body.menuItemId === 'food' ? 'Omlet' : 'Coffee', quantity: body.quantity } }));
+      }
+    };
+    await render(h(OrderClient, { tableId: '5' }));
+    const kitchen = host.querySelector('[role="group"][aria-label="KUHINJA"]')!;
+    const bar = host.querySelector('[role="group"][aria-label="ŠANK"]')!;
+    expect(kitchen.textContent).toContain('Omlet'); expect(kitchen.textContent).not.toContain('Coffee');
+    expect(bar.textContent).toContain('Coffee'); expect(bar.textContent).not.toContain('Omlet');
+    await labelClick('Brzo dodaj — Omlet'); await labelClick('Brzo dodaj — Coffee');
+    await click('Ponovi poslednju rundu');
+    const current = shell.getDraft('5').getSnapshot().order!;
+    expect(current.items.filter(i => i.status === 'DRAFT').reduce((n,i) => n+i.quantity, 0)).toBe(5);
+    expect(current.items.filter(i => i.status !== 'DRAFT')).toEqual(history);
+    expect(shell.getDraft('5').pending).toBe(true);
+    await act(async () => { gate.resolve(); await shell.getDraft('5').flush(); });
+    expect(shell.getDraft('5').getSnapshot().order!.items.filter(i => i.status === 'DRAFT').reduce((n,i) => n+i.quantity, 0)).toBe(5);
+  });
+  it.each(['KITCHEN', 'BAR'])("omits the empty opposite station for %s", async preparationStation => {
+    custom = url => url.includes('/snapshot') ? response({ ...menu, items: [{ ...menuItem, preparationStation }] })
+      : url === '/api/pos/orders/o5' ? response({ order: { ...order(), items: [{ ...line, status: 'SERVED', submittedAt: '2026-09-13T10:00:00Z' }] } }) : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    expect(host.querySelectorAll('section[aria-label="Brzo dodaj"] [role="group"]')).toHaveLength(1);
+    expect(host.querySelector('[role="group"]')?.getAttribute('aria-label')).toBe(preparationStation === 'KITCHEN' ? 'KUHINJA' : 'ŠANK');
+  });
+  it("cold hydration failure exposes retry without a partial menu or order creation", async () => {
+    custom = url => url.startsWith('/api/pos/orders?') ? response({ error: 'Offline' }, false) : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    expect(host.querySelector('input')).toBeNull(); expect(host.textContent).toContain('Pokušaj ponovo');
+    custom = () => undefined; await click('Pokušaj ponovo');
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
+    expect(fetchMock.mock.calls.some(([,options]) => options?.method === 'POST')).toBe(false);
+  });
+  it("cached occupied hydration stays usable during a delayed background read", async () => {
+    await render(h(OrderClient, { tableId: '5' })); await render(h(PosClient));
+    const pending = deferred<Response>(); custom = url => url.startsWith('/api/pos/orders?') ? pending.promise : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
+    expect(host.textContent).not.toContain('Pripremamo sto i porudžbinu');
+    await act(async () => pending.resolve(response({ table: { id: '5', locationId: 'l1' }, order: order() })));
+  });
   it("broad search progressively exposes every match and precise queries still search the whole menu", async () => {
     const items = Array.from({ length: 125 }, (_, i) => ({ ...menuItem, id: `m${i}`, name: `Drink ${i}` }));
     custom = url => url.includes('/snapshot') ? response({ ...menu, items })
@@ -161,8 +211,9 @@ describe("mounted persistent waiter shell", () => {
     custom = url => url.includes('/snapshot') ? response({ ...menu, categories: [...menu.categories, { id: 'c2', name: 'Food', type: 'FOOD' }], items: [menuItem, tea] })
       : url.includes('/availability') ? response({ ...overlay, items: [...overlay.items, { ...overlay.items[0], menuItemId: 'tea' }] })
       : url.startsWith('/api/pos/orders?') ? read.promise : undefined;
-    await render(h(OrderClient, { tableId: "5" })); await click('Food');
+    await render(h(OrderClient, { tableId: "5" }));
     await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: order() })));
+    await click('Food');
     const menuButtons = () => [...host.querySelectorAll('button')].filter(b => b.className.includes('min-h-[104px]')).map(b => b.textContent);
     expect(menuButtons().join()).toContain('Tea'); expect(menuButtons().join()).not.toContain('Coffee');
     await labelClick("Povećaj količinu — Coffee"); expect(menuButtons().join()).toContain('Tea');
@@ -466,14 +517,16 @@ describe("mounted persistent waiter shell", () => {
     expect(calls("/api/pos/me")).toHaveLength(1); expect(calls("/api/pos/menu/snapshot")).toHaveLength(1);
     expect(calls("/api/admin/menu/items")).toHaveLength(0); expect(calls("/api/admin/menu/categories")).toHaveLength(0);
   });
-  it("shows the prepared menu before the authoritative order resolves, without old table cart", async () => {
+  it("shows intentional cold hydration without partial menu or old table cart, then reveals immediately", async () => {
     await render(h(OrderClient, { tableId: "5" }));
     const pending = deferred<Response>(); custom = url => url === "/api/pos/orders/o12" ? pending.promise : undefined;
     await render(h(OrderClient, { tableId: "12" }));
     expect(host.textContent).toContain("Table 12"); expect(host.textContent).not.toContain("Table 5");
-    expect(host.textContent).toContain("Coffee"); expect(host.textContent).toContain("Otvaramo porudžbinu");
-    expect([...host.querySelectorAll("button")].find(b => b.textContent?.includes("Coffee"))?.disabled).toBe(true);
+    expect(host.textContent).not.toContain("Coffee"); expect(host.textContent).toContain("Pripremamo sto i porudžbinu");
+    expect(host.querySelector('input')).toBeNull(); expect(host.querySelector('.fixed.bottom-0')).toBeNull();
     await act(async () => pending.resolve(response({ order: order("12") })));
+    expect(host.querySelector('input')).not.toBeNull(); expect(host.querySelector('.fixed.bottom-0')).not.toBeNull();
+    expect(host.textContent).not.toContain("Pripremamo sto i porudžbinu");
   });
   it("Submit flushes quantity immediately and waits for its server response", async () => {
     await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();

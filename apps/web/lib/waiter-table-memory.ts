@@ -35,10 +35,15 @@ export function resolveQuickSelection(selection: Pick<MemorySelection, "menuItem
   })) return null;
   return item;
 }
-export function quickSuggestions(recent: MemorySelection[], favorites: MemorySelection[], menu: MenuItem[]) {
+export function quickActionStation(item: MenuItem): "KITCHEN" | "BAR" | null {
+  // Presentation only: dual-route items appear once. Production still uses both routes.
+  if (item.preparationStation === "KITCHEN" || item.preparationStation === "KITCHEN_AND_BAR") return "KITCHEN";
+  return item.preparationStation === "BAR" ? "BAR" : null;
+}
+export function quickSuggestions(recent: MemorySelection[], favorites: MemorySelection[], menu: MenuItem[], station?: "KITCHEN" | "BAR") {
   const result: Array<MemorySelection & { source: "table" | "favorite" }> = [];
   for (const [values, source] of [[recent, "table"], [favorites, "favorite"]] as const) {
-    for (const value of values) if (resolveQuickSelection(value, menu) && !result.some(previous => matches(previous, value))) {
+    for (const value of values) if ((!station || menu.some(item => item.id === value.menuItemId && quickActionStation(item) === station)) && resolveQuickSelection(value, menu) && !result.some(previous => matches(previous, value))) {
       result.push({ ...value, source });
       if (result.length === 8) return result;
     }

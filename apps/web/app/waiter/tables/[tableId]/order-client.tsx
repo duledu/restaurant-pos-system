@@ -15,6 +15,7 @@ import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../
 import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
 import { tableMemory, quickSuggestions, repeatRound, resolveQuickSelection } from "../../../../lib/waiter-table-memory";
 import { activeOrderView } from "../../../../lib/waiter-active-order";
+import { sameModifierSelection } from "../../../../lib/order-cart";
 
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
@@ -352,11 +353,13 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const itemById = useMemo(() => new Map(items.map(item => [item.id, item])), [items]);
   const view = useMemo(() => activeOrderView(order), [order]);
   const memory = useMemo(() => tableMemory(view.sentItems), [view]);
-  const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
+  const kitchenSuggestions = quickSuggestions(memory.recent, favorites.get(), items, "KITCHEN");
+  const barSuggestions = quickSuggestions(memory.recent, favorites.get(), items, "BAR");
   const [quickFeedback, setQuickFeedback] = useState("");
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
+  const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
@@ -399,7 +402,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     })
       .catch(e => { if (active) { setLoading(false); setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); } });
     return () => { active = false; };
-  }, [tableId, shell.locationId, draft, setError]);
+  }, [tableId, shell.locationId, draft, setError, inspectionAttempt]);
 
   const openingOrder = useRef(false);
   async function startOrder() {
@@ -702,8 +705,25 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   }
 
   const tapMenu = useCommittedCallback(handleTapMenuItem);
+  const quickAdd = useCommittedCallback((id: string, options: string[]) => {
+    if (resolveQuickSelection({ menuItemId: id, options }, items)) addItemWithModifiers(id, options);
+  });
   const updateQuantity = useCommittedCallback(changeQuantity);
   const deleteItem = useCommittedCallback(removeItem);
+
+  if (!order && !inspected) return (
+    <div className="min-h-screen bg-cream-200 p-3" aria-busy={loading}>
+      <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
+      <h1 className="text-xl font-bold">{shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina"}</h1>
+      <div className="mx-auto flex min-h-[60vh] w-full max-w-5xl items-center justify-center">
+        <div role="status" className="rounded-lg border border-line bg-white p-6 text-center text-inkSoft">
+          <p>{loading ? "Pripremamo sto i porudžbinu…" : error ?? "Porudžbina nije dostupna"}</p>
+          {!loading && <button type="button" className="mt-3 min-h-12 rounded-md bg-gold-soft px-4 font-semibold text-gold-dark"
+            onClick={() => { loadRequest.current = null; setError(null); setLoading(true); setInspectionAttempt(value => value + 1); }}>Pokušaj ponovo</button>}
+        </div>
+      </div>
+    </div>
+  );
 
   if (!order) return (
     <div className="min-h-screen bg-cream-200 p-3">
@@ -822,21 +842,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           <VoidItemModal item={voidingItem} onCancel={() => setVoidingItem(null)} onConfirm={confirmVoid} />
         )}
 
-        {(suggestions.length > 0 || memory.lastRound.length > 0) && (
+        {(kitchenSuggestions.length > 0 || barSuggestions.length > 0 || memory.lastRound.length > 0) && (
           <section aria-label="Brzo dodaj" className="mx-3 mt-3 rounded-lg border border-line bg-white p-3">
-            <p className="mb-2 text-xs font-bold uppercase tracking-wide text-inkSoft">Brzo dodaj · Prethodno / Moji favoriti</p>
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {suggestions.map((selection, index) => {
-                const menu = resolveQuickSelection(selection, items)!;
-                const names = menu.modifierGroups.flatMap(({ group }) => group.options.filter(option => selection.options.includes(option.id)).map(option => option.name));
-                const label = [menu.name, ...names].join(" · ");
-                return <button key={index} type="button" aria-label={`Brzo dodaj — ${label}`} disabled={submitting}
-                  onClick={() => { if (resolveQuickSelection(selection, items)) addItemWithModifiers(selection.menuItemId, selection.options); }}
-                  className="min-h-12 shrink-0 rounded-md border border-line px-4 text-sm font-semibold text-ink disabled:opacity-50">
-                  {label} <span className="text-gold-dark">+1</span>{selection.source === "favorite" && <span className="ml-1 text-xs text-inkSoft">★</span>}
-                </button>;
-              })}
-            </div>
+            <QuickActionSlider title="KUHINJA" selections={kitchenSuggestions} items={items} submitting={submitting} add={quickAdd} />
+            <QuickActionSlider title="ŠANK" selections={barSuggestions} items={items} submitting={submitting} add={quickAdd} />
             {memory.lastRound.length > 0 && <button type="button" disabled={submitting}
               onClick={() => setQuickFeedback(repeatRound(memory.lastRound, items, addItemWithModifiers))}
               className="mt-2 min-h-12 w-full rounded-md bg-gold-soft px-4 font-semibold text-gold-dark disabled:opacity-50">Ponovi poslednju rundu</button>}
@@ -950,6 +959,32 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   );
 }
 
+
+const QuickActionSlider = memo(function QuickActionSlider({ title, selections, items, submitting, add }: { title: string; selections: ReturnType<typeof quickSuggestions>; items: MenuItem[]; submitting: boolean; add: (id: string, options: string[]) => void }) {
+  if (!selections.length) return null;
+  return <div role="group" aria-label={title} className="mb-2 last:mb-0">
+    <p className="mb-2 text-xs font-bold uppercase tracking-wide text-inkSoft">{title}</p>
+    <div className="flex gap-2 overflow-x-auto overscroll-x-contain pb-1">
+      {selections.map(selection => {
+        const menu = resolveQuickSelection(selection, items)!;
+        const names = menu.modifierGroups.flatMap(({ group }) => group.options.filter(option => selection.options.includes(option.id)).map(option => option.name));
+        const label = [menu.name, ...names].join(" · ");
+        return <button key={JSON.stringify([selection.menuItemId, [...selection.options].sort()])} type="button" aria-label={`Brzo dodaj — ${label}`} disabled={submitting}
+          onClick={() => add(selection.menuItemId, selection.options)}
+          className="min-h-12 shrink-0 rounded-md border border-line px-4 text-sm font-semibold text-ink disabled:opacity-50">
+          {label} <span className="text-gold-dark">+1</span>{selection.source === "favorite" && <span className="ml-1 text-xs text-inkSoft">★</span>}
+        </button>;
+      })}
+    </div>
+  </div>;
+}, (previous, next) => previous.title === next.title && previous.items === next.items
+  && previous.submitting === next.submitting && previous.add === next.add
+  && previous.selections.length === next.selections.length && previous.selections.every((selection, index) => {
+    const other = next.selections[index];
+    // Scores/timestamps do not render. Order, selection and favorite badge do.
+    return selection.menuItemId === other.menuItemId && selection.source === other.source
+      && sameModifierSelection(selection.options.map(modifierOptionId => ({ modifierOptionId })), other.options);
+  }));
 
 const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMenuItem }: { visibleItems: MenuItem[]; submitting: boolean; handleTapMenuItem: (item: MenuItem) => void }) {
   return (

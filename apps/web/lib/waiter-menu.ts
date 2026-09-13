@@ -38,6 +38,8 @@ export interface RecipeAvailability {
 }
 export interface MenuItem {
   id: string;
+  // Existing authoritative menu/KDS route. Missing legacy data is not guessed.
+  preparationStation?: "KITCHEN" | "BAR" | "KITCHEN_AND_BAR" | "NONE";
   name: string;
   price: string;
   categoryId: string | null;
