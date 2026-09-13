@@ -14,6 +14,7 @@ import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../
 
 import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
 import { tableMemory, quickSuggestions, repeatRound, resolveQuickSelection } from "../../../../lib/waiter-table-memory";
+import { activeOrderView } from "../../../../lib/waiter-active-order";
 
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
@@ -340,7 +341,8 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const categories = shell.categories;
   const roles = shell.roles;
   const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
-  const memory = useMemo(() => tableMemory(order?.items ?? []), [order]);
+  const view = useMemo(() => activeOrderView(order), [order]);
+  const memory = useMemo(() => tableMemory(view.sentItems), [view]);
   const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
   const [quickFeedback, setQuickFeedback] = useState("");
 
@@ -365,46 +367,43 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // je @@unique([restaurantId, idempotencyKey]) na Order tabeli).
   useEffect(() => () => { void draft.flush(false).catch(() => {}); }, [draft]);
 
-  const loadRequest = useRef<Promise<OrderData> | null>(null);
+  const loadRequest = useRef<Promise<{ value: OrderData; read: ReturnType<typeof draft.beginRead> }> | null>(null);
   useEffect(() => {
     let active = true;
-    const revision = mutations.revision;
-    const submission = submitRevision.current;
-    const startedSubmitting = submittingRef.current;
     loadRequest.current ??= (async () => {
       // Returning while a create is pending keeps the local cart visible;
       // the authoritative read must start after that known work has settled.
       if (draft.pending) await draft.flush(false);
+      const read = draft.beginRead();
       const finishTiming = waiterTiming("order-open");
       const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
       if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
       const detail = await apiFetch(`/api/pos/orders/${opened.order.id}`);
       finishTiming();
-      return detail.order as OrderData;
+      return { value: detail.order as OrderData, read };
     })();
-    loadRequest.current.then(value => {
-      if (active && !draft.pending && revision === mutations.revision && !startedSubmitting && !submittingRef.current && submission === submitRevision.current) setOrder(value);
+    loadRequest.current.then(({ value, read }) => {
+      if (active) draft.acceptRead(value, read);
     })
       .catch(e => { if (active) setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [tableId, shell.locationId]);
+  }, [tableId, shell.locationId, draft, setError]);
 
   // Nakon slanja porudžbine, poll-uj status stavki da konobar vidi promene
   // sa kuhinje/šanka bez ručnog osvežavanja stranice (isti MVP pristup kao
   // KDS ekrani — polling na par sekundi, bez SSE potrošnje za sada).
   useEffect(() => {
-    if (!order || order.status === "DRAFT") return;
+    if (!order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
     let active = true;
     let pending = false;
     const interval = setInterval(async () => {
       if (pending || draft.pending || submittingRef.current) return;
       pending = true;
-      const revision = mutations.revision;
-      const submission = submitRevision.current;
+      const read = draft.beginRead();
       try {
         const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        if (active && !draft.pending && !submittingRef.current && revision === mutations.revision && submission === submitRevision.current) setOrder(refreshed.order);
+        if (active) draft.acceptRead(refreshed.order, read);
       } catch {
         // Tiha greška na pozadinskom osvežavanju — ne prekidaj rad konobara.
       }
@@ -441,13 +440,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     [items, activeCategoryId, search]
   );
 
-  const total = useMemo(
-    () =>
-      order?.items
-        .filter((i) => i.status !== "CANCELLED" && i.quantity > 0)
-        .reduce((sum, i) => sum + Number(i.price) * i.quantity, 0) ?? 0,
-    [order]
-  );
+  const { total } = view;
 
   // Sve izmene korpe (dodavanje/uklanjanje/promena količine) dele JEDNU
   // bravu — cartMutationRef je ref (sinhrono čitanje/pisanje, za razliku od
@@ -610,13 +603,16 @@ function TableOrderClient({ tableId }: { tableId: string }) {
 
   async function confirmVoid(quantity: number, reasonCode: VoidReasonCode, explanation: string) {
     if (!order || !voidingItem) return;
-    await apiFetch(`/api/pos/orders/${order.id}/items/${voidingItem.id}/void`, {
-      method: "POST",
-      body: JSON.stringify({ quantity, reasonCode, explanation }),
-    });
-    const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-    draft.reconcileItem(refreshed.order, voidingItem.id);
-    setVoidingItem(null);
+    const releaseReads = draft.holdReads();
+    try {
+      await apiFetch(`/api/pos/orders/${order.id}/items/${voidingItem.id}/void`, {
+        method: "POST",
+        body: JSON.stringify({ quantity, reasonCode, explanation }),
+      });
+      const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
+      draft.reconcileItem(refreshed.order, voidingItem.id);
+      setVoidingItem(null);
+    } finally { releaseReads(); }
   }
 
   /**
@@ -629,6 +625,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    */
   async function confirmPickup(item: OrderItem) {
     if (!order || pickupBusyId) return;
+    const releaseReads = draft.holdReads();
     setPickupBusyId(item.id);
     setError(null);
     setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, status: "SERVED" } : i)) } : prev));
@@ -639,6 +636,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       setOrder((prev) => (prev ? { ...prev, items: prev.items.map((i) => (i.id === item.id ? { ...i, status: "READY" } : i)) } : prev));
     } finally {
       setPickupBusyId(null);
+      releaseReads();
     }
   }
 
@@ -684,12 +682,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     </div>
   );
 
-  const sentItems = order.items.filter((i) => i.status !== "DRAFT");
-  const hasEverSubmitted = sentItems.length > 0 || order.status !== "DRAFT";
-  const activeItems = order.items.filter((i) => i.status !== "CANCELLED" && i.quantity > 0);
-  const activeSentItems = activeItems.filter((i) => i.status !== "DRAFT");
-  const draftItems = order.items.filter((i) => i.status === "DRAFT");
-  const readyItems = order.items.filter((i) => i.status === "READY");
+  const { historyItems: sentItems, hasEverSubmitted, activeItems, sentItems: activeSentItems, draftItems, readyItems } = view;
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
   // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
@@ -972,7 +965,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
           (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
       <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{activeItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{view.count} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed

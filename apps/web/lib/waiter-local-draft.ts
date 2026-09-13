@@ -35,6 +35,26 @@ export function createWaiterLocalDraft() {
   const listeners = new Set<() => void>();
   const mutations = createWaiterCartMutations();
   const creates = new Map<string, Creation>();
+  let readSequence = 0;
+  let readHolds = 0;
+  const pending = () => mutations.pending || creates.size > 0;
+  // Existing pickup/void writes are not cart mutations. Hold only full-order
+  // refresh acceptance while they reconcile, including across navigation.
+  function holdReads() {
+    readHolds++; readSequence++;
+    return () => { readHolds--; readSequence++; };
+  }
+  // Hydration and polling share this clock across route mounts. A read may
+  // replace the snapshot only if it is newest and spans no local mutation or
+  // Submit. Never merge an ambiguous server create with a temporary intent.
+  const beginRead = () => ({ sequence: ++readSequence, mutation: mutations.revision,
+    submission: submitRevision.current, blocked: pending() || submittingRef.current || readHolds > 0 });
+  function acceptRead(order: OrderData, read: ReturnType<typeof beginRead>) {
+    if (read.blocked || read.sequence !== readSequence || pending() || submittingRef.current || readHolds > 0
+      || read.mutation !== mutations.revision || read.submission !== submitRevision.current) return false;
+    setOrder(order);
+    return true;
+  }
   const visibleTimings: Array<() => void> = [];
   const emit = () => { for (const listener of listeners) listener(); };
   const setError = (error: string | null) => { snapshot = { ...snapshot, error }; emit(); };
@@ -147,11 +167,11 @@ export function createWaiterLocalDraft() {
   }
   return {
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    getSnapshot: () => snapshot, setOrder, setError, mutations, add, changePending, reconcileItem,
+    getSnapshot: () => snapshot, setOrder, setError, mutations, add, changePending, reconcileItem, beginRead, acceptRead, holdReads,
     submittingRef, submitRevision, idempotencyKeyRef, setSubmitting,
     markVisible: () => { for (const finish of visibleTimings.splice(0)) finish(); },
     markQuantity: () => { visibleTimings.push(waiterTiming("quantity-local-visible")); },
-    get pending() { return mutations.pending || creates.size > 0; },
+    get pending() { return pending(); },
     get retryable() { return [...creates.values()].some(op => op.failed); },
     retry: () => {
       mutations.acknowledgeFailure();

@@ -65,6 +65,41 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 
 describe("mounted persistent waiter shell", () => {
   describe("complete active order restore", () => {
+    it("a late READY poll cannot undo pickup confirmation", async () => {
+      const ready = { ...order(), items: [{ ...line, status: "READY" }] };
+      custom = url => url === "/api/pos/orders/o5" ? response({ order: ready }) : undefined;
+      await render(h(OrderClient, { tableId: "5" }));
+      const poll = deferred<Response>();
+      custom = url => url === "/api/pos/orders/o5" ? poll.promise : url.endsWith("/pickup") ? response({ ok: true }) : undefined;
+      await act(async () => vi.advanceTimersByTimeAsync(4000));
+      await click("Preuzeto");
+      await act(async () => poll.resolve(response({ order: ready })));
+      expect(shell.getDraft("5").getSnapshot().order!.items[0].status).toBe("SERVED");
+    });
+    it("revalidates a cached DRAFT after a racing local add discards the reopen response", async () => {
+      await render(h(OrderClient, { tableId: "5" }));
+      await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, status: "DRAFT" })));
+      await render(h(PosClient));
+      const reopen = deferred<Response>(); let reads = 0;
+      const updated = { ...order(), items: [{ ...line }, { ...line, id: "remote", name: "Other waiter round", status: "SUBMITTED" }] };
+      custom = url => url === "/api/pos/orders/o5" ? (++reads === 1 ? reopen.promise : response({ order: updated })) : undefined;
+      await render(h(OrderClient, { tableId: "5" }));
+      await labelClick("Povećaj količinu — Coffee");
+      await act(async () => reopen.resolve(response({ order: updated })));
+      await act(async () => vi.advanceTimersByTimeAsync(8000));
+      expect(host.textContent).toContain("Other waiter round");
+    });
+    it("an older reopen response cannot replace a newer polling snapshot", async () => {
+      await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient));
+      const reopen = deferred<Response>(); let reads = 0;
+      const updated = { ...order(), items: [{ ...line }, { ...line, id: "remote", name: "Other waiter round", status: "READY" }] };
+      custom = url => url === "/api/pos/orders/o5" ? (++reads === 1 ? reopen.promise : response({ order: updated })) : undefined;
+      await render(h(OrderClient, { tableId: "5" }));
+      await act(async () => vi.advanceTimersByTimeAsync(4000));
+      expect(host.textContent).toContain("Other waiter round");
+      await act(async () => reopen.resolve(response({ order: order() })));
+      expect(host.textContent).toContain("Other waiter round");
+    });
     const panel = () => host.querySelector<HTMLElement>(".fixed.bottom-0")!;
     function fixture() {
       const drinks = [menuItem, { ...menuItem, id: "m2", name: "Omlet", price: "300" }, { ...menuItem, id: "m3", name: "Cedevita", price: "150" }];
