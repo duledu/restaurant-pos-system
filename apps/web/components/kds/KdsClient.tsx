@@ -18,6 +18,7 @@ import {
 import { defaultPrintTransport, type PrintTransport } from "../../lib/print-transport";
 import { resolveAutoPrintTransport } from "../../lib/qz-auto-transport";
 import { getQzSettings, isQzAutoPrintConfigured } from "../../lib/qz-settings";
+import { ticketWaitBasis } from "../../lib/kds-wait-time";
 
 interface StationItemModifier {
   id: string;
@@ -31,6 +32,9 @@ interface StationItem {
   note: string | null;
   status: "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
   modifiers: StationItemModifier[];
+  // Per-round timestamp — see kds-wait-time.ts. NOT the same as the order's
+  // own submittedAt, which only reflects the table's FIRST-ever round.
+  submittedAt: string | null;
 }
 
 /** Dodaci moraju biti odmah uočljivi na KDS-u (specifikacija #16/#52) — "+"
@@ -328,54 +332,33 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   const tabCompletedClass = "bg-success text-white";
 
   return (
-    <div className={`min-h-screen p-3 sm:p-5 ${isBar ? "bg-[#071b2b]" : "bg-graphite-900"}`}>
-      <div className="mb-5 flex items-center justify-between border-b border-white/10 pb-4">
-        <div className="flex items-center gap-3">
+    <div className={`min-h-screen overflow-x-hidden p-3 sm:p-5 ${isBar ? "bg-[#071b2b]" : "bg-graphite-900"}`}>
+      {/* Identity row — always one compact line; title truncates instead of
+          pushing Logout off-screen at phone width (specifikacija: fizički
+          Android test, "Izveštaj" je bio van vidljivog ekrana). */}
+      <div className="mb-3 flex items-center justify-between gap-2 border-b border-white/10 pb-3">
+        <div className="flex min-w-0 items-center gap-2.5">
           <AppLogo variant="mark" theme="dark" size="sm" />
-          <div>
-            <p className={`text-[10px] font-bold uppercase tracking-[.2em] ${accentClass}`}>TableCore · produkcija</p>
-            <h1 className="text-2xl font-bold tracking-tight text-cream-100">{title}</h1>
+          <div className="min-w-0">
+            <p className={`truncate text-[10px] font-bold uppercase tracking-[.2em] ${accentClass}`}>TableCore · produkcija</p>
+            <h1 className="truncate text-xl font-bold tracking-tight text-cream-100 sm:text-2xl">{title}</h1>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded-md border border-white/10 bg-white/[.05] px-3 py-2 text-xs font-semibold tabular-nums text-cream-300/80">
-            {orders.length} aktivnih
-          </span>
-          <Link
-            href={station === "KITCHEN" ? "/kitchen/availability" : "/bar/availability"}
-            className="flex min-h-11 items-center rounded-md border border-white/10 bg-white/[.05] px-3 text-xs font-semibold text-cream-300/80 hover:bg-white/[.1]"
-          >
-            Dostupnost
-          </Link>
-          <Link
-            href={station === "KITCHEN" ? "/kitchen/report" : "/bar/report"}
-            className="flex min-h-11 items-center rounded-md border border-white/10 bg-white/[.05] px-3 text-xs font-semibold text-cream-300/80 hover:bg-white/[.1]"
-          >
-            Izveštaj
-          </Link>
-          {/* P0.17: SAMO informativno — podešavanje se radi u Admin →
-              Podešavanja → Štampači (ADMIN_ROLES), nikad ovde. Nema klika,
-              nema kontrola — Kuhinja/Šank ne "podešavaju", samo vide status. */}
-          <span
-            title={qzConfigured ? "Štampač podešen za automatsku QZ štampu na ovom računaru" : "QZ štampač nije podešen — obratite se administratoru"}
-            className={`flex min-h-11 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold ${
-              qzConfigured ? "border-success/30 bg-success/10 text-success" : "border-white/10 bg-white/[.05] text-cream-300/60"
-            }`}
-          >
-            <span className={`h-1.5 w-1.5 rounded-full ${qzConfigured ? "bg-success" : "bg-cream-300/40"}`} aria-hidden="true" />
-            {qzConfigured ? "Štampač: Spreman" : "Štampač nije podešen"}
-          </span>
-          <LogoutButton theme="dark" />
-        </div>
+        <LogoutButton theme="dark" />
       </div>
 
-      {/* Tab strip */}
-      <div className="mb-5 flex gap-2">
+      {/* Aktivne/Gotove — primarni operativni kontroli (specifikacija:
+          hijerarhija #2, odmah posle identiteta). Puna širina, segmentovana
+          kontrola — ne dve odvojene "pilule" — da bude nedvosmisleno
+          najistaknutiji element ekrana na telefonu. */}
+      <div role="tablist" aria-label="Prikaz porudžbina" className="mb-3 flex gap-1 rounded-lg bg-white/[.06] p-1">
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "active"}
           onClick={() => setTab("active")}
-          className={`flex min-h-11 items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-            tab === "active" ? tabActiveClass : "bg-white/[.07] text-cream-300/70 hover:bg-white/[.11]"
+          className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md text-sm font-bold transition-colors ${
+            tab === "active" ? tabActiveClass : "text-cream-300/70 hover:bg-white/[.06]"
           }`}
         >
           Aktivne
@@ -389,9 +372,11 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "completed"}
           onClick={() => setTab("completed")}
-          className={`flex min-h-11 items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-            tab === "completed" ? tabCompletedClass : "bg-white/[.07] text-cream-300/70 hover:bg-white/[.11]"
+          className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md text-sm font-bold transition-colors ${
+            tab === "completed" ? tabCompletedClass : "text-cream-300/70 hover:bg-white/[.06]"
           }`}
         >
           Gotove
@@ -403,6 +388,38 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
             </span>
           )}
         </button>
+      </div>
+
+      {/* Sekundarna navigacija (Dostupnost/Izveštaj/štampač status) —
+          namerno manja/tiša od gornje segmentovane kontrole i UVEK wrap-uje
+          (nikad horizontalni overflow) umesto da forsira jedan red koji je
+          širi od telefona. "N aktivnih" je uklonjeno odavde — već je
+          prikazano na Aktivne dugmetu iznad, bez dupliranja. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Link
+          href={station === "KITCHEN" ? "/kitchen/availability" : "/bar/availability"}
+          className="flex min-h-9 items-center justify-center rounded-md border border-white/10 bg-white/[.04] px-3 text-xs font-semibold text-cream-300/70 hover:bg-white/[.08]"
+        >
+          Dostupnost
+        </Link>
+        <Link
+          href={station === "KITCHEN" ? "/kitchen/report" : "/bar/report"}
+          className="flex min-h-9 items-center justify-center rounded-md border border-white/10 bg-white/[.04] px-3 text-xs font-semibold text-cream-300/70 hover:bg-white/[.08]"
+        >
+          Izveštaj
+        </Link>
+        {/* P0.17: SAMO informativno — podešavanje se radi u Admin →
+            Podešavanja → Štampači (ADMIN_ROLES), nikad ovde. Nema klika,
+            nema kontrola — Kuhinja/Šank ne "podešavaju", samo vide status. */}
+        <span
+          title={qzConfigured ? "Štampač podešen za automatsku QZ štampu na ovom računaru" : "QZ štampač nije podešen — obratite se administratoru"}
+          className={`flex min-h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold ${
+            qzConfigured ? "border-success/30 bg-success/10 text-success" : "border-white/10 bg-white/[.04] text-cream-300/60"
+          }`}
+        >
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${qzConfigured ? "bg-success" : "bg-cream-300/40"}`} aria-hidden="true" />
+          {qzConfigured ? "Štampač: Spreman" : "Štampač nije podešen"}
+        </span>
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
@@ -418,7 +435,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         ) : (
           <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {orders.map((order) => {
-              const waitMin = minutesSince(order.submittedAt);
+              const waitMin = minutesSince(ticketWaitBasis(order.submittedAt, order.items));
               const isLate = waitMin >= 12;
               const failedJob = failedPrintJobs.find((j) => j.orderId === order.orderId);
               return (
@@ -428,12 +445,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                     isLate ? "border-warn" : "border-graphite-700"
                   }`}
                 >
-                  <div className="flex items-center justify-between border-b border-white/10 bg-black/10 px-4 py-3">
-                    <div>
-                      <div className="text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
-                      <div className="mt-0.5 text-xs font-medium text-cream-300/70">Konobar · {order.waiterName}</div>
+                  <div className="flex items-center justify-between gap-2 border-b border-white/10 bg-black/10 px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
+                      <div className="truncate text-xs font-medium text-cream-300/70">Konobar · {order.waiterName}</div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-2">
                       <span className={`rounded-md px-2.5 py-1 text-xs font-bold tabular-nums ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/80"}`}>
                         {waitMin} min
                       </span>
@@ -468,7 +485,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                     {order.items.map((item) => (
                       <div key={item.id} className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
                         <div className="flex items-start justify-between gap-2">
-                          <div>
+                          <div className="min-w-0">
                             <div className="text-base font-semibold leading-snug text-cream-100">
                               {item.quantity}× {item.name}
                             </div>
@@ -512,12 +529,12 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                 key={order.orderId}
                 className="overflow-hidden rounded-lg border border-success/20 bg-graphite-700/60 shadow-[0_8px_18px_rgba(0,0,0,.18)]"
               >
-                <div className="flex items-center justify-between border-b border-white/[.06] bg-success/[.07] px-4 py-3">
-                  <div>
-                    <div className="text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
-                    <div className="mt-0.5 text-xs font-medium text-cream-300/60">Konobar · {order.waiterName}</div>
+                <div className="flex items-center justify-between gap-2 border-b border-white/[.06] bg-success/[.07] px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
+                    <div className="truncate text-xs font-medium text-cream-300/60">Konobar · {order.waiterName}</div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <span className="rounded-md bg-success/20 px-2.5 py-1 text-xs font-bold tabular-nums text-success">
                       {formatTime(order.completedAt)}
                     </span>

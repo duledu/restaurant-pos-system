@@ -1,31 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { tableMemory, resolveQuickSelection, quickSuggestions, quickActionStation, repeatRound, createWaiterFavorites } from "../../apps/web/lib/waiter-table-memory";
+import { tableMemory, resolveQuickSelection, quickSuggestions, repeatRound, createWaiterFavorites } from "../../apps/web/lib/waiter-table-memory";
 import type { OrderItem } from "../../apps/web/lib/waiter-order-types";
 import type { MenuItem } from "../../apps/web/lib/waiter-menu";
 const menu: MenuItem = { id: "beer", name: "Pivo", price: "250", categoryId: null, modifierGroups: [], stock: null, recipeAvailability: null, availability: { isAvailable: true, reasonCode: null, reasonLabel: null } };
 const line: OrderItem = { id: "i", menuItemId: "beer", name: "Pivo", price: "100", quantity: 2, note: null, modifiers: [], status: "SERVED", submittedAt: "2026-09-13T10:00:00Z" };
 describe("table memory", () => {
-  it.each([['KITCHEN', 'KITCHEN'], ['BAR', 'BAR'], ['KITCHEN_AND_BAR', 'KITCHEN'], ['NONE', null], [undefined, null]] as const)("routes %s from authoritative preparation station to %s", (preparationStation, expected) => {
-    expect(quickActionStation({ ...menu, preparationStation })).toBe(expected);
-  });
-  it("ranks independently without starving one station or duplicating dual-routed items", () => {
-    const menus: MenuItem[] = Array.from({ length: 12 }, (_, i) => ({ ...menu, id: String(i), preparationStation: i < 10 ? 'BAR' : 'KITCHEN' }));
-    menus.push({ ...menu, id: 'dual', preparationStation: 'KITCHEN_AND_BAR' });
-    const recent = menus.map(item => ({ menuItemId: item.id, options: [], quantity: 1, recent: 1 }));
-    const kitchen = quickSuggestions(recent, recent, menus, 'KITCHEN');
-    const bar = quickSuggestions(recent, recent, menus, 'BAR');
-    expect(kitchen.map(x => x.menuItemId)).toEqual(['10', '11', 'dual']);
-    expect(bar.map(x => x.menuItemId)).toEqual(['0','1','2','3','4','5','6','7']);
-    expect(kitchen.every(k => !bar.some(b => b.menuItemId === k.menuItemId))).toBe(true);
-  });
-  it("station ranking keeps recent ahead of favorites and rejects unavailable selections", () => {
-    const kitchen = { ...menu, preparationStation: 'KITCHEN' as const };
-    const recent = tableMemory([line]).recent;
-    const favorite = { ...recent[0], menuItemId: 'favorite' };
-    expect(quickSuggestions(recent, [favorite, ...recent], [kitchen, { ...kitchen, id: 'favorite' }], 'KITCHEN').map(x => x.source)).toEqual(['table','favorite']);
-    expect(quickSuggestions(recent, [], [{ ...kitchen, availability: null }], 'KITCHEN')).toEqual([]);
-    expect(quickSuggestions(recent, [], [kitchen], 'BAR')).toEqual([]);
-  });
   it("mixed round remains one action across both stations and preserves all quantities", () => {
     const add = vi.fn(() => true);
     const feedback = repeatRound([line, { ...line, menuItemId: 'food', quantity: 3 }], [{ ...menu, preparationStation: 'BAR' }, { ...menu, id: 'food', preparationStation: 'KITCHEN' }], add);

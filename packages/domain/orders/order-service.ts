@@ -407,6 +407,76 @@ export async function removeItem(ctx: AuthContext, orderId: string, itemId: stri
 }
 
 /**
+ * "Oslobodi sto" — konobar zatvara PRAZNU, NIKAD poslatu porudžbinu (npr.
+ * gost ode pre naručivanja) i odmah oslobađa sto, bez čekanja menadžera.
+ * NAMERNO ograničeno na status DRAFT — čim je porudžbina IJEDNOM poslata
+ * (bilo koji drugi status), ovo se odbija; jedini put za zatvaranje takve
+ * porudžbine ostaje postojeći menadžment Void/otkazivanje tok
+ * (cancelAbandonedOrder u void-service.ts), koji ovo namerno NE zaobilazi.
+ * Ista DRAFT-vlasništvo pravila kao svaka druga DRAFT izmena (requireDraftOwnership)
+ * — nije potreban nov koncept ovlašćenja. Ne briše Order/OrderItem redove,
+ * samo ih CANCELLED-uje (isti duh kao cancelAbandonedOrder) — audit trag
+ * (order_opened -> order_released_empty) ostaje čitav.
+ */
+export async function releaseEmptyTable(ctx: AuthContext, orderId: string) {
+  const order = await prisma.order.findFirst({ where: { id: orderId, ...scopeToRestaurant(ctx) } });
+  if (!order) throw new Error("Porudžbina nije pronađena");
+  requireLocationAccess(ctx, order.locationId);
+  requireDraftOwnership(ctx, order.openedBy);
+
+  if (order.status !== "DRAFT") {
+    throw new Error("Porudžbina je već poslata kuhinji/šanku — koristi Poništi/otkazivanje umesto Oslobodi sto");
+  }
+
+  // Odbrambena provera kao i cancelAbandonedOrder — DRAFT porudžbina danas
+  // ne može imati Payment red, ali se ne oslanjamo samo na status.
+  const existingPayment = await prisma.payment.findFirst({ where: { orderId }, select: { id: true } });
+  if (existingPayment) {
+    throw new Error("Porudžbina ima evidentirano plaćanje — ne može se osloboditi ovim putem");
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Atomska brava PROTIV konkurentnog Submit-a: ako je neko u međuvremenu
+    // poslao stavku (status više nije DRAFT), ovaj updateMany pogađa nula
+    // redova i osloboditi se NE SME nastaviti — sto ostaje zauzet umesto da
+    // izgubi upravo poslat rad.
+    const guard = await tx.order.updateMany({
+      where: { id: orderId, status: "DRAFT" },
+      data: { status: "CANCELLED" },
+    });
+    if (guard.count !== 1) {
+      throw new Error("Porudžbina je u međuvremenu poslata ili zatvorena — sto nije oslobođeno");
+    }
+
+    // Sveža lista stavki UNUTAR transakcije (ne iz prvobitnog čitanja) — isti
+    // razlog kao cancelAbandonedOrder: zatvara prozor za paralelni dodatak.
+    await tx.orderItem.updateMany({
+      where: { orderId, status: { not: "CANCELLED" } },
+      data: { status: "CANCELLED" },
+    });
+
+    await tx.restaurantTable.updateMany({
+      where: { id: order.tableId },
+      data: { status: "FREE" },
+    });
+
+    await tx.orderEvent.create({
+      data: { orderId, type: "order_released_empty", createdBy: ctx.employeeId },
+    });
+  });
+
+  await ssePublisher.publish({
+    type: "order.cancelled",
+    restaurantId: ctx.restaurantId,
+    locationId: order.locationId,
+    payload: { orderId, tableId: order.tableId },
+    occurredAt: new Date().toISOString(),
+  });
+
+  return { orderId, status: "CANCELLED" as const };
+}
+
+/**
  * Slanje porudžbine — jedina kritična transakcija u Fazi 3, PROŠIRENA u
  * Fazi 9 za VIŠE-KRUŽNO NARUČIVANJE: "poslato" NIKAD ne znači "ova
  * porudžbina više ne prima stavke" — samo "trenutno neposlate (DRAFT)

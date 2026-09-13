@@ -10,7 +10,7 @@ import { formatStockQty } from "../../../../lib/stock-format";
 import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "../../../../lib/waiter-performance";
 import { useWaiterShell } from "../../../../lib/waiter-shell";
 
-import { mergeWaiterMenu, type MenuItem, type ModifierGroup } from "../../../../lib/waiter-menu";
+import { mergeWaiterMenu, menuSectionsForItem, type MenuItem, type MenuSection, type ModifierGroup } from "../../../../lib/waiter-menu";
 
 import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
 import { tableMemory, quickSuggestions, repeatRound, resolveQuickSelection } from "../../../../lib/waiter-table-memory";
@@ -353,8 +353,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const itemById = useMemo(() => new Map(items.map(item => [item.id, item])), [items]);
   const view = useMemo(() => activeOrderView(order), [order]);
   const memory = useMemo(() => tableMemory(view.sentItems), [view]);
-  const kitchenSuggestions = quickSuggestions(memory.recent, favorites.get(), items, "KITCHEN");
-  const barSuggestions = quickSuggestions(memory.recent, favorites.get(), items, "BAR");
+  const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
   const [quickFeedback, setQuickFeedback] = useState("");
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -362,6 +361,8 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
+  const [releasingTable, setReleasingTable] = useState(false);
+  const [confirmingRelease, setConfirmingRelease] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
   // dok zahtev traje (nezavisno od cartBusy, koje se odnosi na korpu).
   const [pickupBusyId, setPickupBusyId] = useState<string | null>(null);
@@ -672,6 +673,40 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     }
   }
 
+  /**
+   * OSLOBODI STO — konobar zatvara PRAZNU, nikad poslatu porudžbinu (gost
+   * otišao pre naručivanja) bez čekanja menadžera. Vidljivo samo dok
+   * !hasEverSubmitted (isti agregat kao readyItems/draftItems iznad — order
+   * je i dalje DRAFT, ništa nikad nije otišlo kuhinji/šanku); jednom poslata
+   * porudžbina mora ići kroz postojeći Void/otkazivanje tok, ne ovuda. Server
+   * (releaseEmptyTable) ostaje autoritativan i za konkurentan Submit — ovo je
+   * samo klijentska prva linija odbrane (pending mutacije/Submit-u-toku).
+   */
+  async function releaseTable() {
+    if (!order || releasingTable || draft.pending || submittingRef.current) return;
+    const hasDrafts = order.items.some((i) => i.status === "DRAFT" && i.quantity > 0);
+    const message = hasDrafts
+      ? "Osloboditi sto? Nesačuvane stavke u korpi biće odbačene i sto će ponovo biti slobodan."
+      : "Osloboditi sto? Porudžbina je prazna i sto će ponovo biti slobodan.";
+    if (!window.confirm(message)) return;
+    const releaseReads = draft.holdReads();
+    setReleasingTable(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/pos/orders/${order.id}/release`, { method: "POST" });
+      // Confirmed-empty, not cold: avoids a "Pripremamo sto..." flash if the
+      // waiter immediately reopens this same table.
+      setOrder(null);
+      waiterNavigationStart();
+      router.push("/waiter/tables");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Sto nije oslobođeno. Pokušajte ponovo.");
+    } finally {
+      setReleasingTable(false);
+      releaseReads();
+    }
+  }
+
   async function submit() {
     // VIŠE-KRUŽNO NARUČIVANJE: dozvoljeno kad god postoji BAR JEDNA nova
     // (DRAFT) stavka — ne samo pre prvog slanja. Zaštita od dvostrukog
@@ -734,7 +769,9 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       <div className="mx-auto w-full max-w-5xl">
       <p role="status" className="py-3">{loading ? "Otvaramo porudžbinu…" : error ?? "Sto nema aktivnu porudžbinu."}</p>
       {!loading && !error && <button type="button" onClick={startOrder} className="min-h-12 rounded-md bg-gold px-5 py-3 font-semibold text-white">Započni porudžbinu</button>}
-      <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
+      {/* Otvaranje porudžbine (loading) ne sme prikazati napola inicijalizovan
+          meni ispod statusa — isti princip kao "Pripremamo sto..." ranu grananje. */}
+      {!loading && <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />}
       </div>
     </div>
   );
@@ -842,10 +879,9 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           <VoidItemModal item={voidingItem} onCancel={() => setVoidingItem(null)} onConfirm={confirmVoid} />
         )}
 
-        {(kitchenSuggestions.length > 0 || barSuggestions.length > 0 || memory.lastRound.length > 0) && (
+        {(suggestions.length > 0 || memory.lastRound.length > 0) && (
           <section aria-label="Brzo dodaj" className="mx-3 mt-3 rounded-lg border border-line bg-white p-3">
-            <QuickActionSlider title="KUHINJA" selections={kitchenSuggestions} items={items} submitting={submitting} add={quickAdd} />
-            <QuickActionSlider title="ŠANK" selections={barSuggestions} items={items} submitting={submitting} add={quickAdd} />
+            <QuickActionSlider title="Brzo dodaj · Prethodno / Moji favoriti" selections={suggestions} items={items} submitting={submitting} add={quickAdd} />
             {memory.lastRound.length > 0 && <button type="button" disabled={submitting}
               onClick={() => setQuickFeedback(repeatRound(memory.lastRound, items, addItemWithModifiers))}
               className="mt-2 min-h-12 w-full rounded-md bg-gold-soft px-4 font-semibold text-gold-dark disabled:opacity-50">Ponovi poslednju rundu</button>}
@@ -926,6 +962,18 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           >
             {submitting ? "Slanje…" : hasEverSubmitted ? "Pošalji nove stavke" : "Pošalji porudžbinu"}
           </button>
+          {/* Secondary, compact — never competes with Submit above. Only ever
+              visible while nothing has been sent to Kitchen/Bar (see releaseTable). */}
+          {!hasEverSubmitted && (
+            <button
+              type="button"
+              onClick={releaseTable}
+              disabled={releasingTable || submitting || draft.pending}
+              className="mt-1.5 min-h-9 w-full text-center text-xs font-semibold text-ink/45 underline decoration-dotted underline-offset-2 disabled:opacity-40"
+            >
+              {releasingTable ? "Oslobađanje…" : "Oslobodi sto"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -1177,14 +1225,51 @@ function useCommittedCallback<Args extends unknown[], Result>(callback: (...args
   return useCallback((...args: Args) => ref.current(...args), []);
 }
 
-// Browsing state is local to the menu: category/search never rebuild the order panel.
+const SECTION_LABEL: Record<MenuSection, string> = { KITCHEN: "KUHINJA", BAR: "ŠANK" };
+
+// Presentation switch only — local state, no fetch. See waiter-menu.ts menuSectionsForItem.
+const SectionSwitch = memo(function SectionSwitch({ section, setSection }: { section: MenuSection; setSection: (next: MenuSection) => void }) {
+  return (
+    <div role="tablist" aria-label="Odeljak menija" className="mx-3 mb-1 mt-2 inline-flex gap-1 rounded-md border border-line bg-white p-1">
+      {(["KITCHEN", "BAR"] as const).map((value) => (
+        <button
+          key={value}
+          type="button"
+          role="tab"
+          aria-selected={section === value}
+          onClick={() => setSection(value)}
+          className={`min-h-9 rounded px-5 text-sm font-bold transition-all ${
+            section === value ? "bg-graphite text-white shadow-card" : "text-ink/60"
+          }`}
+        >
+          {SECTION_LABEL[value]}
+        </button>
+      ))}
+    </div>
+  );
+});
+
+// Browsing state is local to the menu: category/search/section never rebuild the order panel.
 const MenuBrowser = memo(function MenuBrowser({ items, categories, submitting, tapMenu, searchInputRef }: { items: MenuItem[]; categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; submitting: boolean; tapMenu: (item: MenuItem) => void; searchInputRef: React.RefObject<HTMLInputElement> }) {
-  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
+  const categoryTypeById = useMemo(() => new Map(categories.map((c) => [c.id, c.type])), [categories]);
+  const sectionsOf = useCallback((item: MenuItem) => menuSectionsForItem(item, item.categoryId ? categoryTypeById.get(item.categoryId) : undefined), [categoryTypeById]);
+  // KUHINJA is the default unless the menu has no kitchen items at all — a
+  // pure-bar location should not open on a permanently empty tab.
+  const [section, setSection] = useState<MenuSection>(() => (items.some((item) => sectionsOf(item).includes("KITCHEN")) ? "KITCHEN" : "BAR"));
+  const sectionItems = useMemo(() => items.filter((item) => sectionsOf(item).includes(section)), [items, section, sectionsOf]);
+  const sectionCategories = useMemo(() => categories.filter((c) => sectionItems.some((item) => item.categoryId === c.id)), [categories, sectionItems]);
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(sectionCategories[0]?.id ?? null);
+  // Switching KUHINJA<->ŠANK may leave the previous category outside the new
+  // section (or a mixed category simply has no items on this side) — fall
+  // back to the new section's first category rather than an empty grid.
+  useEffect(() => {
+    if (!sectionCategories.some((c) => c.id === activeCategoryId)) setActiveCategoryId(sectionCategories[0]?.id ?? null);
+  }, [sectionCategories, activeCategoryId]);
   const [search, setSearch] = useState("");
   const [resultLimit, setResultLimit] = useState(60);
   const matches = useMemo(
-    () => filterMenuItems(items, search, activeCategoryId),
-    [items, activeCategoryId, search]
+    () => filterMenuItems(sectionItems, search, activeCategoryId),
+    [sectionItems, activeCategoryId, search]
   );
   const visibleItems = useMemo(() => search.trim() ? matches.slice(0, resultLimit) : matches, [matches, resultLimit, search]);
 return (<>
@@ -1197,7 +1282,11 @@ return (<>
           onChange={(e) => { setSearch(e.target.value); setResultLimit(60); }}
         />
 
-        {!search && <CategoryNavigation categories={categories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
+        {/* Section switch stays visible during search too, so switching
+            KUHINJA<->ŠANK never requires clearing an in-progress search. */}
+        <SectionSwitch section={section} setSection={setSection} />
+
+        {!search && <CategoryNavigation categories={sectionCategories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
 
         <MenuGrid visibleItems={visibleItems} submitting={submitting} handleTapMenuItem={tapMenu} />
         {visibleItems.length < matches.length && <button type="button" onClick={() => setResultLimit(limit => limit + 60)} className="mx-3 mb-3 min-h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 py-3 font-semibold text-gold-dark">Prikaži još · {visibleItems.length} od {matches.length}</button>}

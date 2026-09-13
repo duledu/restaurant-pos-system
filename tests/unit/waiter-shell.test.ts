@@ -72,7 +72,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
-  it("station sliders add through the same optimistic queue and repeat a mixed round before responses", async () => {
+  it("combined Quick Actions (Kitchen + Bar together) add through the same optimistic queue and repeat a mixed round before responses", async () => {
     const food = { ...menuItem, id: 'food', name: 'Omlet', preparationStation: 'KITCHEN' };
     const history = [{ ...line, status: 'SERVED', submittedAt: '2026-09-13T10:00:00Z' }, { ...line, id: 'food-line', menuItemId: 'food', name: 'Omlet', quantity: 2, status: 'SUBMITTED', submittedAt: '2026-09-13T10:00:00Z' }];
     const gate = deferred<void>(); let sequence = 0;
@@ -86,10 +86,11 @@ describe("mounted persistent waiter shell", () => {
       }
     };
     await render(h(OrderClient, { tableId: '5' }));
-    const kitchen = host.querySelector('[role="group"][aria-label="KUHINJA"]')!;
-    const bar = host.querySelector('[role="group"][aria-label="ŠANK"]')!;
-    expect(kitchen.textContent).toContain('Omlet'); expect(kitchen.textContent).not.toContain('Coffee');
-    expect(bar.textContent).toContain('Coffee'); expect(bar.textContent).not.toContain('Omlet');
+    // Quick Actions is one combined smart-action area — a Kitchen item and a
+    // Bar item both surface in the SAME group, never split by station.
+    const groups = host.querySelectorAll('section[aria-label="Brzo dodaj"] [role="group"]');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].textContent).toContain('Omlet'); expect(groups[0].textContent).toContain('Coffee');
     await labelClick('Brzo dodaj — Omlet'); await labelClick('Brzo dodaj — Coffee');
     await click('Ponovi poslednju rundu');
     const current = shell.getDraft('5').getSnapshot().order!;
@@ -98,13 +99,6 @@ describe("mounted persistent waiter shell", () => {
     expect(shell.getDraft('5').pending).toBe(true);
     await act(async () => { gate.resolve(); await shell.getDraft('5').flush(); });
     expect(shell.getDraft('5').getSnapshot().order!.items.filter(i => i.status === 'DRAFT').reduce((n,i) => n+i.quantity, 0)).toBe(5);
-  });
-  it.each(['KITCHEN', 'BAR'])("omits the empty opposite station for %s", async preparationStation => {
-    custom = url => url.includes('/snapshot') ? response({ ...menu, items: [{ ...menuItem, preparationStation }] })
-      : url === '/api/pos/orders/o5' ? response({ order: { ...order(), items: [{ ...line, status: 'SERVED', submittedAt: '2026-09-13T10:00:00Z' }] } }) : undefined;
-    await render(h(OrderClient, { tableId: '5' }));
-    expect(host.querySelectorAll('section[aria-label="Brzo dodaj"] [role="group"]')).toHaveLength(1);
-    expect(host.querySelector('[role="group"]')?.getAttribute('aria-label')).toBe(preparationStation === 'KITCHEN' ? 'KUHINJA' : 'ŠANK');
   });
   it("cold hydration failure exposes retry without a partial menu or order creation", async () => {
     custom = url => url.startsWith('/api/pos/orders?') ? response({ error: 'Offline' }, false) : undefined;
@@ -667,5 +661,109 @@ describe("mounted persistent waiter shell", () => {
     expect(button?.disabled).toBe(true); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
     await act(async () => pending.resolve(response({ order: { ...order(), items: [{ ...line, status: "SUBMITTED" }] } })));
     expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
+  });
+  it("does not render the menu grid while opening a confirmed-empty table's first order", async () => {
+    custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ table: { id: "5", locationId: "l1" }, order: null }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(host.textContent).toContain("Sto nema aktivnu porudžbinu");
+    expect(host.querySelector("input")).not.toBeNull(); // confirmed-empty: menu visible immediately, no fetch pending
+    const opening = deferred<Response>();
+    custom = (url, options) => url === "/api/pos/orders" && options?.method === "POST" ? opening.promise : undefined;
+    await click("Započni porudžbinu");
+    expect(host.textContent).toContain("Otvaramo porudžbinu");
+    expect(host.querySelector("input")).toBeNull(); // opening: menu grid hidden, not half-initialized underneath
+    await act(async () => opening.resolve(response({ order: order("5") })));
+    expect(host.querySelector("input")).not.toBeNull();
+  });
+});
+
+describe("KUHINJA/ŠANK main-menu section switch", () => {
+  const pizza = { ...menuItem, id: "pizza", name: "Pizza", categoryId: "c2", preparationStation: "KITCHEN" };
+  const combo = { ...menuItem, id: "combo", name: "Kombo", categoryId: "c2", preparationStation: "KITCHEN_AND_BAR" };
+  const cola = { ...menuItem, id: "m1", name: "Cola", categoryId: "c1", preparationStation: "BAR" };
+  const sectionsMenu = { ...menu, categories: [{ id: "c1", name: "Pića", type: "DRINK" }, { id: "c2", name: "Hrana", type: "FOOD" }], items: [cola, pizza, combo] };
+  const sectionsOverlay = { ...overlay, items: ["m1", "pizza", "combo"].map(menuItemId => ({ ...overlay.items[0], menuItemId })) };
+
+  it("switches KUHINJA<->ŠANK locally (no fetch), scopes categories/items to the section, and shows a dual-route item in both", async () => {
+    custom = url => url.includes("/snapshot") ? response(sectionsMenu) : url.includes("/availability") ? response(sectionsOverlay) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    const before = fetchMock.mock.calls.length;
+
+    // Default section is KUHINJA (the menu has kitchen items). Pića has no
+    // kitchen-visible item at all, so its chip is not shown yet.
+    expect(host.textContent).toContain("Hrana"); expect(host.textContent).not.toContain("Pića");
+    expect(host.textContent).toContain("Pizza"); expect(host.textContent).toContain("Kombo"); expect(host.textContent).not.toContain("Cola");
+
+    await click("ŠANK");
+    // Pića now appears as a chip (Cola). Hrana ALSO appears — it legitimately
+    // belongs to both sections because it holds Kombo (KITCHEN_AND_BAR) — and
+    // since Hrana is still valid under ŠANK, the active category is left
+    // exactly where it was (no jarring reset): the grid still shows Kombo,
+    // not yet Cola, until Pića itself is tapped.
+    expect(host.textContent).toContain("Pića"); expect(host.textContent).toContain("Hrana");
+    expect(host.textContent).toContain("Kombo"); expect(host.textContent).not.toContain("Pizza"); expect(host.textContent).not.toContain("Cola");
+    expect(fetchMock.mock.calls.length).toBe(before);
+
+    await click("Pića");
+    expect(host.textContent).toContain("Cola"); expect(host.textContent).not.toContain("Pizza"); expect(host.textContent).not.toContain("Kombo");
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it("scopes search to the selected section", async () => {
+    custom = url => url.includes("/snapshot") ? response(sectionsMenu) : url.includes("/availability") ? response(sectionsOverlay) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    const input = host.querySelector("input")!;
+    const type = (text: string) => act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text); input.dispatchEvent(new Event("input", { bubbles: true })); });
+
+    // KUHINJA is selected — Cola (Bar-only) is not found by name.
+    await type("Cola");
+    expect(host.textContent).toContain("Nema artikala.");
+    expect(host.textContent).not.toContain("Cola");
+
+    await type("");
+    await click("ŠANK");
+    await type("Cola");
+    expect(host.textContent).toContain("Cola");
+  });
+});
+
+describe("Oslobodi sto", () => {
+  function draftOrder() { return { ...order(), status: "DRAFT", items: [{ ...line }] }; } // never submitted
+
+  it("is hidden once anything has ever been submitted", async () => {
+    await render(h(OrderClient, { tableId: "5" })); // fixture order.status is SUBMITTED
+    expect(host.textContent).not.toContain("Oslobodi sto");
+  });
+  it("is visible while the order is still DRAFT (nothing ever sent to Kitchen/Bar)", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: draftOrder() }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(host.textContent).toContain("Oslobodi sto");
+  });
+  it("does nothing when the confirmation is declined", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: draftOrder() }) : undefined;
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    await render(h(OrderClient, { tableId: "5" }));
+    const before = fetchMock.mock.calls.length;
+    await click("Oslobodi sto");
+    expect(fetchMock.mock.calls.length).toBe(before);
+    expect(shell.getDraft("5").getSnapshot().order).not.toBeNull();
+  });
+  it("releases the table on confirmation, clearing the local draft without resurrecting the order", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: draftOrder() }) : url.endsWith("/release") ? response({ orderId: "o5", status: "CANCELLED" }) : undefined;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Oslobodi sto");
+    expect(calls("/api/pos/orders/o5/release")).toHaveLength(1);
+    const snapshot = shell.getDraft("5").getSnapshot();
+    expect(snapshot.order).toBeNull();
+    expect(snapshot.inspected).toBe(true); // confirmed-empty, not cold — reopening will not flash "Pripremamo sto..."
+  });
+  it("surfaces a server rejection without clearing the order", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: draftOrder() }) : url.endsWith("/release") ? response({ error: "Porudžbina je u međuvremenu poslata" }, false) : undefined;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Oslobodi sto");
+    expect(host.textContent).toContain("Porudžbina je u međuvremenu poslata");
+    expect(shell.getDraft("5").getSnapshot().order).not.toBeNull();
   });
 });

@@ -25,7 +25,18 @@ export function assertStationAccess(ctx: AuthContext, station: Station): void {
   }
 }
 
-const ACTIVE_ITEM_STATUSES: OrderItemStatus[] = ["SUBMITTED", "ACCEPTED", "PREPARING", "READY"];
+// P0 fix (physical QA): a station's OWN production work is complete the
+// moment it reaches READY ("Označi spremno") — waiter pickup (READY->SERVED,
+// confirmPickup) is a SEPARATE, later, waiter-facing concern (clearing their
+// own "Spremno za preuzimanje" banner) and must NEVER gate Kitchen/Bar's own
+// Aktivne/Gotove view. Previously READY was included here, so Gotove's "no
+// station row still active" check never let a READY-but-not-yet-picked-up
+// item through — Kitchen/Bar's ticket vanished from Aktivne (READY still
+// matched this set) yet never appeared in Gotove either, exactly the
+// reported bug. READY is a "not pending" status for THIS purpose, same as
+// SERVED — see kitchen-bar-simplified-flow.test.ts "Kitchen/Bar Gotove is
+// driven by READY (production complete), not waiter pickup".
+const PENDING_PRODUCTION_STATUSES: OrderItemStatus[] = ["SUBMITTED", "ACCEPTED", "PREPARING"];
 
 /**
  * Vraća porudžbine koje imaju bar jednu aktivnu stavku za datu stanicu,
@@ -42,12 +53,12 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
       ...scopeToRestaurant(ctx),
       locationId,
       status: { in: ["SUBMITTED", "ACCEPTED", "PREPARING", "READY", "SERVED"] },
-      items: { some: { stationStates: { some: { station, status: { in: ACTIVE_ITEM_STATUSES } } } } },
+      items: { some: { stationStates: { some: { station, status: { in: PENDING_PRODUCTION_STATUSES } } } } },
     },
     include: {
       table: { select: { label: true } },
       items: {
-        where: { stationStates: { some: { station, status: { in: ACTIVE_ITEM_STATUSES } } } },
+        where: { stationStates: { some: { station, status: { in: PENDING_PRODUCTION_STATUSES } } } },
         include: {
           stationStates: { where: { station }, select: { status: true } },
           // P3.2: dodaci moraju biti VIDLJIVI na KDS-u (specifikacija #16) —
@@ -82,8 +93,11 @@ export async function listStationOrders(ctx: AuthContext, locationId: string, st
 }
 
 /**
- * Vraća porudžbine tekuće aktivne smene gde su SVE stavke za datu stanicu
- * u statusu SERVED — tj. kuhinja/šank su završili taj tiket.
+ * Vraća porudžbine tekuće aktivne smene gde NIJEDNA stavka za datu stanicu
+ * više nije u PENDING_PRODUCTION_STATUSES (tj. sve su bar READY, uključujući
+ * i SERVED) — kuhinja/šank su završili SVOJ deo posla na tom tiketu, bez
+ * obzira da li ga je konobar već preuzeo (confirmPickup je odvojen,
+ * kasniji, waiter-facing korak koji ovde ništa ne menja).
  * Scoped na aktivnu smenu da lista ostane kompaktna.
  */
 export async function listCompletedStationOrders(ctx: AuthContext, locationId: string, station: Station) {
@@ -108,7 +122,7 @@ export async function listCompletedStationOrders(ctx: AuthContext, locationId: s
         items: {
           some: {
             stationStates: {
-              some: { station, status: { in: ACTIVE_ITEM_STATUSES } },
+              some: { station, status: { in: PENDING_PRODUCTION_STATUSES } },
             },
           },
         },

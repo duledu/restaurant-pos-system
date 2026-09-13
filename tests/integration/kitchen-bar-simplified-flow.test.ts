@@ -70,6 +70,15 @@ beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
 
+async function submitAndReady(fixture: Fixture, waiter: AuthContext, manager: AuthContext, menuItemId: string, station: "KITCHEN" | "BAR", quantity = 1) {
+  const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+  const item = await orders.addItem(waiter, order.id, { menuItemId, quantity });
+  const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+  await production.advanceItemStatus(manager, submitted.id, item.id, station, "SUBMITTED");
+  await production.advanceItemStatus(manager, submitted.id, item.id, station, "ACCEPTED");
+  return { orderId: submitted.id, itemId: item.id };
+}
+
 describe("Kitchen/Bar: PRIHVATI -> SPREMNO direktno (no 'Počni pripremu')", () => {
   it("1-4: a newly submitted item can be accepted and go straight to READY, with no PREPARING step required", async () => {
     const fixture = await createFixture();
@@ -139,14 +148,6 @@ describe("Kitchen/Bar: PRIHVATI -> SPREMNO direktno (no 'Počni pripremu')", () 
 });
 
 describe("Waiter: SPREMNO notification + PREUZETO", () => {
-  async function submitAndReady(fixture: Fixture, waiter: AuthContext, manager: AuthContext, menuItemId: string, station: "KITCHEN" | "BAR", quantity = 1) {
-    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
-    const item = await orders.addItem(waiter, order.id, { menuItemId, quantity });
-    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
-    await production.advanceItemStatus(manager, submitted.id, item.id, station, "SUBMITTED");
-    await production.advanceItemStatus(manager, submitted.id, item.id, station, "ACCEPTED");
-    return { orderId: submitted.id, itemId: item.id };
-  }
 
   it("5-6: listTables exposes the ready item on the correct table for the responsible waiter, with an accurate count", async () => {
     const fixture = await createFixture();
@@ -293,5 +294,142 @@ describe("Waiter: SPREMNO notification + PREUZETO", () => {
 
     const event = await prisma.orderEvent.findFirstOrThrow({ where: { orderId, type: "order_item.picked_up" } });
     expect((event.payload as { itemId: string }).itemId).toBe(itemId);
+  });
+});
+
+/**
+ * P0 bug fix — physical QA: Kitchen marks an item SPREMNO (READY) and the
+ * order vanishes from Aktivne but never appears in Gotove ("Nema završenih
+ * porudžbina u ovoj smeni"). Root cause: production-service.ts's
+ * ACTIVE_ITEM_STATUSES included READY, so Gotove's "no station row still
+ * active" exclusion never let a READY-but-not-yet-picked-up item through —
+ * Gotove was silently waiting for the WAITER's confirmPickup (READY->SERVED),
+ * an unrelated concern. Approved behavior: Kitchen/Bar's OWN production
+ * completion (READY) is what moves a ticket to Gotove; waiter pickup is a
+ * separate, later, waiter-facing event that must not gate it.
+ */
+describe("Kitchen/Bar Gotove is driven by READY (production complete), not waiter pickup", () => {
+  it("READY alone (no pickup) removes the order from Aktivne and adds it to Gotove", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId } = await submitAndReady(fixture, waiter, manager, fixture.biftekId, "KITCHEN");
+
+    const aktivne = await production.listStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(aktivne.map((o) => o.orderId)).not.toContain(orderId);
+
+    const gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(gotove.map((o) => o.orderId)).toContain(orderId);
+  });
+
+  it("re-querying after READY still returns it in Gotove — server-authoritative, survives refresh/re-login", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId } = await submitAndReady(fixture, waiter, manager, fixture.biftekId, "KITCHEN");
+
+    const first = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    const second = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(first.map((o) => o.orderId)).toContain(orderId);
+    expect(second.map((o) => o.orderId)).toContain(orderId);
+  });
+
+  it("does not wait for waiter pickup — a later confirmPickup (READY->SERVED) does not remove it from, or duplicate it in, Gotove", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId, itemId } = await submitAndReady(fixture, waiter, manager, fixture.biftekId, "KITCHEN");
+
+    await production.confirmPickup(waiter, orderId, itemId);
+
+    const gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(gotove.filter((o) => o.orderId === orderId)).toHaveLength(1);
+    const aktivne = await production.listStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(aktivne.map((o) => o.orderId)).not.toContain(orderId);
+  });
+
+  it("does not wait for whole-order payment/completion — order stays SUBMITTED yet the item shows in Gotove", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId } = await submitAndReady(fixture, waiter, manager, fixture.biftekId, "KITCHEN");
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe("SUBMITTED"); // never paid/completed
+    const gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(gotove.map((o) => o.orderId)).toContain(orderId);
+  });
+
+  it("mixed order: one item READY and a sibling still SUBMITTED keeps the whole order in Aktivne, not Gotove, until both reach READY", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const ready = await orders.addItem(waiter, order.id, { menuItemId: fixture.biftekId, quantity: 1 });
+    const pending = await orders.addItem(waiter, order.id, { menuItemId: fixture.pomfritId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await production.advanceItemStatus(manager, submitted.id, ready.id, "KITCHEN", "SUBMITTED");
+    await production.advanceItemStatus(manager, submitted.id, ready.id, "KITCHEN", "ACCEPTED"); // -> READY
+
+    let aktivne = await production.listStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(aktivne.map((o) => o.orderId)).toContain(submitted.id);
+    let gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(gotove.map((o) => o.orderId)).not.toContain(submitted.id);
+
+    await production.advanceItemStatus(manager, submitted.id, pending.id, "KITCHEN", "SUBMITTED");
+    await production.advanceItemStatus(manager, submitted.id, pending.id, "KITCHEN", "ACCEPTED"); // -> READY, both now done
+
+    aktivne = await production.listStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(aktivne.map((o) => o.orderId)).not.toContain(submitted.id);
+    gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(gotove.map((o) => o.orderId)).toContain(submitted.id);
+  });
+
+  it("mixed KITCHEN_AND_BAR order: Kitchen's own READY surfaces in Kitchen Gotove independent of Bar's unrelated, still-pending work", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const combo = await orders.addItem(waiter, order.id, { menuItemId: fixture.comboId, quantity: 1 });
+    const submitted = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    await production.advanceItemStatus(manager, submitted.id, combo.id, "KITCHEN", "SUBMITTED");
+    await production.advanceItemStatus(manager, submitted.id, combo.id, "KITCHEN", "ACCEPTED"); // KITCHEN -> READY
+
+    const kitchenGotove = await production.listCompletedStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(kitchenGotove.map((o) => o.orderId)).toContain(submitted.id);
+    const kitchenAktivne = await production.listStationOrders(manager, fixture.locationId, "KITCHEN");
+    expect(kitchenAktivne.map((o) => o.orderId)).not.toContain(submitted.id);
+
+    // Bar has not touched its own row yet — Bar's views are unaffected.
+    const barAktivne = await production.listStationOrders(manager, fixture.locationId, "BAR");
+    expect(barAktivne.map((o) => o.orderId)).toContain(submitted.id);
+    const barGotove = await production.listCompletedStationOrders(manager, fixture.locationId, "BAR");
+    expect(barGotove.map((o) => o.orderId)).not.toContain(submitted.id);
+  });
+
+  it("Bar has the equivalent correct behavior as Kitchen", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId } = await submitAndReady(fixture, waiter, manager, fixture.colaId, "BAR");
+
+    const aktivne = await production.listStationOrders(manager, fixture.locationId, "BAR");
+    expect(aktivne.map((o) => o.orderId)).not.toContain(orderId);
+    const gotove = await production.listCompletedStationOrders(manager, fixture.locationId, "BAR");
+    expect(gotove.map((o) => o.orderId)).toContain(orderId);
+  });
+
+  it("reaching READY and a later pickup create no duplicate OrderItem or OrderItemStation rows", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const manager = managerCtx(fixture);
+    const { orderId, itemId } = await submitAndReady(fixture, waiter, manager, fixture.biftekId, "KITCHEN");
+    await production.confirmPickup(waiter, orderId, itemId);
+
+    const items = await prisma.orderItem.findMany({ where: { orderId } });
+    expect(items).toHaveLength(1);
+    const stations = await prisma.orderItemStation.findMany({ where: { orderItemId: itemId } });
+    expect(stations).toHaveLength(1);
   });
 });

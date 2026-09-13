@@ -82,6 +82,28 @@ export function readAvailability(body: unknown, locationId: string, items: reado
   return result;
 }
 
+export type MenuSection = "KITCHEN" | "BAR";
+
+/**
+ * Main-menu KUHINJA/ŠANK grouping — presentation/navigation only, never
+ * production routing (see production/station-state.ts stationsForPreparation
+ * for the actual KDS split, unchanged and untouched by this). Unlike the
+ * Quick Actions single-bucket display rule, a KITCHEN_AND_BAR item belongs
+ * to BOTH sections here — the waiter must be able to find it regardless of
+ * which section is open, and it is still exactly one MenuItem/OrderItem.
+ * NONE (or legacy-missing) preparationStation carries no station signal at
+ * all, so it falls back to the item's own category FOOD/DRINK type —
+ * existing product semantics, never an invented routing rule.
+ */
+export function menuSectionsForItem(item: Pick<MenuItem, "preparationStation">, categoryType: Category["type"] | undefined): MenuSection[] {
+  switch (item.preparationStation) {
+    case "KITCHEN": return ["KITCHEN"];
+    case "BAR": return ["BAR"];
+    case "KITCHEN_AND_BAR": return ["KITCHEN", "BAR"];
+    default: return categoryType === "DRINK" ? ["BAR"] : ["KITCHEN"];
+  }
+}
+
 export function mergeWaiterMenu(items: readonly StaticMenuItem[], overlay: ReadonlyMap<string, LiveAvailability>): MenuItem[] {
   return items.map(item => ({ ...item, stock: overlay.get(item.id)?.stock ?? null,
     recipeAvailability: overlay.get(item.id)?.recipeAvailability ?? null,
