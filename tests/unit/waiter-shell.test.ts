@@ -64,6 +64,109 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  describe("complete active order restore", () => {
+    const panel = () => host.querySelector<HTMLElement>(".fixed.bottom-0")!;
+    function fixture() {
+      const drinks = [menuItem, { ...menuItem, id: "m2", name: "Omlet", price: "300" }, { ...menuItem, id: "m3", name: "Cedevita", price: "150" }];
+      const sent = [{ ...line, id: "sent1", quantity: 2, status: "SUBMITTED", submittedAt: "2026-09-13T10:00:00Z" }, { ...line, id: "sent2", menuItemId: "m2", name: "Omlet", price: "300", status: "SERVED", submittedAt: "2026-09-13T10:00:00Z" }];
+      let serverItems = [...sent]; let sequence = 0;
+      let held: ReturnType<typeof deferred<Response>> | null = null;
+      custom = (url, options) => {
+        if (url.includes("/snapshot")) return response({ ...menu, items: drinks });
+        if (url.includes("/availability")) return response({ ...overlay, items: drinks.map(item => ({ ...overlay.items[0], menuItemId: item.id })) });
+        if (url === "/api/pos/orders/o5") return response({ order: { ...order(), items: serverItems } });
+        if (url === "/api/pos/orders/o12") return response({ order: { ...order("12"), items: [{ ...line, id: "other", name: "Other table", status: "SUBMITTED" }] } });
+        if (url === "/api/pos/orders/o5/items") {
+          const input = JSON.parse(String(options?.body)); const menu = drinks.find(item => item.id === input.menuItemId)!;
+          const created = { ...line, id: `added${++sequence}`, name: menu.name, menuItemId: menu.id, price: menu.price };
+          serverItems = [...serverItems, created];
+          return held ? held.promise : response({ item: created });
+        }
+        if (options?.method === "PATCH") { const input = JSON.parse(String(options.body)); serverItems = serverItems.map(item => url.endsWith(`/${item.id}`) ? { ...item, quantity: input.quantity } : item); return response({ ok: true }); }
+        if (url.endsWith("/submit")) { serverItems = serverItems.map(item => item.status === "DRAFT" ? { ...item, status: "SUBMITTED", submittedAt: "2026-09-13T11:00:00Z" } : item); return response({ order: { ...order(), items: serverItems } }); }
+        return undefined;
+      };
+      return { sent, hold: () => held = deferred<Response>(), created: () => serverItems.at(-1)! };
+    }
+    function expectComplete(quantity = 3, total = "700.00") {
+      expect(panel().textContent).toContain("Coffee"); expect(panel().textContent).toContain("Omlet");
+      expect(panel().textContent).toContain(`${quantity} stavki`); expect(panel().textContent).toContain(total);
+      expect(panel().textContent).not.toContain("Nema stavki još.");
+    }
+    it("reopens submitted server items in the bottom active-order panel", async () => { const f = fixture(); await render(h(OrderClient, { tableId: "5" })); expect(shell.getDraft("5").getSnapshot().order!.items).toEqual(f.sent); expectComplete(); });
+    it("preserves submitted rows through leaving and returning", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" })); expectComplete(); });
+    it("renders submitted plus optimistic new item before server confirmation", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
+      await click("Cedevita"); expectComplete(4, "850.00"); expect(panel().textContent).toContain("Cedevita");
+      expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status !== "DRAFT")).toEqual(f.sent);
+      await act(async () => pending.resolve(response({ item: f.created() })));
+    });
+    it("instant quantity +1 does not remove submitted rows", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
+      await click("Cedevita"); await labelClick("Povećaj količinu — Cedevita"); expectComplete(5, "1000.00");
+      await act(async () => pending.resolve(response({ item: f.created() })));
+    });
+    it("P0.5 chip creates a separate draft without changing the submitted selection", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" })); await labelClick("Brzo dodaj — Coffee"); expectComplete(4, "900.00");
+      expect(shell.getDraft("5").getSnapshot().order!.items.find(i => i.id === "sent1")?.quantity).toBe(2);
+    });
+    it("polling and availability refresh preserve submitted and pending rows", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
+      await click("Cedevita"); await act(async () => vi.advanceTimersByTimeAsync(15000)); expectComplete(4, "850.00");
+      await act(async () => pending.resolve(response({ item: f.created() }))); await act(async () => vi.advanceTimersByTimeAsync(4000)); expectComplete(4, "850.00");
+    });
+    it("Submit waits for pending work and reconciles complete order without duplicates", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
+      await click("Cedevita"); await click("Pošalji nove stavke"); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(0);
+      await act(async () => pending.resolve(response({ item: f.created() }))); expectComplete(4, "850.00");
+      expect(shell.getDraft("5").getSnapshot().order!.items).toHaveLength(3);
+      expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
+      expect(JSON.parse(calls("/api/pos/orders/o5/submit")[0][1].body)).toEqual({ idempotencyKey: expect.any(String) });
+    });
+    it("reopens the full order after Submit", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await click("Cedevita"); await click("Pošalji nove stavke"); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" })); expectComplete(4, "850.00"); });
+    it("isolates active table orders", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(OrderClient, { tableId: "12" })); expect(panel().textContent).toContain("Other table"); expect(panel().textContent).not.toContain("Omlet"); await render(h(OrderClient, { tableId: "5" })); expectComplete(); });
+    it("counts submitted quantities and excludes cancelled lines from the active total", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" }));
+      await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, items: [...previous!.items, { ...line, id: "voided", status: "CANCELLED", quantity: 10 }] })));
+      expectComplete(); expect(panel().textContent).not.toContain("0 stavki");
+    });
+    it("uses item history even when aggregate order status is DRAFT", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" }));
+      await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, status: "DRAFT" })));
+      expectComplete(); expect(host.textContent).toContain("Poslato / U pripremi");
+      expect(panel().querySelectorAll('button[aria-label^="Ukloni"]')).toHaveLength(0);
+      const submit = [...panel().querySelectorAll("button")].find(b => b.textContent === "Pošalji nove stavke");
+      expect(submit?.disabled).toBe(true);
+    });
+    it("late polling response cannot erase submitted or newer optimistic rows", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
+      const route = custom; const poll = deferred<Response>();
+      custom = (url, options) => url === "/api/pos/orders/o5" ? poll.promise : route(url, options);
+      await act(async () => vi.advanceTimersByTimeAsync(4000));
+      const pending = f.hold(); await click("Cedevita");
+      await act(async () => poll.resolve(response({ order: { ...order(), items: f.sent } })));
+      expectComplete(4, "850.00");
+      await act(async () => pending.resolve(response({ item: f.created() })));
+    });
+    it("failed optimistic add and retry retain submitted items and total", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
+      const route = custom;
+      custom = (url, options) => url === "/api/pos/orders/o5/items" ? Promise.reject(new TypeError("offline")) : route(url, options);
+      await click("Cedevita"); expectComplete(4, "850.00"); expect(host.textContent).toContain("Pokušaj ponovo");
+      custom = route; await click("Pokušaj ponovo"); expectComplete(4, "850.00");
+      expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status !== "DRAFT")).toEqual(f.sent);
+      const requests = calls("/api/pos/orders/o5/items").map(([, options]) => JSON.parse(options.body).clientMutationId);
+      expect(new Set(requests).size).toBe(1);
+    });
+    it("READY update and notice retain complete order while new draft is pending", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
+      await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, items: previous!.items.map(i => i.id === "sent1" ? { ...i, status: "READY" } : i) })));
+      const pending = f.hold(); await click("Cedevita"); expectComplete(4, "850.00");
+      expect(host.textContent).toContain("Preuzeto");
+      await act(async () => pending.resolve(response({ item: f.created() })));
+      expectComplete(4, "850.00");
+    });
+  });
   it("P0.5 modifier quick chip enters the P0.4 draft before confirmation with current price", async () => {
     const drink = { ...menuItem, modifierGroups: [{ group: { id: "g", name: "Dodaci", required: false, minSelect: 0, maxSelect: 1, isActive: true, options: [{ id: "lemon", name: "Limun", priceDelta: "25", isActive: true }] } }] };
     const previous = { ...line, status: "SERVED", submittedAt: "2026-09-13T10:00:00Z", modifiers: [{ id: "mod", modifierOptionId: "lemon", groupName: "Dodaci", optionName: "Limun", priceDelta: "10" }] };

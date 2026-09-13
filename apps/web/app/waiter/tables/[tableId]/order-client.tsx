@@ -444,7 +444,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const total = useMemo(
     () =>
       order?.items
-        .filter((i) => i.status === "DRAFT")
+        .filter((i) => i.status !== "CANCELLED" && i.quantity > 0)
         .reduce((sum, i) => sum + Number(i.price) * i.quantity, 0) ?? 0,
     [order]
   );
@@ -684,8 +684,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     </div>
   );
 
-  const hasEverSubmitted = order.status !== "DRAFT";
   const sentItems = order.items.filter((i) => i.status !== "DRAFT");
+  const hasEverSubmitted = sentItems.length > 0 || order.status !== "DRAFT";
+  const activeItems = order.items.filter((i) => i.status !== "CANCELLED" && i.quantity > 0);
+  const activeSentItems = activeItems.filter((i) => i.status !== "DRAFT");
   const draftItems = order.items.filter((i) => i.status === "DRAFT");
   const readyItems = order.items.filter((i) => i.status === "READY");
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
@@ -970,7 +972,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
           (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
       <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{hasEverSubmitted ? "Dodatna porudžbina" : "Tekuća porudžbina"}</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{activeItems.reduce((n, item) => n + item.quantity, 0)} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
@@ -979,11 +981,24 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
             poslednje stavke pre linije/Ukupno ispod. */}
         <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
-          {draftItems.length === 0 && (
+          {activeItems.length === 0 && (
             <div className="py-2 text-center text-sm text-ink/55">
               {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
             </div>
           )}
+          {/* The panel represents the whole active order. Submitted rows are
+              read-only; only the separate DRAFT rows below expose mutations. */}
+          {activeSentItems.map((item) => (
+            <div key={item.id} className="flex items-start justify-between gap-2 border-b border-line/50 py-2.5 text-sm">
+              <div className="min-w-0">
+                <p className="font-medium text-ink">{item.quantity}× {item.name}</p>
+                {item.modifiers.length > 0 && <p className="text-xs text-inkSoft">{item.modifiers.map(m => m.optionName).join(", ")}</p>}
+                {item.note && <p className="text-xs italic text-inkSoft">{item.note}</p>}
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${ITEM_STATUS_TONE[item.status]}`}>{ITEM_STATUS_LABEL[item.status]}</span>
+              </div>
+              <span className="shrink-0 font-semibold tabular-nums text-ink">{(Number(item.price) * item.quantity).toFixed(2)} <span className="text-xs font-normal text-inkSoft">RSD</span></span>
+            </div>
+          ))}
           {draftItems.map((item) => {
             const canEditModifiers = (items.find((mi) => mi.id === item.menuItemId)?.modifierGroups.length ?? 0) > 0;
             return (
