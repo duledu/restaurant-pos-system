@@ -13,6 +13,19 @@ describe("one active order projection", () => {
     expect(view.draftItems.map(i => i.id)).toEqual(["local:x"]);
     expect(view.sentItems.map(i => i.id)).toEqual(["sent"]);
   });
+  it("draftCount/draftTotal reflect ONLY draft rows, never submitted rows (physical-device duplication regression)", () => {
+    const allSubmitted = activeOrderView(order([item("s1", "SUBMITTED"), item("s2", "READY"), item("s3", "SERVED"), item("s4", "SERVED")]));
+    expect(allSubmitted.draftItems).toEqual([]);
+    expect(allSubmitted.draftCount).toBe(0);
+    expect(allSubmitted.draftTotal).toBe(0);
+    // the same four rows still count toward the whole-order count/total
+    expect(allSubmitted.count).toBe(8); expect(allSubmitted.total).toBe(1600);
+
+    const withOneNewDraft = activeOrderView(order([item("s1", "SUBMITTED"), item("s2", "READY"), item("s3", "SERVED"), item("s4", "SERVED"), item("local:new", "DRAFT", 1)]));
+    expect(withOneNewDraft.draftItems.map(i => i.id)).toEqual(["local:new"]);
+    expect(withOneNewDraft.draftCount).toBe(1);
+    expect(withOneNewDraft.draftTotal).toBe(200);
+  });
   it("quantity changes and pending removal affect count/total without touching history", () => {
     const before = order([item("sent"), item("draft", "DRAFT", 3)]);
     expect(activeOrderView(before).total).toBe(1000);

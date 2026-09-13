@@ -262,6 +262,25 @@ describe("mounted persistent waiter shell", () => {
       expect(host.textContent).toContain("Other waiter round");
     });
     const panel = () => host.querySelector<HTMLElement>(".fixed.bottom-0")!;
+    const submittedBox = () => host.querySelector<HTMLElement>('div[class*="24dvh"]');
+    // Physical-device regression fix: the editable panel ("Tekuća porudžbina")
+    // must show ONLY draft rows — submitted/served rows live exclusively in
+    // "Poslato / U pripremi" and must never repeat inside the panel below it.
+    function expectSubmittedIntact() {
+      expect(submittedBox()?.textContent).toContain("Coffee");
+      expect(submittedBox()?.textContent).toContain("Omlet");
+      expect(panel().textContent).not.toContain("Omlet");
+    }
+    function expectDraft(quantity: number, total: string) {
+      if (quantity === 0) {
+        expect(panel().textContent).toContain("0 stavki");
+        expect(panel().textContent).toContain("Nema novih stavki.");
+        return;
+      }
+      expect(panel().textContent).toContain(`${quantity} stavki`);
+      expect(panel().textContent).toContain(total);
+      expect(panel().textContent).not.toContain("Nema novih stavki.");
+    }
     function fixture() {
       const drinks = [menuItem, { ...menuItem, id: "m2", name: "Omlet", price: "300" }, { ...menuItem, id: "m3", name: "Cedevita", price: "150" }];
       const sent = [{ ...line, id: "sent1", quantity: 2, status: "SUBMITTED", submittedAt: "2026-09-13T10:00:00Z" }, { ...line, id: "sent2", menuItemId: "m2", name: "Omlet", price: "300", status: "SERVED", submittedAt: "2026-09-13T10:00:00Z" }];
@@ -284,83 +303,104 @@ describe("mounted persistent waiter shell", () => {
       };
       return { sent, hold: () => held = deferred<Response>(), created: () => serverItems.at(-1)! };
     }
-    function expectComplete(quantity = 3, total = "700.00") {
-      expect(panel().textContent).toContain("Coffee"); expect(panel().textContent).toContain("Omlet");
-      expect(panel().textContent).toContain(`${quantity} stavki`); expect(panel().textContent).toContain(total);
-      expect(panel().textContent).not.toContain("Nema stavki još.");
-    }
-    it("reopens submitted server items in the bottom active-order panel", async () => { const f = fixture(); await render(h(OrderClient, { tableId: "5" })); expect(shell.getDraft("5").getSnapshot().order!.items).toEqual(f.sent); expectComplete(); });
-    it("preserves submitted rows through leaving and returning", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" })); expectComplete(); });
-    it("renders submitted plus optimistic new item before server confirmation", async () => {
+    it("reopens submitted server items into the read-only submitted section, with an empty editable draft panel", async () => {
+      const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
+      expect(shell.getDraft("5").getSnapshot().order!.items).toEqual(f.sent);
+      expectSubmittedIntact(); expectDraft(0, "0.00");
+    });
+    it("preserves submitted rows through leaving and returning, still with an empty draft panel", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+      expectSubmittedIntact(); expectDraft(0, "0.00");
+    });
+    it("renders the new item ALONE in the draft panel before server confirmation, submitted rows untouched", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
-      await click("Cedevita"); expectComplete(4, "850.00"); expect(panel().textContent).toContain("Cedevita");
+      await click("Cedevita"); expectDraft(1, "150.00"); expect(panel().textContent).toContain("Cedevita");
+      expectSubmittedIntact();
       expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status !== "DRAFT")).toEqual(f.sent);
       await act(async () => pending.resolve(response({ item: f.created() })));
     });
-    it("instant quantity +1 does not remove submitted rows", async () => {
+    it("instant quantity +1 stays inside the draft panel and does not touch submitted rows", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
-      await click("Cedevita"); await labelClick("Povećaj količinu — Cedevita"); expectComplete(5, "1000.00");
+      await click("Cedevita"); await labelClick("Povećaj količinu — Cedevita"); expectDraft(2, "300.00"); expectSubmittedIntact();
       await act(async () => pending.resolve(response({ item: f.created() })));
     });
-    it("P0.5 chip creates a separate draft without changing the submitted selection", async () => {
-      fixture(); await render(h(OrderClient, { tableId: "5" })); await labelClick("Brzo dodaj — Coffee"); expectComplete(4, "900.00");
+    it("P0.5 chip creates a separate draft row without changing the already-submitted Coffee round", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" })); await labelClick("Brzo dodaj — Coffee"); expectDraft(1, "200.00");
       expect(shell.getDraft("5").getSnapshot().order!.items.find(i => i.id === "sent1")?.quantity).toBe(2);
+      expectSubmittedIntact();
     });
-    it("polling and availability refresh preserve submitted and pending rows", async () => {
+    it("polling and availability refresh preserve the pending draft item and leave submitted rows alone", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
-      await click("Cedevita"); await act(async () => vi.advanceTimersByTimeAsync(15000)); expectComplete(4, "850.00");
-      await act(async () => pending.resolve(response({ item: f.created() }))); await act(async () => vi.advanceTimersByTimeAsync(4000)); expectComplete(4, "850.00");
+      await click("Cedevita"); await act(async () => vi.advanceTimersByTimeAsync(15000)); expectDraft(1, "150.00");
+      await act(async () => pending.resolve(response({ item: f.created() }))); await act(async () => vi.advanceTimersByTimeAsync(4000)); expectDraft(1, "150.00");
+      expectSubmittedIntact();
     });
-    it("Submit waits for pending work and reconciles complete order without duplicates", async () => {
+    it("Submit waits for pending work, then reconciles the new item into submitted status with an empty draft panel", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" })); const pending = f.hold();
       await click("Cedevita"); await click("Pošalji nove stavke"); expect(calls("/api/pos/orders/o5/submit")).toHaveLength(0);
-      await act(async () => pending.resolve(response({ item: f.created() }))); expectComplete(4, "850.00");
+      await act(async () => pending.resolve(response({ item: f.created() })));
+      expectDraft(0, "0.00");
       expect(shell.getDraft("5").getSnapshot().order!.items).toHaveLength(3);
+      expect(shell.getDraft("5").getSnapshot().order!.items.every(i => i.status !== "DRAFT")).toBe(true);
+      expect(submittedBox()?.textContent).toContain("Cedevita");
       expect(calls("/api/pos/orders/o5/submit")).toHaveLength(1);
       expect(JSON.parse(calls("/api/pos/orders/o5/submit")[0][1].body)).toEqual({ idempotencyKey: expect.any(String) });
     });
-    it("reopens the full order after Submit", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await click("Cedevita"); await click("Pošalji nove stavke"); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" })); expectComplete(4, "850.00"); });
-    it("isolates active table orders", async () => { fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(OrderClient, { tableId: "12" })); expect(panel().textContent).toContain("Other table"); expect(panel().textContent).not.toContain("Omlet"); await render(h(OrderClient, { tableId: "5" })); expectComplete(); });
-    it("counts submitted quantities and excludes cancelled lines from the active total", async () => {
+    it("reopens with the newly-submitted item in the submitted section, draft panel empty again", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" })); await click("Cedevita"); await click("Pošalji nove stavke");
+      await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+      expectDraft(0, "0.00"); expect(submittedBox()?.textContent).toContain("Cedevita");
+    });
+    it("isolates active table orders — table 12's submitted row never leaks into table 5's view or vice versa", async () => {
+      fixture(); await render(h(OrderClient, { tableId: "5" })); await render(h(OrderClient, { tableId: "12" }));
+      // "Omlet" is also a real catalog item, so it always appears in the shared
+      // menu grid — the isolation check must be scoped to the submitted section.
+      expect(submittedBox()?.textContent).toContain("Other table");
+      expect(submittedBox()?.textContent).not.toContain("Omlet");
+      await render(h(OrderClient, { tableId: "5" }));
+      expectSubmittedIntact(); expect(submittedBox()?.textContent).not.toContain("Other table");
+    });
+    it("a locally-added CANCELLED line never appears as a draft row nor inflates the editable panel", async () => {
       fixture(); await render(h(OrderClient, { tableId: "5" }));
       await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, items: [...previous!.items, { ...line, id: "voided", status: "CANCELLED", quantity: 10 }] })));
-      expectComplete(); expect(panel().textContent).not.toContain("0 stavki");
+      expectDraft(0, "0.00"); expectSubmittedIntact();
     });
-    it("uses item history even when aggregate order status is DRAFT", async () => {
+    it("uses item history even when aggregate order status is DRAFT — nothing shown as an editable draft row", async () => {
       fixture(); await render(h(OrderClient, { tableId: "5" }));
       await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, status: "DRAFT" })));
-      expectComplete(); expect(host.textContent).toContain("Poslato / U pripremi");
+      expectDraft(0, "0.00"); expect(host.textContent).toContain("Poslato / U pripremi");
       expect(panel().querySelectorAll('button[aria-label^="Ukloni"]')).toHaveLength(0);
       const submit = [...panel().querySelectorAll("button")].find(b => b.textContent === "Pošalji nove stavke");
       expect(submit?.disabled).toBe(true);
     });
-    it("late polling response cannot erase submitted or newer optimistic rows", async () => {
+    it("late polling response cannot erase the submitted section or the newer optimistic draft row", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
       const route = custom; const poll = deferred<Response>();
       custom = (url, options) => url === "/api/pos/orders/o5" ? poll.promise : route(url, options);
       await act(async () => vi.advanceTimersByTimeAsync(4000));
       const pending = f.hold(); await click("Cedevita");
       await act(async () => poll.resolve(response({ order: { ...order(), items: f.sent } })));
-      expectComplete(4, "850.00");
+      expectDraft(1, "150.00"); expectSubmittedIntact();
       await act(async () => pending.resolve(response({ item: f.created() })));
     });
-    it("failed optimistic add and retry retain submitted items and total", async () => {
+    it("failed optimistic add and retry keep the draft row isolated from the submitted section", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
       const route = custom;
       custom = (url, options) => url === "/api/pos/orders/o5/items" ? Promise.reject(new TypeError("offline")) : route(url, options);
-      await click("Cedevita"); expectComplete(4, "850.00"); expect(host.textContent).toContain("Pokušaj ponovo");
-      custom = route; await click("Pokušaj ponovo"); expectComplete(4, "850.00");
+      await click("Cedevita"); expectDraft(1, "150.00"); expect(host.textContent).toContain("Pokušaj ponovo");
+      custom = route; await click("Pokušaj ponovo"); expectDraft(1, "150.00");
+      expectSubmittedIntact();
       expect(shell.getDraft("5").getSnapshot().order!.items.filter(i => i.status !== "DRAFT")).toEqual(f.sent);
       const requests = calls("/api/pos/orders/o5/items").map(([, options]) => JSON.parse(options.body).clientMutationId);
       expect(new Set(requests).size).toBe(1);
     });
-    it("READY update and notice retain complete order while new draft is pending", async () => {
+    it("READY update keeps the submitted section correct while a new draft item is pending, never duplicated", async () => {
       const f = fixture(); await render(h(OrderClient, { tableId: "5" }));
       await act(async () => shell.getDraft("5").setOrder(previous => ({ ...previous!, items: previous!.items.map(i => i.id === "sent1" ? { ...i, status: "READY" } : i) })));
-      const pending = f.hold(); await click("Cedevita"); expectComplete(4, "850.00");
+      const pending = f.hold(); await click("Cedevita"); expectDraft(1, "150.00");
       expect(host.textContent).toContain("Preuzeto");
       await act(async () => pending.resolve(response({ item: f.created() })));
-      expectComplete(4, "850.00");
+      expectDraft(1, "150.00");
     });
   });
   it("P0.5 modifier quick chip enters the P0.4 draft before confirmation with current price", async () => {
@@ -765,5 +805,50 @@ describe("Oslobodi sto", () => {
     await click("Oslobodi sto");
     expect(host.textContent).toContain("Porudžbina je u međuvremenu poslata");
     expect(shell.getDraft("5").getSnapshot().order).not.toBeNull();
+  });
+});
+
+describe("Tekuća porudžbina does not duplicate submitted rows (physical-device regression)", () => {
+  function servedItems() {
+    return ["Item0", "Item1", "Item2", "Item3"].map((name, i) => ({ ...line, id: `s${i}`, menuItemId: null, name, status: "SERVED", submittedAt: "2026-09-13T10:00:00Z" }));
+  }
+  function servedOrder() { return { ...order(), items: servedItems() }; }
+
+  it("4 submitted/SERVED items render exactly once each, and zero times in the editable draft panel", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: servedOrder() }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    for (const name of ["Item0", "Item1", "Item2", "Item3"]) {
+      expect(host.textContent!.split(name).length - 1).toBe(1);
+    }
+    expect(host.textContent).toContain("0 stavki");
+    expect(host.textContent).toContain("Nema novih stavki.");
+    expect(host.querySelector('[aria-label="Ukloni — Item0"]')).toBeNull(); // no editable row was created for a served item
+  });
+
+  it("adding one new item shows exactly it in Tekuća porudžbina; the four submitted rows stay put, unduplicated", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: servedOrder() }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Coffee"); // taps the menu grid card, adding a brand-new DRAFT item
+    expect(host.textContent).toContain("1 stavki");
+    // "Coffee" is also the only catalog item, so it always appears once more
+    // in the shared menu grid — the no-duplication check is scoped to the panel.
+    const panelEl = host.querySelector<HTMLElement>(".fixed.bottom-0")!;
+    expect(panelEl.textContent!.split("Coffee").length - 1).toBe(1);
+    for (const name of ["Item0", "Item1", "Item2", "Item3"]) {
+      expect(host.textContent!.split(name).length - 1).toBe(1); // still shown exactly once, untouched
+    }
+  });
+
+  it("submitting the new item moves it out of the draft panel and into the submitted section — never duplicated", async () => {
+    custom = url => url === "/api/pos/orders/o5" ? response({ order: servedOrder() })
+      : url === "/api/pos/orders/o5/items" ? response({ item: { ...line, id: "new-coffee" } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Coffee");
+    custom = url => url.endsWith("/submit") ? response({ order: { ...servedOrder(), items: [...servedItems(), { ...line, id: "new-coffee", status: "SUBMITTED", submittedAt: "2026-09-13T12:00:00Z" }] } }) : undefined;
+    await click("Pošalji nove stavke"); // hasEverSubmitted is already true (4 served items), so this is the label shown
+    expect(host.textContent).toContain("0 stavki");
+    expect(host.textContent).toContain("Nema novih stavki.");
+    const panelEl = host.querySelector<HTMLElement>(".fixed.bottom-0")!;
+    expect(panelEl.textContent!).not.toContain("Coffee"); // gone from the draft panel — only in "Poslato / U pripremi" now
   });
 });

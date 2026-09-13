@@ -473,8 +473,6 @@ function TableOrderClient({ tableId }: { tableId: string }) {
 
 
 
-  const { total } = view;
-
   // Sve izmene korpe (dodavanje/uklanjanje/promena količine) dele JEDNU
   // bravu — cartMutationRef je ref (sinhrono čitanje/pisanje, za razliku od
   // useState čiji je efekat vidljiv tek na sledećem render-u). Bez ovoga,
@@ -776,7 +774,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     </div>
   );
 
-  const { historyItems: sentItems, hasEverSubmitted, activeItems, sentItems: activeSentItems, draftItems, readyItems } = view;
+  const { historyItems: sentItems, hasEverSubmitted, draftItems, readyItems, draftCount, draftTotal } = view;
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
   // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
@@ -930,7 +928,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
           (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
       <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{view.count} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftCount} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
@@ -939,19 +937,21 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
             poslednje stavke pre linije/Ukupno ispod. */}
         <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
-          {activeItems.length === 0 && (
+          {draftItems.length === 0 && (
             <div className="py-2 text-center text-sm text-ink/55">
               {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
             </div>
           )}
-          {/* The panel represents the whole active order. Submitted rows are
-              read-only; only the separate DRAFT rows below expose mutations. */}
-          {activeSentItems.map(item => <SubmittedRow key={item.id} item={item} />)}
+          {/* Physical-device regression fix: this panel represents ONLY the
+              unsent round being composed. Already-submitted rows are shown
+              exactly once, in the read-only "Poslato / U pripremi" section
+              above — rendering them again here (as previously) duplicated
+              every submitted/served row underneath itself. */}
           {draftItems.map(item => <DraftRow key={item.id} item={item} canEditModifiers={(itemById.get(item.menuItemId ?? "")?.modifierGroups.length ?? 0) > 0} cartBusy={cartBusy} submitting={submitting} hasEverSubmitted={hasEverSubmitted} setEditingModifiersFor={setEditingModifiersFor} changeQuantity={updateQuantity} removeItem={deleteItem} />)}
         </div>
         <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line px-3 py-2.5">
-          <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno</span>
-          <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{total.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
+          <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno (novo)</span>
+          <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{draftTotal.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
           </span>
         </div>
         <div className="mx-auto w-full max-w-5xl shrink-0 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
@@ -1123,16 +1123,6 @@ const CategoryNavigation = memo(function CategoryNavigation({ categories, active
             </button>
           ))}
         </div>); });
-
-const SubmittedRow = memo(function SubmittedRow({ item }: { item: OrderItem }) { return (<div className="flex items-start justify-between gap-2 border-b border-line/50 py-2.5 text-sm">
-              <div className="min-w-0">
-                <p className="font-medium text-ink">{item.quantity}× {item.name}</p>
-                {item.modifiers.length > 0 && <p className="text-xs text-inkSoft">{item.modifiers.map(m => m.optionName).join(", ")}</p>}
-                {item.note && <p className="text-xs italic text-inkSoft">{item.note}</p>}
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${ITEM_STATUS_TONE[item.status]}`}>{ITEM_STATUS_LABEL[item.status]}</span>
-              </div>
-              <span className="shrink-0 font-semibold tabular-nums text-ink">{(Number(item.price) * item.quantity).toFixed(2)} <span className="text-xs font-normal text-inkSoft">RSD</span></span>
-            </div>); });
 
 const HistoryRow = memo(function HistoryRow({ item, canVoid, setVoidingItem }: { item: OrderItem; canVoid: boolean; setVoidingItem: (item: OrderItem) => void }) { return (<div className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
                   <div>
