@@ -1,4 +1,5 @@
 import { prisma, Prisma } from "@rcs/db";
+export { getActiveTableOrder } from "./active-table-order";
 import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";

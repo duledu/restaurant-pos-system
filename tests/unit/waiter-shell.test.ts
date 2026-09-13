@@ -17,7 +17,7 @@ const menu = { restaurantId: "r1", locationId: "l1", menuVersion: 1, categories:
 const overlay = { locationId: "l1", items: [{ menuItemId: "m1", stock: null, recipeAvailability: null, availability: { isAvailable: true, reasonCode: null, reasonLabel: null } }] };
 const floors = [{ id: "f1", name: "Main", tables: ["5", "12"].map(id => ({ id, label: `Table ${id}`, status: "FREE", capacity: 4, activeOrderOwnerId: "e1", readyItems: [] })) }];
 const line = { id: "i1", menuItemId: "m1", name: "Coffee", price: "200", quantity: 1, note: null, status: "DRAFT", modifiers: [] };
-function order(id = "5") { return { id: `o${id}`, locationId: "l1", status: "SUBMITTED", table: { label: `Table ${id}` }, items: [{ ...line }] }; }
+function order(id = "5") { return { id: `o${id}`, tableId: id, locationId: "l1", status: "SUBMITTED", table: { label: `Table ${id}` }, items: [{ ...line }] }; }
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 function response(body: unknown, ok = true) { return { ok, status: ok ? 200 : 500, json: async () => body } as Response; }
 let root: Root;
@@ -48,6 +48,14 @@ beforeEach(() => {
   fetchMock = vi.fn(async (input: string, options?: RequestInit) => {
     const url = String(input); const result = custom(url, options); if (result) return result;
     const path = url.split("?")[0];
+    if (url.startsWith("/api/pos/orders?tableId=")) {
+      const id = new URL(url, "http://fixture").searchParams.get("tableId")!;
+      // Shared order fixture serves both inspection and the existing polling
+      // detail endpoint; this is one recorded fetch, never a chained request.
+      const detail = await custom(`/api/pos/orders/o${id}`, options);
+      if (detail && !detail.ok) return detail;
+      return response({ table: { id, locationId: "l1" }, ...(detail ? await detail.json() : { order: order(id) }) });
+    }
     if (path === "/api/pos/me") return response({ restaurantId: "r1", employeeId: "e1", firstName: "Ana", lastName: "A", roles: ["WAITER"], locationIds: ["l1"] });
     if (path === "/api/pos/menu/snapshot") return response(menu);
     if (path === "/api/pos/menu/availability") return response(overlay);
@@ -64,6 +72,106 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("broad search progressively exposes every match and precise queries still search the whole menu", async () => {
+    const items = Array.from({ length: 125 }, (_, i) => ({ ...menuItem, id: `m${i}`, name: `Drink ${i}` }));
+    custom = url => url.includes('/snapshot') ? response({ ...menu, items })
+      : url.includes('/availability') ? response({ ...overlay, items: items.map(i => ({ ...overlay.items[0], menuItemId: i.id })) }) : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    const input = host.querySelector('input')!;
+    const search = async (value: string) => act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    const count = () => [...host.querySelectorAll('button')].filter(b => b.className.includes('min-h-[104px]')).length;
+    expect(count()).toBe(125); // Categories are not capped.
+    await search('Drink'); expect(count()).toBe(60); expect(host.textContent).toContain('60 od 125');
+    await click('Prikaži još'); expect(count()).toBe(120);
+    await click('Prikaži još'); expect(count()).toBe(125); expect(host.textContent).not.toContain('Prikaži još');
+    await search('Drink 124'); expect(count()).toBe(1);
+    await search('Drink'); expect(count()).toBe(60);
+  });
+  it("cold occupied inspection is one GET, with no order creation", async () => {
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain("Coffee");
+    expect(calls("/api/pos/orders")).toHaveLength(1);
+    expect(calls("/api/pos/orders")[0][0]).toBe("/api/pos/orders?tableId=5");
+    expect(calls("/api/pos/orders")[0][1]?.method).not.toBe("POST");
+    expect(calls("/api/pos/orders/o5")).toHaveLength(0);
+  });
+  it("empty inspection creates nothing; only explicit start opens an order", async () => {
+    custom = url => url.startsWith('/api/pos/orders?') ? response({ table: { id: '5', locationId: 'l1' }, order: null }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(shell.getDraft("5").getSnapshot().order).toBeNull();
+    expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
+    await click("Započni porudžbinu");
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain("Coffee");
+    expect(fetchMock.mock.calls.filter(([u, o]) => u === '/api/pos/orders' && o?.method === 'POST')).toHaveLength(1);
+  });
+  it("cached empty inspection is local-first and creation stays queued across navigation", async () => {
+    const create = deferred<Response>();
+    custom = (url, options) => url.startsWith('/api/pos/orders?') ? response({ table: { id: '5', locationId: 'l1' }, order: null })
+      : url === '/api/pos/orders' && options?.method === 'POST' ? create.promise : undefined;
+    await render(h(OrderClient, { tableId: '5' })); await render(h(PosClient));
+    const read = deferred<Response>();
+    custom = (url, options) => url.startsWith('/api/pos/orders?') ? read.promise
+      : url === '/api/pos/orders' && options?.method === 'POST' ? create.promise : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    expect(host.textContent).toContain('Započni porudžbinu');
+    await click('Započni porudžbinu'); await render(h(PosClient)); await render(h(OrderClient, { tableId: '5' }));
+    await click('Započni porudžbinu'); // The table-owned pending queue rejects a second create.
+    expect(fetchMock.mock.calls.filter(([u, o]) => u === '/api/pos/orders' && o?.method === 'POST')).toHaveLength(1);
+    await act(async () => create.resolve(response({ order: order() })));
+    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: order() })));
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
+  });
+  it("normal modifier confirmation remains immediate and preserves its selected option", async () => {
+    const drink = { ...menuItem, modifierGroups: [{ group: { id: 'g', name: 'Extras', isActive: true, required: false, minSelect: 0, maxSelect: 1, options: [{ id: 'lemon', name: 'Lemon', priceDelta: '20', isActive: true }] } }] };
+    const added = deferred<Response>();
+    custom = url => url.includes('/snapshot') ? response({ ...menu, items: [drink] }) : url === '/api/pos/orders/o5/items' ? added.promise : undefined;
+    await render(h(OrderClient, { tableId: '5' })); await click('Coffee'); await click('Lemon');
+    await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent?.startsWith('Dodaj') && b.textContent.includes('RSD'))!.click());
+    expect(JSON.parse(calls('/api/pos/orders/o5/items')[0][1].body).modifierOptionIds).toEqual(['lemon']);
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('420.00');
+    expect(shell.getDraft('5').getSnapshot().order!.items).toHaveLength(2);
+    await act(async () => added.resolve(response({ item: { ...line, id: 'lemon-row', price: '220', modifiers: [{ id: 'opt', modifierOptionId: 'lemon', groupName: 'Extras', optionName: 'Lemon', priceDelta: '20' }] } })));
+  });
+  it("rejects an order belonging to a different table even on the same location", async () => {
+    custom = url => url.startsWith('/api/pos/orders?') ? response({ table: { id: '5', locationId: 'l1' }, order: order('12') }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(shell.getDraft("5").getSnapshot().order).toBeNull();
+    expect(host.textContent).not.toContain("Započni porudžbinu");
+  });
+  it("an inspected empty table discovers a remotely opened order through read-only polling", async () => {
+    custom = url => url.startsWith('/api/pos/orders?') ? response({ table: { id: '5', locationId: 'l1' }, order: null }) : undefined;
+    await render(h(OrderClient, { tableId: '5' }));
+    custom = () => undefined;
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
+    expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
+  });
+  it("a late empty inspection cannot erase a newer pending add", async () => {
+    await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient));
+    const read = deferred<Response>();
+    custom = url => url.startsWith('/api/pos/orders?') ? read.promise : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    await labelClick("Povećaj količinu — Coffee");
+    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: null })));
+    expect(shell.getDraft("5").getSnapshot().order?.items[0].quantity).toBe(2);
+  });
+  it("category/search state stays coherent through cart updates", async () => {
+    const tea = { ...menuItem, id: 'tea', name: 'Tea', categoryId: 'c2' };
+    const read = deferred<Response>();
+    custom = url => url.includes('/snapshot') ? response({ ...menu, categories: [...menu.categories, { id: 'c2', name: 'Food', type: 'FOOD' }], items: [menuItem, tea] })
+      : url.includes('/availability') ? response({ ...overlay, items: [...overlay.items, { ...overlay.items[0], menuItemId: 'tea' }] })
+      : url.startsWith('/api/pos/orders?') ? read.promise : undefined;
+    await render(h(OrderClient, { tableId: "5" })); await click('Food');
+    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: order() })));
+    const menuButtons = () => [...host.querySelectorAll('button')].filter(b => b.className.includes('min-h-[104px]')).map(b => b.textContent);
+    expect(menuButtons().join()).toContain('Tea'); expect(menuButtons().join()).not.toContain('Coffee');
+    await labelClick("Povećaj količinu — Coffee"); expect(menuButtons().join()).toContain('Tea');
+    const input = host.querySelector('input')!;
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Coffee'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(menuButtons().join()).toContain('Coffee'); expect(menuButtons().join()).not.toContain('Tea');
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, ''); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(menuButtons().join()).toContain('Tea');
+  });
   it("unchanged order, table and availability polls preserve accepted references", async () => {
     await render(h(OrderClient, { tableId: "5" }));
     const data = shell.data;
@@ -351,7 +459,7 @@ describe("mounted persistent waiter shell", () => {
     for (const id of ["5", "12", "5"]) {
       const before = fetchMock.mock.calls.length;
       await render(h(OrderClient, { tableId: id })); expect(host.textContent).toContain(`Table ${id}`); expect(host.textContent).toContain("Drinks");
-      expect(fetchMock.mock.calls.slice(before).map(([url]) => url)).toEqual(["/api/pos/orders", `/api/pos/orders/o${id}`]);
+      expect(fetchMock.mock.calls.slice(before).map(([url]) => url)).toEqual([`/api/pos/orders?tableId=${id}`]);
       const after = fetchMock.mock.calls.length; await render(h(PosClient)); expect(fetchMock).toHaveBeenCalledTimes(after);
       expect(host.textContent).not.toContain("Pripremamo vašu smenu");
     }

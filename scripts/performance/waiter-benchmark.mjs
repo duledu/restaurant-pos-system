@@ -8,12 +8,12 @@ import { resolve } from 'node:path';
 import { WebSocket } from 'ws';
 const label = process.argv[2];
 if (!['baseline', 'after'].includes(label)) throw new Error('Use baseline or after');
-const out = resolve('.tmp/waiter-performance'); await mkdir(out, { recursive: true });
+const out = resolve('.tmp/waiter-hot-path'); await mkdir(out, { recursive: true });
 const bundle = await build({ entryPoints: ['scripts/performance/waiter-fixture.tsx'], bundle: true, write: false, platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, plugins: [{ name: 'fixture', setup(b) {
   // Reproducible baseline without checking out files or changing the worktree.
   if (label === 'baseline') b.onLoad({ filter: /apps[\\/]web[\\/].*\.(ts|tsx)$/ }, async a => {
     const path = a.path.slice(resolve('.').length + 1).replaceAll('\\', '/');
-    const contents = execFileSync('git', ['show', `7496000cbe85f38d596c5d0ed65f40deb45e19e5:${path}`], { encoding: 'utf8' });
+    const contents = execFileSync('git', ['show', `717d59d9b8d5dfad54468ef4c4cbe543a68e95db:${path}`], { encoding: 'utf8' });
     return { contents, loader: path.endsWith('.tsx') ? 'tsx' : 'ts', resolveDir: resolve(a.path, '..') };
   });
   b.onResolve({ filter: /^next\/navigation$|\/AppLogo$|\/QuickLockButton$|\/LogoutButton$/ }, a => ({ path: a.path, namespace: 'stub' }));
@@ -59,29 +59,34 @@ try {
       const named=prefix=>[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')?.startsWith(prefix));
       const input=value=>{const el=document.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));};
       const results=[];
-      async function measure(action,fn,usable=false){
+      const count=()=>Number(document.querySelector('.fixed.bottom-0 > div:first-child > span')?.textContent.split(' ')[0] ?? 0);
+      async function measure(action,fn,usable=false,delta){
+        const beforeCount=count();
         const index=bench.renders.length,requestIndex=bench.requests.length;let start=performance.now(),marked=false;
         const mark=()=>{if(!marked){start=performance.now();marked=true;}};
         document.addEventListener('click',mark,true);document.addEventListener('input',mark,true);
         try{fn();}finally{document.removeEventListener('click',mark,true);document.removeEventListener('input',mark,true);}await frames();
-        if(usable)while(!document.querySelector('.fixed.bottom-0')){if(performance.now()-start>10000)throw new Error('Order did not become usable');await frames();}
+        if(usable)while(!document.querySelector('.fixed.bottom-0')&&!button('Započni porudžbinu')){if(performance.now()-start>10000)throw new Error('Order did not become usable');await frames();}
         const end=performance.now(), renders=bench.renders.slice(index);
-        results.push({action,commitMs:renders.length?renders.at(-1).commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>r.method+' '+r.url)});
+        if(delta!==undefined && count()!==beforeCount+delta)throw new Error(action+' count mismatch: '+beforeCount+' -> '+count());
+        const visibleCommit=usable?renders.find(r=>r.usableOrder||r.inspectedEmpty):renders[0];
+        results.push({action,start,firstCommitMs:renders[0]?.commitTime-start,commitMs:visibleCommit?visibleCommit.commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>({method:r.method,url:r.url,start:r.start-start,end:r.duration?r.start+r.duration-start:null}))});
       }
       await measure('occupied cold open',()=>button('Table 1')?.click() || bench.navigate('/waiter/tables/1'),true);
       await wait(500);
-      await measure('item add',()=>[...document.querySelectorAll('button')].find(b=>b.firstElementChild?.textContent==='Drink 12').click());await wait(250);
-      await measure('rapid +1 (5 taps)',()=>{for(let i=0;i<5;i++)named('Povećaj').click();});
-      await measure('decrement',()=>named('Umanji').click());await wait(650);
+      await measure('item add',()=>[...document.querySelectorAll('button')].find(b=>b.firstElementChild?.textContent==='Drink 12').click(),false,1);await wait(700);
+      await measure('rapid +1',()=>named('Povećaj').click(),false,1);
+      for(let i=0;i<4;i++){named('Povećaj').click();await frames();}
+      await measure('decrement',()=>named('Umanji').click(),false,-1);await wait(700);
       await measure('remove draft',()=>named('Ukloni').click());await wait(250);
       await measure('category switch',()=>button('Category 1').click());
       await measure('search 240 results',()=>input('Drink'));
       await measure('clear search',()=>input(''));
       button('Category 0').click();await frames();
       await measure('modifier open',()=>[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Drink 0')).click());
-      await measure('modifier confirm',()=>[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Dodaj')&&b.textContent.includes('RSD')).click());await wait(250);
-      await measure('quick +1',()=>named('Brzo dodaj').click());await wait(250);
-      await measure('repeat last round',()=>button('Ponovi poslednju rundu').click());await wait(900);
+      await measure('modifier confirm',()=>[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Dodaj')&&b.textContent.includes('RSD')).click(),false,1);await wait(700);
+      await measure('quick +1',()=>named('Brzo dodaj').click(),false,1);await wait(700);
+      await measure('repeat last round',()=>button('Ponovi poslednju rundu').click(),false,3);await wait(900);
       await measure('back to tables',()=>bench.navigate('/waiter/tables'));
       await measure('empty cold open',()=>bench.navigate('/waiter/tables/24'),true);await wait(500);
       await measure('back from empty',()=>bench.navigate('/waiter/tables'));
@@ -100,5 +105,5 @@ try {
     runs.push(result); console.log(`${label} run ${run + 1} complete`);
   }
   await writeFile(`${out}/${label}.json`, JSON.stringify({ environment: 'Chrome headless, production React profiling build, 4x CPU throttle, 412x915, 240 menu items/12 categories, 24 tables/80 submitted rows, synthetic 200ms API, external fonts disabled; not Android', runs }, null, 2));
-  console.log(`Results: .tmp/waiter-performance/${label}.json`);
+  console.log(`Results: .tmp/waiter-hot-path/${label}.json`);
 } finally { ws?.close(); browser.kill(); server.close(); }

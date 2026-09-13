@@ -23,6 +23,14 @@ async function apiFetch(url: string, options?: RequestInit) {
   return body;
 }
 
+async function inspectTable(tableId: string, locationId: string): Promise<OrderData | null> {
+  const detail = await apiFetch(`/api/pos/orders?tableId=${encodeURIComponent(tableId)}`, { cache: "no-store" });
+  if (detail.table?.id !== tableId || detail.table?.locationId !== locationId
+    || (detail.order && (detail.order.locationId !== locationId || detail.order.tableId !== tableId))) throw new Error("Sto nije na pripremljenoj lokaciji");
+  if (detail.order !== null && (!detail.order?.id || !Array.isArray(detail.order.items))) throw new Error("Porudžbina nije potpuna");
+  return detail.order;
+}
+
 const ITEM_STATUS_LABEL: Record<OrderItem["status"], string> = {
   DRAFT: "Nacrt",
   SUBMITTED: "Poslato",
@@ -335,7 +343,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   useEffect(() => { waiterNavigationVisible("menu"); }, []);
   const { data: shell, refreshAvailability, getDraft, favorites } = useWaiterShell();
   const draft = getDraft(tableId);
-  const { order, error, submitting } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
+  const { order, inspected, error, submitting } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
   const { setOrder, setError, mutations, submittingRef, submitRevision, idempotencyKeyRef, setSubmitting } = draft;
   useLayoutEffect(() => { draft.markVisible(); }, [draft, order]);
   const categories = shell.categories;
@@ -347,10 +355,8 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
   const [quickFeedback, setQuickFeedback] = useState("");
 
-  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
-  const [search, setSearch] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(() => !draft.getSnapshot().order);
+  const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
   // FAZA 10: id stavke čije se PREUZETO trenutno šalje — sprečava dupli tap
@@ -368,8 +374,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // je @@unique([restaurantId, idempotencyKey]) na Order tabeli).
   useEffect(() => () => { void draft.flush(false).catch(() => {}); }, [draft]);
 
-  const loadRequest = useRef<Promise<{ value: OrderData; read: ReturnType<typeof draft.beginRead> }> | null>(null);
-  useEffect(() => {
+  const loadRequest = useRef<Promise<{ value: OrderData | null; read: ReturnType<typeof draft.beginRead> }> | null>(null);
+  // Start the async read at commit, before layout/paint of the prepared menu.
+  // No network response is awaited on the rendering path.
+  useLayoutEffect(() => {
     let active = true;
     loadRequest.current ??= (async () => {
       // Returning while a create is pending keeps the local cart visible;
@@ -377,25 +385,48 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       if (draft.pending) await draft.flush(false);
       const read = draft.beginRead();
       const finishTiming = waiterTiming("order-open");
-      const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
-      if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
-      const detail = await apiFetch(`/api/pos/orders/${opened.order.id}`);
+      const value = await inspectTable(tableId, shell.locationId);
       finishTiming();
-      return { value: detail.order as OrderData, read };
+      return { value, read };
     })();
     loadRequest.current.then(({ value, read }) => {
-      if (active) draft.acceptRead(value, read);
+      if (active) {
+        // Queue the loading flag before the external-store notification so
+        // the first usable order does not need a second completion render.
+        setLoading(false);
+        draft.acceptRead(value, read);
+      }
     })
-      .catch(e => { if (active) setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); })
-      .finally(() => { if (active) setLoading(false); });
+      .catch(e => { if (active) { setLoading(false); setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); } });
     return () => { active = false; };
   }, [tableId, shell.locationId, draft, setError]);
+
+  const openingOrder = useRef(false);
+  async function startOrder() {
+    if (openingOrder.current || loading || draft.pending || draft.getSnapshot().order) return;
+    openingOrder.current = true;
+    setLoading(true); setError(null);
+    const release = draft.holdReads();
+    try {
+      // Only explicit waiter intent may create an order. Preserve the existing
+      // open/shift/audit transaction and its complete detail authorization.
+      await mutations.enqueue(async () => {
+        const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
+        if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
+        const detail = await apiFetch(`/api/pos/orders/${opened.order.id}`);
+        if (detail.order?.id !== opened.order.id || detail.order?.tableId !== tableId
+          || detail.order?.locationId !== shell.locationId || !Array.isArray(detail.order?.items)) throw new Error("Porudžbina nije potpuna");
+        setOrder(detail.order);
+      });
+    } catch (e) { setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); }
+    finally { release(); openingOrder.current = false; setLoading(false); }
+  }
 
   // Nakon slanja porudžbine, poll-uj status stavki da konobar vidi promene
   // sa kuhinje/šanka bez ručnog osvežavanja stranice (isti MVP pristup kao
   // KDS ekrani — polling na par sekundi, bez SSE potrošnje za sada).
   useEffect(() => {
-    if (!order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
+    if (!inspected || order?.status === "COMPLETED" || order?.status === "CANCELLED") return;
     let active = true;
     let pending = false;
     const interval = setInterval(async () => {
@@ -403,8 +434,8 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       pending = true;
       const read = draft.beginRead();
       try {
-        const refreshed = await apiFetch(`/api/pos/orders/${order.id}`);
-        if (active) draft.acceptRead(refreshed.order, read);
+        const refreshed = order ? (await apiFetch(`/api/pos/orders/${order.id}`)).order : await inspectTable(tableId, shell.locationId);
+        if (active) draft.acceptRead(refreshed, read);
       } catch {
         // Tiha greška na pozadinskom osvežavanju — ne prekidaj rad konobara.
       }
@@ -412,7 +443,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     }, 4000);
     return () => { active = false; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order?.id, order?.status]);
+  }, [order?.id, order?.status, inspected]);
 
   // P3.3/P0.3: dok je porudžbina OTVORENA, status zalihe se osvežava umereno
   // u pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s). VIŠE-
@@ -425,7 +456,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // — isti okidač/kadenca, ali ažurira DELJENI overlay, pa sto na koji se
   // konobar vrati posle ovoga odmah vidi već svež overlay bez čekanja.
   useEffect(() => {
-    if (!order || order.status === "COMPLETED" || order.status === "CANCELLED") return;
+    if (!inspected || order?.status === "COMPLETED" || order?.status === "CANCELLED") return;
     const interval = setInterval(() => {
       refreshAvailability().catch(() => {
         // Tiha greška — vidi napomenu u waiter-shell.tsx refreshAvailability:
@@ -434,12 +465,9 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       });
     }, 15000);
     return () => clearInterval(interval);
-  }, [order?.status, refreshAvailability]);
+  }, [order?.status, inspected, refreshAvailability]);
 
-  const visibleItems = useMemo(
-    () => filterMenuItems(items, search, activeCategoryId),
-    [items, activeCategoryId, search]
-  );
+
 
   const { total } = view;
 
@@ -679,11 +707,15 @@ function TableOrderClient({ tableId }: { tableId: string }) {
 
   if (!order) return (
     <div className="min-h-screen bg-cream-200 p-3">
+      <div>
       <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
       <h1 className="text-xl font-bold">{shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina"}</h1>
-      <p role="status" className="py-3">{loading ? "Otvaramo porudžbinu…" : error ?? "Porudžbina nije pronađena"}</p>
-      <div className="flex gap-2 overflow-x-auto">{categories.map(c => <button key={c.id} onClick={() => setActiveCategoryId(c.id)} className="min-h-11 rounded-md bg-white px-4">{c.name}</button>)}</div>
-      <div className="grid grid-cols-2 gap-3 py-3 sm:grid-cols-3 lg:grid-cols-4">{visibleItems.map(item => <button key={item.id} disabled className="min-h-24 rounded-lg border border-line bg-white p-4 text-left"><span className="block font-semibold">{item.name}</span><span>{Number(item.price).toFixed(2)} RSD</span></button>)}</div>
+      </div>
+      <div className="mx-auto w-full max-w-5xl">
+      <p role="status" className="py-3">{loading ? "Otvaramo porudžbinu…" : error ?? "Sto nema aktivnu porudžbinu."}</p>
+      {!loading && !error && <button type="button" onClick={startOrder} className="min-h-12 rounded-md bg-gold px-5 py-3 font-semibold text-white">Započni porudžbinu</button>}
+      <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
+      </div>
     </div>
   );
 
@@ -834,18 +866,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           <p className="mx-3 mt-1 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Izaberi artikle</p>
         )}
 
-        <input
-          ref={searchInputRef}
-          onFocus={(e) => e.currentTarget.scrollIntoView({ behavior: "smooth", block: "start" })}
-          className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
-          placeholder="Pretraga menija…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-
-        {!search && <CategoryNavigation categories={categories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
-
-        <MenuGrid visibleItems={visibleItems} submitting={submitting} handleTapMenuItem={tapMenu} />
+        <MenuBrowser key="menu" items={items} categories={categories} submitting={submitting} tapMenu={tapMenu} searchInputRef={searchInputRef} />
       </div>
 
       {/* Sticky pregled porudžbine — FLEX KOLONA sa eksplicitnim gornjim
@@ -1120,3 +1141,30 @@ function useCommittedCallback<Args extends unknown[], Result>(callback: (...args
   useLayoutEffect(() => { ref.current = callback; });
   return useCallback((...args: Args) => ref.current(...args), []);
 }
+
+// Browsing state is local to the menu: category/search never rebuild the order panel.
+const MenuBrowser = memo(function MenuBrowser({ items, categories, submitting, tapMenu, searchInputRef }: { items: MenuItem[]; categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; submitting: boolean; tapMenu: (item: MenuItem) => void; searchInputRef: React.RefObject<HTMLInputElement> }) {
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
+  const [search, setSearch] = useState("");
+  const [resultLimit, setResultLimit] = useState(60);
+  const matches = useMemo(
+    () => filterMenuItems(items, search, activeCategoryId),
+    [items, activeCategoryId, search]
+  );
+  const visibleItems = useMemo(() => search.trim() ? matches.slice(0, resultLimit) : matches, [matches, resultLimit, search]);
+return (<>
+        <input
+          ref={searchInputRef}
+          onFocus={(e) => e.currentTarget.scrollIntoView({ behavior: "smooth", block: "start" })}
+          className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
+          placeholder="Pretraga menija…"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setResultLimit(60); }}
+        />
+
+        {!search && <CategoryNavigation categories={categories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
+
+        <MenuGrid visibleItems={visibleItems} submitting={submitting} handleTapMenuItem={tapMenu} />
+        {visibleItems.length < matches.length && <button type="button" onClick={() => setResultLimit(limit => limit + 60)} className="mx-3 mb-3 min-h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 py-3 font-semibold text-gold-dark">Prikaži još · {visibleItems.length} od {matches.length}</button>}
+</>);
+});

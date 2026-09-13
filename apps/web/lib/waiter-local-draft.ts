@@ -27,7 +27,7 @@ type Creation = {
  * Existing confirmed-line quantity/remove operations still use the same queue.
  */
 export function createWaiterLocalDraft() {
-  let snapshot: { order: OrderData | null; error: string | null; submitting: boolean } = { order: null, error: null, submitting: false };
+  let snapshot: { order: OrderData | null; inspected: boolean; error: string | null; submitting: boolean } = { order: null, inspected: false, error: null, submitting: false };
   // Keep the existing Submit guard/key through navigation too; business rules
   // and key rotation remain in OrderClient's unchanged authoritative Submit.
   const submittingRef = { current: false };
@@ -50,11 +50,11 @@ export function createWaiterLocalDraft() {
   // Submit. Never merge an ambiguous server create with a temporary intent.
   const beginRead = () => ({ sequence: ++readSequence, mutation: mutations.revision,
     submission: submitRevision.current, blocked: pending() || submittingRef.current || readHolds > 0 });
-  function acceptRead(order: OrderData, read: ReturnType<typeof beginRead>) {
+  function acceptRead(order: OrderData | null, read: ReturnType<typeof beginRead>) {
     if (read.blocked || read.sequence !== readSequence || pending() || submittingRef.current || readHolds > 0
       || read.mutation !== mutations.revision || read.submission !== submitRevision.current) return false;
     const shared = shareWaiterSnapshot(snapshot.order, order);
-    if (shared !== snapshot.order) setOrder(shared);
+    if (!snapshot.inspected || shared !== snapshot.order) setOrder(shared);
     return true;
   }
   const visibleTimings: Array<() => void> = [];
@@ -62,7 +62,7 @@ export function createWaiterLocalDraft() {
   const setError = (error: string | null) => { snapshot = { ...snapshot, error }; emit(); };
   const setSubmitting = (submitting: boolean) => { snapshot = { ...snapshot, submitting }; emit(); };
   const setOrder = (update: OrderData | null | ((previous: OrderData | null) => OrderData | null)) => {
-    snapshot = { ...snapshot, order: typeof update === "function" ? update(snapshot.order) : update }; emit();
+    snapshot = { ...snapshot, inspected: true, order: typeof update === "function" ? update(snapshot.order) : update }; emit();
   };
   function patchLine(id: string, update: (item: OrderItem) => OrderItem | null) {
     setOrder(previous => previous ? { ...previous, items: previous.items.flatMap(item => item.id === id ? (update(item) ?? []) : item) } : previous);
