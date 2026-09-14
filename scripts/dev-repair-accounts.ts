@@ -9,12 +9,11 @@
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "crypto";
 import { hashPin } from "@rcs/auth";
+import { resolveDatabaseTarget } from "./lib/resolve-db-target.mjs";
 
 if (process.env.NODE_ENV === "production") {
   throw new Error("Zabranjeno pokretanje u produkciji.");
 }
-
-const prisma = new PrismaClient();
 
 function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
@@ -67,6 +66,12 @@ const DEV_ACCOUNTS: Array<{
 
 async function main() {
   console.log("🔧  Dev Account Repair — idempotentno\n");
+
+  const target = await resolveDatabaseTarget();
+  if (target.environment === "production") {
+    throw new Error("dev-repair-accounts.ts kreira javno poznate dev kredencijale — zabranjeno pokretanje sa --env=production.");
+  }
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
 
   // 1. Upsert tenant
   const tenant = await prisma.tenant.upsert({
@@ -254,11 +259,10 @@ async function main() {
   }
   console.log(`\n   restaurantId: ${restaurant.id}`);
   console.log(`   locationId:   ${location.id}`);
+  await prisma.$disconnect();
 }
 
-main()
-  .catch((e) => {
-    console.error("❌ Greška:", e.message);
-    process.exit(1);
-  })
-  .finally(() => prisma.$disconnect());
+main().catch((e) => {
+  console.error("❌ Greška:", e.message);
+  process.exit(1);
+});

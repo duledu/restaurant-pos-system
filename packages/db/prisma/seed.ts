@@ -9,8 +9,7 @@
 import { PrismaClient } from "@prisma/client";
 import { hashPin } from "@rcs/auth";
 import { randomBytes, scryptSync } from "crypto";
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
@@ -64,6 +63,16 @@ async function main() {
   if (process.env.NODE_ENV === "production") {
     throw new Error("seed.ts kreira javno poznate dev kredencijale — zabranjeno pokretanje sa NODE_ENV=production.");
   }
+  // Explicit, validated target — see scripts/lib/resolve-db-target.mjs. This
+  // script creates PUBLICLY KNOWN dev credentials (owner@dev.local etc.) and
+  // must never be able to silently resolve to Production the way a bare
+  // `new PrismaClient()` did before the 2026-09-14 incident.
+  const target = await resolveDatabaseTarget();
+  if (target.environment === "production") {
+    throw new Error("seed.ts kreira javno poznate dev kredencijale — zabranjeno pokretanje sa --env=production.");
+  }
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
+  try {
   console.log("⚠️  DEV SEED — nije za produkciju.");
 
   const tenant = await prisma.tenant.create({
@@ -203,13 +212,12 @@ async function main() {
   console.log("   Owner login: owner@dev.local / DevOwner123!");
   console.log("   Konobar PIN primer: 1001 (Konobar1)");
   console.log(`   restaurantId za seed-menu.ts: ${restaurant.id}`);
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

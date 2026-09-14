@@ -85,8 +85,14 @@ export function QzSettingsPanel() {
   return (
     <Card className="p-5">
       <div className="mb-3">
+        <div className="mb-1.5 inline-flex items-center gap-1.5 rounded-full bg-cream-200 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-inkSoft">
+          Rezervni/ručni metod
+        </div>
         <h2 className="font-semibold text-ink">QZ direktna štampa — ovaj računar</h2>
         <p className="mt-0.5 text-xs text-inkSoft">
+          Preporučen način je TableCore Print Agent iznad — tiha štampa bez browser prozora, bez ručnog
+          &ldquo;Allow&rdquo; odobrenja po tiketu. QZ ostaje dostupan kao ručni rezervni metod za računare bez uparenog
+          agenta, i NIKAD se ne aktivira istovremeno sa aktivnim agentom za istu stanicu (agent ima prioritet).
           Vezano za FIZIČKI računar/browser na kome se ovo sačuva (npr. kuhinjski računar), ne za restoran u celini.
           Konobar/kuhinja ne vide ovo podešavanje — samo status.
         </p>

@@ -20,16 +20,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
-
-// ─── Safety ──────────────────────────────────────────────────────────────────
-const dbUrl = process.env.DATABASE_URL ?? "";
-const testDbUrl = process.env.TEST_DATABASE_URL ?? "";
-if (testDbUrl && dbUrl && testDbUrl === dbUrl) {
-  console.error("ABORT: DATABASE_URL === TEST_DATABASE_URL. Refusing to run on the test database.");
-  process.exit(1);
-}
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 // ─── Slug helper (identical to seed-menu-data.ts) ────────────────────────────
 function slugify(s: string): string {
@@ -243,6 +234,13 @@ const CONFIRMATION_NOTE =
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
+  // Explicit, validated target — see scripts/lib/resolve-db-target.mjs.
+  // Supersedes the old DATABASE_URL===TEST_DATABASE_URL ad hoc check: the
+  // resolver already refuses to run against the known Test endpoint under
+  // --env=preprod/--env=production, with a live-marker cross-check on top.
+  const target = await resolveDatabaseTarget();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
+
   let restaurantId = process.env.RESTAURANT_ID ?? "";
 
   if (!restaurantId) {
@@ -374,8 +372,7 @@ async function main() {
   console.log(`  Awaiting prices:      ${needsConfirmationTotal} / ${total}`);
   console.log("═".repeat(60));
   console.log("✅  Menu price import complete. Historical data untouched.");
+  await prisma.$disconnect();
 }
 
-main()
-  .catch((e) => { console.error(e); process.exit(1); })
-  .finally(() => prisma.$disconnect());
+main().catch((e) => { console.error(e); process.exit(1); });

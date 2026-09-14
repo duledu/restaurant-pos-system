@@ -22,16 +22,13 @@
  */
 import { PrismaClient } from "@prisma/client";
 import { inventory } from "@rcs/domain";
-import { loadEnv } from "./lib/env-loader.mjs";
-
-loadEnv();
+import { resolveDatabaseTarget } from "./lib/resolve-db-target.mjs";
 
 if (process.env.NODE_ENV === "production") {
   throw new Error("Zabranjeno pokretanje u produkciji.");
 }
 
 const STOCK = 30;
-const prisma = new PrismaClient();
 
 // Minimal local AuthContext-shaped object — mirrors packages/auth's
 // AuthContext exactly (see rbac.ts) so inventory.initializeTracking's
@@ -56,6 +53,12 @@ async function main() {
     console.error("Primer: RESTAURANT_ID=<id> LOCATION_ID=<id> npx tsx scripts/dev-init-inventory.mjs");
     process.exit(1);
   }
+
+  const target = await resolveDatabaseTarget();
+  if (target.environment === "production") {
+    throw new Error("dev-init-inventory.mjs je DEV/TEST-only — zabranjeno pokretanje sa --env=production.");
+  }
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
 
   const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
   if (!restaurant) {

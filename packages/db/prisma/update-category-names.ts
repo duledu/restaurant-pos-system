@@ -7,14 +7,12 @@
  * Skript je idempotent: ako je kategorija već prevedena (novi slug već postoji),
  * beleži "već ažurirano" i nastavlja dalje.
  *
- * Pokretanje:
- *   npm run db:migrate:categories
- * ili direktno:
- *   dotenv -e .env -- npx tsx packages/db/prisma/update-category-names.ts
+ * Pokretanje (eksplicitan --env, vidi scripts/lib/resolve-db-target.mjs):
+ *   RESTAURANT_ID=<id> npx tsx packages/db/prisma/update-category-names.ts --env=preprod
+ *   RESTAURANT_ID=<id> npx tsx packages/db/prisma/update-category-names.ts --env=production --confirm-production
  */
 import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 const TRANSLATIONS = [
   { from: "breakfast",       name: "Doručak",             to: "dorucak" },
@@ -41,6 +39,9 @@ async function main() {
     console.error("Postavi RESTAURANT_ID environment promenljivu.");
     process.exit(1);
   }
+
+  const target = await resolveDatabaseTarget();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
 
   const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
   if (!restaurant) {
@@ -106,8 +107,7 @@ async function main() {
   }
 
   console.log("\n✅ Migracija završena.");
+  await prisma.$disconnect();
 }
 
-main()
-  .catch((e) => { console.error(e); process.exit(1); })
-  .finally(async () => { await prisma.$disconnect(); });
+main().catch((e) => { console.error(e); process.exit(1); });

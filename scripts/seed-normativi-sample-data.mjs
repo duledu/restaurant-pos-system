@@ -7,7 +7,7 @@
 //
 // Koristi: node scripts/seed-normativi-sample-data.mjs
 import { PrismaClient } from "@prisma/client";
-import { assertDevelopmentDatabaseIsSafe } from "./lib/db-environment.mjs";
+import { resolveDatabaseTarget } from "./lib/resolve-db-target.mjs";
 
 const SAMPLE_INGREDIENTS = [
   { name: "Mleveno meso", unit: "KILOGRAM", category: "Meso" },
@@ -20,12 +20,16 @@ const SAMPLE_INGREDIENTS = [
 ];
 
 async function main() {
-  // STEP 0 — isti multi-signal gate kao svaki drugi dev-only skript:
-  // NODE_ENV, poznati Production/Test endpoint, i live marker tabela
-  // moraju SVI nezavisno potvrditi da je cilj DEVELOPMENT.
-  await assertDevelopmentDatabaseIsSafe(process.env.DATABASE_URL);
+  // Explicit, validated target — see scripts/lib/resolve-db-target.mjs.
+  // This is dev-only sample data; --env=preprod is the only sane target
+  // (production is rejected below, test is pointless — the test DB resets
+  // every run).
+  const target = await resolveDatabaseTarget();
+  if (target.environment !== "preprod") {
+    throw new Error(`seed-normativi-sample-data.mjs is DEVELOPMENT/PREPROD-only, got --env=${target.environment}.`);
+  }
 
-  const prisma = new PrismaClient();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
   try {
     const restaurants = await prisma.restaurant.findMany({ select: { id: true, name: true } });
     if (restaurants.length === 0) {

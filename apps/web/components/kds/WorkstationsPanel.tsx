@@ -187,11 +187,16 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   return (
     <Card className="p-5">
       <div className="mb-3">
+        <div className="mb-1.5 inline-flex items-center gap-1.5 rounded-full bg-gold-soft px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gold-dark">
+          Preporučen metod
+        </div>
         <h2 className="font-semibold text-ink">TableCore Print Agent — radne stanice</h2>
         <p className="mt-0.5 text-xs text-inkSoft">
-          Nezavisan Windows proces sa sopstvenim kredencijalom po fizičkom računaru — nije vezan za pojedinačni
-          browser/uređaj (za razliku od QZ podešavanja ispod). Trenutno samo identitet/status; stvarna dostava
-          tiketa preko agenta dolazi u sledećoj fazi.
+          Tiha štampa bez otvorenog browser prozora, bez Chrome dijaloga za štampu i bez ručnog odobrenja po
+          tiketu. Nezavisan Windows proces sa sopstvenim kredencijalom po fizičkom računaru — nije vezan za
+          pojedinačni browser/uređaj (za razliku od QZ podešavanja ispod, koje ostaje samo kao ručni rezervni
+          metod). Kad je radna stanica uparena i aktivna za neku stanicu (Kuhinja/Šank), ta stanica automatski
+          prima i štampa tikete — browser na kuhinjskom/šank računaru se više ne koristi za štampu.
         </p>
       </div>
 

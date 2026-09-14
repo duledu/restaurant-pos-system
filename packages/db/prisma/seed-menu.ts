@@ -33,8 +33,7 @@ import {
   slugify,
   type PreparationStationValue,
 } from "./seed-menu-data";
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 interface MenuItemSeed {
   categorySlug: string;
@@ -61,6 +60,10 @@ async function main() {
     console.error("Primer: RESTAURANT_ID=<id-iz-seed.ts-izlaza> npx ts-node prisma/seed-menu.ts");
     process.exit(1);
   }
+
+  const target = await resolveDatabaseTarget();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
+  try {
 
   const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
   if (!restaurant) {
@@ -132,13 +135,12 @@ async function main() {
   console.log(`✓ Artikli: ${created} kreirano, ${updated} ažurirano`);
   console.log(`⚠️  ${needsReviewCount} artikala čeka unos cene u Admin Panelu (needsReview=true, isActive=false)`);
   console.log("✅ Uvoz menija završen.");
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

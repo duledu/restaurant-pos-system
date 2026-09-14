@@ -6,10 +6,21 @@
  * Safe to run repeatedly: Permission upsert is keyed by `code`, and
  * RolePermission grants use `skipDuplicates`, so re-running never creates
  * duplicate rows or touches unrelated data.
+ *
+ * DATABASE TARGETING (post 2026-09-14 incident — see
+ * scripts/lib/resolve-db-target.mjs): this script no longer does a bare
+ * `new PrismaClient()`, which silently resolved to Production because
+ * @prisma/client's own env loading only ever reads root `.env` (never
+ * `.env.local`). It now REQUIRES an explicit --env flag, resolved and
+ * cross-checked against the live _rcs_database_environment marker before
+ * any write.
+ *
+ * Run:
+ *   npm run db:preprod:permissions
+ *   npm run db:production:permissions -- --confirm-production
  */
 import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 const NEW_PERMISSIONS = [
   { code: "inventory.count", description: "Fizičko prebrojavanje zaliha (Inventura) — sesija/redovi/potvrda" },
@@ -20,36 +31,49 @@ const NEW_ROLE_GRANTS: Record<string, string[]> = {
   OWNER: ["inventory.count", "workstations.manage"],
   ADMIN: ["inventory.count", "workstations.manage"],
   MANAGER: ["inventory.count", "workstations.manage"],
+  // P0 printing fix — INVENTORY_MANAGER je propušten u originalnom Fazi 2A
+  // granту (samo inventory.count je bio nameravan za tu ulogu), ali
+  // workstations.manage pripada istoj "operativni menadžment lokacije"
+  // grupi permisija kao settings.manage/production.manage — KITCHEN/BAR
+  // NAMERNO ostaju bez ovoga (operativne uloge koje PRIMAJU/štampaju
+  // tikete, ne administriraju radne stanice).
+  INVENTORY_MANAGER: ["workstations.manage"],
 };
 
 async function main() {
-  const permissions = await Promise.all(
-    NEW_PERMISSIONS.map((p) => prisma.permission.upsert({ where: { code: p.code }, create: p, update: {} }))
-  );
-  const permissionByCode = Object.fromEntries(permissions.map((p) => [p.code, p]));
+  const target = await resolveDatabaseTarget();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
 
-  const roles = await prisma.role.findMany({
-    where: { name: { in: Object.keys(NEW_ROLE_GRANTS) } },
-  });
+  try {
+    const permissions = await Promise.all(
+      NEW_PERMISSIONS.map((p) => prisma.permission.upsert({ where: { code: p.code }, create: p, update: {} }))
+    );
+    const permissionByCode = Object.fromEntries(permissions.map((p) => [p.code, p]));
 
-  let grantCount = 0;
-  for (const role of roles) {
-    const codes = NEW_ROLE_GRANTS[role.name] ?? [];
-    const result = await prisma.rolePermission.createMany({
-      data: codes.map((code) => ({ roleId: role.id, permissionId: permissionByCode[code].id })),
-      skipDuplicates: true,
+    const roles = await prisma.role.findMany({
+      where: { name: { in: Object.keys(NEW_ROLE_GRANTS) } },
     });
-    grantCount += result.count;
-  }
 
-  console.log(`✅ Phase 6 permission backfill: ${permissions.length} permission(s) upserted, ${grantCount} new role grant(s) across ${roles.length} existing role row(s).`);
+    let grantCount = 0;
+    for (const role of roles) {
+      const codes = NEW_ROLE_GRANTS[role.name] ?? [];
+      const result = await prisma.rolePermission.createMany({
+        data: codes.map((code) => ({ roleId: role.id, permissionId: permissionByCode[code].id })),
+        skipDuplicates: true,
+      });
+      grantCount += result.count;
+    }
+
+    console.log(
+      `✅ Phase 6 permission backfill [${target.environment}]: ${permissions.length} permission(s) upserted, ` +
+        `${grantCount} new role grant(s) across ${roles.length} existing role row(s).`
+    );
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

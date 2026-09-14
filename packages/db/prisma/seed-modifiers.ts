@@ -17,8 +17,7 @@
  *   RESTAURANT_ID=<id> npx ts-node prisma/seed-modifiers.ts
  */
 import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 interface OptionSeed {
   name: string;
@@ -74,6 +73,9 @@ async function main() {
     process.exit(1);
   }
 
+  const target = await resolveDatabaseTarget();
+  const prisma = new PrismaClient({ datasources: { db: { url: target.databaseUrl } } });
+
   const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
   if (!restaurant) {
     console.error(`Restoran sa id=${restaurantId} ne postoji.`);
@@ -121,13 +123,10 @@ async function main() {
   console.log(`✓ Grupe: ${groupsCreated} kreirano (od ${GROUPS.length} ukupno u seed listi)`);
   console.log(`✓ Opcije: ${optionsCreated} kreirano`);
   console.log("✅ Seed dodataka završen. Veži grupe za artikle kroz Admin → Meni → Dodaci.");
+  await prisma.$disconnect();
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
