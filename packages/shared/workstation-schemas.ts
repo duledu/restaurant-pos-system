@@ -11,6 +11,17 @@ export const createWorkstationPairingSchema = z.object({
 });
 export type CreateWorkstationPairingInput = z.infer<typeof createWorkstationPairingSchema>;
 
+// Admin "Podešavanja" na već upareneoj radnoj stanici — namerno samo polja
+// koja već postoje u Workstation modelu i koja Admin legitimno kontroliše
+// (isto kao revokeWorkstation koji već piše isEnabled). Nikad stanica/
+// lokacija/štampač ovde — to su izvedena/agent-prijavljena polja, ne nešto
+// što admin ručno prepisuje.
+export const updateWorkstationSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  isEnabled: z.boolean().optional(),
+});
+export type UpdateWorkstationInput = z.infer<typeof updateWorkstationSchema>;
+
 // Agent šalje SAMO kod — restaurantId/locationId/station se ISKLJUČIVO
 // izvode iz uparivanja na serveru, agent ih nikad ne tvrdi direktno.
 export const consumeWorkstationPairingSchema = z.object({

@@ -27,10 +27,12 @@ import {
   consumeWorkstationPairingSchema,
   workstationHeartbeatSchema,
   agentTestPrintResultSchema,
+  updateWorkstationSchema,
   type CreateWorkstationPairingInput,
   type ConsumeWorkstationPairingInput,
   type WorkstationHeartbeatInput,
   type AgentTestPrintResultInput,
+  type UpdateWorkstationInput,
 } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
 import { lockPrintLocation } from "../printing/print-policy";
@@ -231,6 +233,44 @@ export async function revokeWorkstation(ctx: AuthContext, workstationId: string)
     action: "workstation.revoked",
     previousValue: { revokedAt: null, isEnabled: workstation.isEnabled },
     newValue: { revokedAt: now, isEnabled: false },
+    locationId: workstation.locationId,
+  });
+
+  return updated;
+}
+
+/**
+ * Admin "Podešavanja" na već upareneoj radnoj stanici — preimenovanje i
+ * privremeno uključi/isključi (reverzibilno, za razliku od revokeWorkstation
+ * koje je trajno). Namerno odbija opozvanu stanicu (nema šta da se "podesi"
+ * na nečemu što više ne može da se poveže — treba novo uparivanje).
+ */
+export async function updateWorkstation(ctx: AuthContext, workstationId: string, input: UpdateWorkstationInput) {
+  requirePermission(ctx, WORKSTATIONS_MANAGE);
+  const data = updateWorkstationSchema.parse(input);
+
+  const workstation = await prisma.workstation.findFirst({
+    where: { id: workstationId, ...scopeToRestaurant(ctx) },
+    select: WORKSTATION_PUBLIC_SELECT,
+  });
+  if (!workstation) throw new Error("Radna stanica nije pronađena");
+  if (workstation.revokedAt) throw new Error("Radna stanica je opozvana — potrebno je novo uparivanje");
+
+  const updated = await prisma.workstation.update({
+    where: { id: workstationId },
+    data: {
+      ...(data.name !== undefined ? { name: data.name } : {}),
+      ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
+    },
+    select: WORKSTATION_PUBLIC_SELECT,
+  });
+
+  await recordAuditEntry(ctx, {
+    entityType: "Workstation",
+    entityId: workstationId,
+    action: "workstation.updated",
+    previousValue: { name: workstation.name, isEnabled: workstation.isEnabled },
+    newValue: { name: updated.name, isEnabled: updated.isEnabled },
     locationId: workstation.locationId,
   });
 

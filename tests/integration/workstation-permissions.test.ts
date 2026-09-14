@@ -85,6 +85,9 @@ describe("workstations.manage — operational roles are rejected", () => {
 
     await expect(workstations.listWorkstations(kitchenCtx)).rejects.toThrow(/Missing permission/);
     await expect(workstations.revokeWorkstation(kitchenCtx, registered.workstationId)).rejects.toThrow(/Missing permission/);
+    await expect(workstations.updateWorkstation(kitchenCtx, registered.workstationId, { name: "Hacked" })).rejects.toThrow(
+      /Missing permission/
+    );
   });
 
   it("a role with NO permissions at all (the exact reported symptom before the fix) is rejected with the exact reported error text", async () => {
@@ -92,6 +95,39 @@ describe("workstations.manage — operational roles are rejected", () => {
     const ctx = ctxWithPermissions(f, [], "OWNER"); // role is OWNER, but permission set is empty — reproduces the unsynced-permission state
     await expect(workstations.createPairing(ctx, { locationId: f.locationId, station: "KITCHEN" })).rejects.toThrow(
       "Missing permission: workstations.manage"
+    );
+  });
+});
+
+describe("workstations.manage — updateWorkstation (Admin 'Podešavanja')", () => {
+  it("an authorized role can rename and reversibly disable an active workstation", async () => {
+    const f = await createFixture();
+    const ownerCtx = ctxWithPermissions(f, ["workstations.manage"], "OWNER");
+    const pairing = await workstations.createPairing(ownerCtx, { locationId: f.locationId, station: "KITCHEN", name: "Kuhinja" });
+    const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+
+    const renamed = await workstations.updateWorkstation(ownerCtx, registered.workstationId, { name: "Kuhinja — glavna" });
+    expect(renamed.name).toBe("Kuhinja — glavna");
+    expect(renamed.isEnabled).toBe(true);
+
+    const disabled = await workstations.updateWorkstation(ownerCtx, registered.workstationId, { isEnabled: false });
+    expect(disabled.isEnabled).toBe(false);
+    expect(disabled.name).toBe("Kuhinja — glavna"); // unaffected by the isEnabled-only update
+
+    // Reversible, unlike revoke — disabling and re-enabling is a normal admin action.
+    const reenabled = await workstations.updateWorkstation(ownerCtx, registered.workstationId, { isEnabled: true });
+    expect(reenabled.isEnabled).toBe(true);
+  });
+
+  it("rejects updating a revoked workstation — it requires a new pairing instead", async () => {
+    const f = await createFixture();
+    const ownerCtx = ctxWithPermissions(f, ["workstations.manage"], "OWNER");
+    const pairing = await workstations.createPairing(ownerCtx, { locationId: f.locationId, station: "BAR" });
+    const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+    await workstations.revokeWorkstation(ownerCtx, registered.workstationId);
+
+    await expect(workstations.updateWorkstation(ownerCtx, registered.workstationId, { name: "Novo ime" })).rejects.toThrow(
+      /opozvana/
     );
   });
 });

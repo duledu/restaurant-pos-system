@@ -196,6 +196,7 @@ export function PrintersSettingsClient() {
         <Skeleton className="h-64" />
       ) : (
         <div className="space-y-4">
+          <WorkstationsPanel locationId={locationId} />
           {STATIONS.map(({ value: station, label }) => {
             const cfg = configFor(station);
             return (
@@ -285,8 +286,14 @@ export function PrintersSettingsClient() {
               </Card>
             );
           })}
-          <WorkstationsPanel locationId={locationId} />
-          <QzSettingsPanel />
+          <details className="rounded-md border border-line">
+            <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-inkSoft">
+              Napredna podešavanja — rezervni ručni metod (QZ)
+            </summary>
+            <div className="border-t border-line p-4">
+              <QzSettingsPanel />
+            </div>
+          </details>
         </div>
       )}
 

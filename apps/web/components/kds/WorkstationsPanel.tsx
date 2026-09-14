@@ -99,6 +99,9 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [justCreatedCode, setJustCreatedCode] = useState<{ code: string; expiresAt: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [downloadInfo, setDownloadInfo] = useState<AgentDownloadInfo | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editEnabled, setEditEnabled] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -184,36 +187,109 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     }
   }
 
+  function startEditing(w: Workstation) {
+    setEditingId(w.id);
+    setEditName(w.name);
+    setEditEnabled(w.isEnabled);
+  }
+
+  async function saveEditing(id: string) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/workstations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: editName.trim() || undefined, isEnabled: editEnabled }),
+      });
+      setEditingId(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri čuvanju podešavanja");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // "Ponovo upari" ne dira postojeći red (agent zadržava stari kredencijal
+  // dok se ne opozove) — samo unapred popunjava formu za NOVO uparivanje
+  // istim nazivom/stanicom, korisno kad se agent ponovo instalira na istom
+  // ili zamenskom računaru.
+  function rePair(w: Workstation) {
+    setNewStation(w.station);
+    setNewName(w.name);
+    setShowAddForm(true);
+    setJustCreatedCode(null);
+  }
+
+  // Napredak koraka 1-6 je namerno IZVEDEN iz stvarnog stanja (workstation
+  // lista/pending uparivanja/downloadInfo) — nikad ručno postavljen checkbox
+  // koji bi mogao lagati administratora o tome šta je stvarno urađeno.
+  const activeWorkstations = workstationList.filter((w) => !w.revokedAt);
+  const anyPrinterConfigured = activeWorkstations.some((w) => Boolean(w.configuredPrinterName));
+  const anyTestSucceeded = activeWorkstations.some((w) => w.testPrintStatus === "SUCCEEDED");
+  const anyReady = activeWorkstations.some(
+    (w) => w.isEnabled && Boolean(w.configuredPrinterName) && w.printerAvailable === true
+  );
+  const setupSteps = [
+    { label: "Preuzmi Print Agent", done: Boolean(downloadInfo?.available) },
+    { label: "Dodaj računar", done: activeWorkstations.length > 0 || pendingPairings.length > 0 },
+    { label: "Upari", done: activeWorkstations.length > 0 },
+    { label: "Izaberi štampač", done: anyPrinterConfigured },
+    { label: "Test štampa", done: anyTestSucceeded },
+    { label: "Spremno", done: anyReady },
+  ];
+
   return (
     <Card className="p-5">
       <div className="mb-3">
         <div className="mb-1.5 inline-flex items-center gap-1.5 rounded-full bg-gold-soft px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gold-dark">
           Preporučen metod
         </div>
-        <h2 className="font-semibold text-ink">TableCore Print Agent — radne stanice</h2>
+        <h2 className="font-semibold text-ink">TableCore Print Agent</h2>
         <p className="mt-0.5 text-xs text-inkSoft">
-          Tiha štampa bez otvorenog browser prozora, bez Chrome dijaloga za štampu i bez ručnog odobrenja po
-          tiketu. Nezavisan Windows proces sa sopstvenim kredencijalom po fizičkom računaru — nije vezan za
-          pojedinačni browser/uređaj (za razliku od QZ podešavanja ispod, koje ostaje samo kao ručni rezervni
-          metod). Kad je radna stanica uparena i aktivna za neku stanicu (Kuhinja/Šank), ta stanica automatski
-          prima i štampa tikete — browser na kuhinjskom/šank računaru se više ne koristi za štampu.
+          Omogućava tihu, automatsku štampu na kuhinjskom/šank računaru — bez otvaranja browsera, bez Chrome
+          dijaloga za štampu i bez ručnog odobrenja po tiketu. Kad je računar uparen i ima izabran štampač, ta
+          stanica (Kuhinja/Šank) automatski prima i štampa svaki novi tiket.
         </p>
       </div>
 
-      <div className="mb-4 rounded-md border border-line px-3 py-2">
-        <p className="text-xs font-semibold text-ink">TableCore Print Agent — instalacija</p>
+      <ol className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-6">
+        {setupSteps.map((step, i) => (
+          <li
+            key={step.label}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-semibold ${
+              step.done ? "border-success/30 bg-success/10 text-success" : "border-line text-inkSoft"
+            }`}
+          >
+            <span
+              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] ${
+                step.done ? "bg-success text-cream-100" : "bg-cream-200 text-inkSoft"
+              }`}
+            >
+              {step.done ? "✓" : i + 1}
+            </span>
+            {step.label}
+          </li>
+        ))}
+      </ol>
+
+      <div className="mb-4 rounded-md border border-line px-3 py-3">
+        <p className="mb-1 text-xs font-semibold text-ink">1. Preuzmi Print Agent</p>
         {downloadInfo?.available ? (
           <>
             <a
               href={downloadInfo.url ?? undefined}
-              className="mt-1 inline-block text-xs font-semibold text-gold underline"
+              className="inline-block min-h-11 rounded-md bg-graphite px-5 py-2.5 text-sm font-semibold text-cream-100"
             >
-              Preuzmi TableCore Print Agent (v{downloadInfo.version})
+              Preuzmi Print Agent za Windows
             </a>
-            <p className="mt-0.5 text-xs text-inkSoft">Podržano: {downloadInfo.supportedOS}. Instaliraj, upari kodom sa gornje liste, izaberi štampač.</p>
+            <p className="mt-1.5 text-xs text-inkSoft">
+              Verzija {downloadInfo.version} · {downloadInfo.supportedOS}. Pokreni preuzeti fajl na kuhinjskom/šank
+              računaru, prati podešavanje, pa unesi kod za uparivanje sa liste ispod.
+            </p>
           </>
         ) : (
-          <p className="mt-1 text-xs text-inkSoft">
+          <p className="text-xs text-inkSoft">
             Instaler još nije objavljen za preuzimanje sa ovog panela. Kontaktiraj TableCore administratora za
             {downloadInfo ? ` verziju ${downloadInfo.version}` : " instalacioni fajl"}.
           </p>
@@ -306,7 +382,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                         <span className="font-semibold text-danger">Štampač nije dostupan na računaru</span>
                       )}
                       <span className={silentPrintReady ? "font-semibold text-success" : ""}>
-                        {silentPrintReady ? "Tiha štampa spremna" : "Tiha štampa nije spremna"}
+                        Automatska štampa: {silentPrintReady ? "Spremna" : "Nije spremna"}
                       </span>
                       <span>Verzija agenta: {w.agentVersion ?? "—"}</span>
                       <span>Poslednji kontakt: {formatDateTime(w.lastSeenAt)}</span>
@@ -324,24 +400,76 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                         </span>
                       )}
                     </div>
-                    {!revoked && (
-                      <div className="mt-2 flex gap-3">
+                    {editingId === w.id ? (
+                      <div className="mt-2 rounded-md border border-line bg-cream-100 p-2.5">
+                        <label className="mb-1 block text-xs text-inkSoft" htmlFor={`ws-name-${w.id}`}>Naziv</label>
+                        <input
+                          id={`ws-name-${w.id}`}
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="mb-2 w-full rounded-md border border-line px-3 py-1.5 text-sm text-ink"
+                        />
+                        <label className="mb-2 flex items-center gap-2 text-xs text-inkSoft">
+                          <input type="checkbox" checked={editEnabled} onChange={(e) => setEditEnabled(e.target.checked)} />
+                          Omogućena (isključi da privremeno zaustaviš automatsku štampu bez opoziva)
+                        </label>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => saveEditing(w.id)}
+                            disabled={busyId === w.id || !editName.trim()}
+                            className="min-h-9 rounded-md bg-graphite px-3 text-xs font-semibold text-cream-100 disabled:opacity-40"
+                          >
+                            Sačuvaj
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingId(null)}
+                            className="min-h-9 rounded-md border border-line px-3 text-xs font-semibold text-inkSoft"
+                          >
+                            Otkaži
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-3">
+                        {!revoked && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => testPrint(w.id)}
+                              disabled={busyId === w.id || w.testPrintStatus === "PENDING"}
+                              className="text-xs font-semibold text-ink underline disabled:opacity-40"
+                            >
+                              Test štampa
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEditing(w)}
+                              disabled={busyId === w.id}
+                              className="text-xs font-semibold text-ink underline disabled:opacity-40"
+                            >
+                              Podešavanja
+                            </button>
+                          </>
+                        )}
                         <button
                           type="button"
-                          onClick={() => testPrint(w.id)}
-                          disabled={busyId === w.id || w.testPrintStatus === "PENDING"}
-                          className="text-xs font-semibold text-ink underline disabled:opacity-40"
+                          onClick={() => rePair(w)}
+                          className="text-xs font-semibold text-inkSoft underline"
                         >
-                          Test Print
+                          Ponovo upari
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => revoke(w.id)}
-                          disabled={busyId === w.id}
-                          className="text-xs font-semibold text-danger disabled:opacity-40"
-                        >
-                          Opozovi
-                        </button>
+                        {!revoked && (
+                          <button
+                            type="button"
+                            onClick={() => revoke(w.id)}
+                            disabled={busyId === w.id}
+                            className="text-xs font-semibold text-danger disabled:opacity-40"
+                          >
+                            Opozovi
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
