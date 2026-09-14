@@ -34,9 +34,33 @@
 ; Add/Remove Programs unos zamenjen umesto dupliranog).
 #define MyAppId "{{B9D3E4B0-6C21-4B0B-9B39-7B7C9E9A6E31}"
 
+; PREPROD pilot build — NAMERNO izolovano od podrazumevanog (produkcionog)
+; puta ispod. Aktivira se ISKLJUČIVO eksplicitnim
+; `ISCC /DAgentServerUrl=https://... installer\TableCorePrintAgent.iss` —
+; bez tog /D argumenta, svaka linija ispod koja zavisi od AgentServerUrl
+; ostaje IDENTIČNA prethodnom (hardversko-prihvaćenom) ponašanju: prazan
+; AgentArgs, prazan BuildSuffix, isti OutputBaseFilename kao pre. Koristi
+; POSTOJEĆI, već testirani "--mode test --server <url>" mehanizam
+; (AgentEndpoint.cs) — ne uvodi novi način biranja servera. AgentEndpoint.cs
+; samo po sebi odbija "--mode test --server https://tablecore.net", pa ovaj
+; build strukturno ne može tiho završiti na produkciji čak ni greškom u
+; vrednosti ispod.
+#ifndef AgentServerUrl
+  #define AgentServerUrl ""
+#endif
+#if AgentServerUrl != ""
+  #define AgentArgs " --mode test --server " + AgentServerUrl
+  #define BuildSuffix " (PREPROD pilot)"
+  #define MyOutputBaseFilename "TableCorePrintSetup-PREPROD"
+#else
+  #define AgentArgs ""
+  #define BuildSuffix ""
+  #define MyOutputBaseFilename "TableCorePrintSetup"
+#endif
+
 [Setup]
 AppId={#MyAppId}
-AppName={#MyAppName}
+AppName={#MyAppName}{#BuildSuffix}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\TableCore\PrintAgent
@@ -45,7 +69,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-OutputBaseFilename=TableCorePrintSetup
+OutputBaseFilename={#MyOutputBaseFilename}
 OutputDir=dist
 Compression=lzma2
 SolidCompression=yes
@@ -66,7 +90,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\bin\Release\net8.0-windows\win-x64\publish\TableCore.PrintAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\TableCore Print Agent Setup"; Filename: "{app}\TableCore.PrintAgent.exe"; Comment: "Uparivanje i podešavanje radne stanice"
+; Parameters prazno za podrazumevani (produkcioni) build — isti kao pre.
+; PREPROD build ovde dodaje isti "--mode test --server <url>" koji servis
+; ispod dobija, da dvoklik na prečicu OTVARA UPARIVANJE PROTIV ISTOG servera
+; koji servis prati (bez ovoga bi interaktivan Setup ekran tiho pao na
+; podrazumevanu produkciju dok servis u pozadini prati PREPROD — upravo
+; neusaglašenost koju sekcija 1 zahteva da se eksplicitno spreči).
+Name: "{group}\TableCore Print Agent Setup"; Filename: "{app}\TableCore.PrintAgent.exe"; Parameters: "{#AgentArgs}"; Comment: "Uparivanje i podešavanje radne stanice"
 Name: "{group}\Uninstall TableCore Print Agent"; Filename: "{uninstallexe}"
 
 [Run]
@@ -81,7 +111,19 @@ Name: "{group}\Uninstall TableCore Print Agent"; Filename: "{uninstallexe}"
 ; postoji, to NIJE greška.
 Filename: "{sys}\sc.exe"; Parameters: "stop {#MyServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Zaustavljam prethodnu verziju servisa (ako postoji)..."
 Filename: "{sys}\sc.exe"; Parameters: "delete {#MyServiceName}"; Flags: runhidden waituntilterminated
+; Dve POTPUNO odvojene linije (ne jedna šablonizovana sa ugnježdenim
+; escape-ovanjem) — namerno, da podrazumevani (produkcioni) slučaj ostane
+; bajt-za-bajt identičan već hardverski prihvaćenoj liniji, bez ikakvog
+; rizika od suptilne greške u citiranju koja bi važila samo za PREPROD granu
+; a slučajno pokvarila produkcioni instaler. sc.exe binPath sa argumentima
+; zahteva DODATNE escape-ovane (\") navodnike OKO putanje exe-a unutar
+; spoljašnjih navodnika cele vrednosti — standardan Windows servis obrazac
+; za "exe sa razmacima u putanji" + argumenti.
+#if AgentArgs != ""
+Filename: "{sys}\sc.exe"; Parameters: "create {#MyServiceName} binPath= ""\""{app}\TableCore.PrintAgent.exe\""{#AgentArgs}"" start= auto obj= ""{#MyServiceAccount}"" DisplayName= ""TableCore Print Agent{#BuildSuffix}"""; Flags: runhidden waituntilterminated; StatusMsg: "Registrujem TableCore Print Agent servis (PREPROD)..."
+#else
 Filename: "{sys}\sc.exe"; Parameters: "create {#MyServiceName} binPath= ""{app}\TableCore.PrintAgent.exe"" start= auto obj= ""{#MyServiceAccount}"" DisplayName= ""TableCore Print Agent"""; Flags: runhidden waituntilterminated; StatusMsg: "Registrujem TableCore Print Agent servis..."
+#endif
 Filename: "{sys}\sc.exe"; Parameters: "description {#MyServiceName} ""Salje racune na kuhinjski/sank stampac za TableCore POS. Bezbedno je zaustaviti/pokrenuti preko Windows Usluga (Services)."""; Flags: runhidden waituntilterminated
 ; Faza 2C, sekcija 13 — ograničen, rastući razmak restarta posle pada
 ; (60s, pa 120s, pa 300s), brojač grešaka se resetuje posle 1 dana bez pada.
@@ -91,7 +133,7 @@ Filename: "{sys}\sc.exe"; Parameters: "start {#MyServiceName}"; Flags: runhidden
 ; Setup ekran se otvara na kraju SAMO ako korisnik to izabere (checkbox
 ; ispod) — dvoklik na EXE bez argumenata otvara WinForms uparivanje
 ; (Program.cs, args.Length == 0 grana), NIKAD komandnu liniju/PowerShell.
-Filename: "{app}\TableCore.PrintAgent.exe"; Description: "Uredi radnu stanicu (upari, izaberi štampač) sada"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\TableCore.PrintAgent.exe"; Parameters: "{#AgentArgs}"; Description: "Uredi radnu stanicu (upari, izaberi štampač) sada"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\sc.exe"; Parameters: "stop {#MyServiceName}"; Flags: runhidden waituntilterminated; RunOnceId: "StopService"
