@@ -102,6 +102,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editEnabled, setEditEnabled] = useState(true);
+  const [codeCopied, setCodeCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -221,6 +222,38 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     setJustCreatedCode(null);
   }
 
+  async function copyPairingCode(code: string) {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code);
+      } else {
+        // Sigurnosna rezerva za browsere/kontekste bez Clipboard API-ja
+        // (stariji mobilni browseri, neki in-app webview-ovi, ne-HTTPS
+        // lokalni razvoj) — klasičan textarea+execCommand pristup, i dalje
+        // širko podržan iako "zastareo". Nikad ne menja/ponovo generiše kod.
+        const textarea = document.createElement("textarea");
+        textarea.value = code;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.top = "0";
+        textarea.style.left = "0";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        textarea.setSelectionRange(0, code.length);
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch {
+      // I Clipboard API i execCommand rezerva mogu da ne uspeju (dozvole,
+      // sandboxed iframe) — kod ostaje čitljiv i selektovan tekstom na
+      // ekranu, ručno kopiranje i dalje radi, samo bez potvrde "Kopirano".
+    }
+  }
+
   // Napredak koraka 1-6 je namerno IZVEDEN iz stvarnog stanja (workstation
   // lista/pending uparivanja/downloadInfo) — nikad ručno postavljen checkbox
   // koji bi mogao lagati administratora o tome šta je stvarno urađeno.
@@ -301,12 +334,28 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       {justCreatedCode && (
         <div className="mb-4 rounded-md border border-gold/40 bg-gold-soft p-3">
           <p className="mb-1 text-xs font-semibold text-ink">Kod za uparivanje (unesi na Windows računaru)</p>
-          <p className="font-mono text-lg font-bold tracking-wider text-ink">{justCreatedCode.code}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="font-mono text-2xl font-bold tracking-wider text-ink">{justCreatedCode.code}</p>
+            <button
+              type="button"
+              onClick={() => copyPairingCode(justCreatedCode.code)}
+              className="min-h-9 rounded-md border border-gold/50 bg-cream-100 px-3 text-xs font-semibold text-ink hover:bg-gold-soft"
+            >
+              {codeCopied ? "✓ Kopirano" : "Kopiraj kod"}
+            </button>
+          </div>
           <p className="mt-1 text-xs text-inkSoft">
             Ističe za {remainingMinutes(justCreatedCode.expiresAt)} min — prikazuje se samo ovde, jednom. Sačuvaj ovaj ekran otvoren dok ne
             upariš agenta.
           </p>
-          <button type="button" onClick={() => setJustCreatedCode(null)} className="mt-2 text-xs font-semibold text-inkSoft underline">
+          <button
+            type="button"
+            onClick={() => {
+              setJustCreatedCode(null);
+              setCodeCopied(false);
+            }}
+            className="mt-2 text-xs font-semibold text-inkSoft underline"
+          >
             Zatvori
           </button>
         </div>
