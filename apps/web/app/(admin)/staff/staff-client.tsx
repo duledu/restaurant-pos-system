@@ -41,6 +41,37 @@ const STATUS_TONE: Record<Employee["status"], "success" | "neutral" | "danger"> 
   TERMINATED: "danger",
 };
 
+// Physical QA follow-up — consistent PIN terminology (mobile/desktop
+// previously showed "Promeni PIN" vs bare "PIN"), and it must distinguish
+// "this employee already has a PIN" (Izmeni) from "this employee has none
+// yet" (Postavi) — never the generic, ambiguous "PIN" alone.
+function pinActionLabel(employee: Employee): string {
+  return employee.hasPin ? "Izmeni PIN" : "Postavi PIN";
+}
+
+/**
+ * Physical QA follow-up — every employee-scoped modal (Izmeni, Izmeni/Postavi
+ * PIN, Postavi/Resetuj pristup, Obriši) now shows this SAME, prominent,
+ * un-missable identity banner so an Admin can visually confirm WHO is
+ * about to be changed before saving, exactly like the desired PIN screen
+ * ("Izmeni PIN / sank_new test / Šank · Glavna lokacija"). No internal ID
+ * is exposed — only the name/role/location an Admin already recognizes.
+ */
+function EmployeeIdentityBanner({ employee }: { employee: Employee }) {
+  const roleText = employee.roles.map((r) => ROLE_LABEL[r.role.name] ?? r.role.name).join(", ") || "—";
+  const locationText = employee.locations.map((l) => l.location.name).join(", ") || "—";
+  return (
+    <div className="mb-3 rounded-md border border-line bg-ink/[.03] px-3 py-2.5">
+      <p className="font-semibold text-ink">
+        {employee.firstName} {employee.lastName}
+      </p>
+      <p className="text-xs text-inkSoft">
+        {roleText} · {locationText}
+      </p>
+    </div>
+  );
+}
+
 function LocationPicker({
   locations,
   selected,
@@ -231,6 +262,7 @@ function EditEmployeeModal({
   return (
     <ModalShell title="Izmeni zaposlenog" onCancel={onCancel}>
       <div className="space-y-3">
+        <EmployeeIdentityBanner employee={employee} />
         <div>
           <label className="mb-1 block text-sm font-medium text-inkSoft">Ime</label>
           <input value={firstName} onChange={(e) => setFirstName(e.target.value)} className="w-full rounded-md border border-line px-3 py-2.5 text-base" />
@@ -297,8 +329,9 @@ function ChangePinModal({ employee, onCancel, onDone }: { employee: Employee; on
   }
 
   return (
-    <ModalShell title={`Promeni PIN — ${employee.firstName} ${employee.lastName}`} onCancel={onCancel}>
+    <ModalShell title={pinActionLabel(employee)} onCancel={onCancel}>
       <div className="space-y-3">
+        <EmployeeIdentityBanner employee={employee} />
         <div>
           <label className="mb-1 block text-sm font-medium text-inkSoft">Novi PIN</label>
           <input
@@ -374,8 +407,9 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
   }
 
   return (
-    <ModalShell title={`Pristupni podaci — ${employee.firstName} ${employee.lastName}`} onCancel={onCancel}>
+    <ModalShell title="Pristupni podaci" onCancel={onCancel}>
       <div className="space-y-3">
+        <EmployeeIdentityBanner employee={employee} />
         {employee.hasLoginCredentials ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
             Ovaj zaposleni već ima pristupne podatke. Unosom novih podataka ispod postojeći će biti zamenjeni.
@@ -386,10 +420,28 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
           </p>
         )}
 
+        {/* Physical QA root cause — this is the ONLY form in Osoblje shaped
+            like a login form (a text field immediately followed by a
+            password field), which is exactly the shape Chrome/Edge target
+            for credential autofill — they routinely ignore autoComplete=
+            "off" on username-shaped fields specifically. Without this, the
+            browser can silently fill the Admin's OWN saved login (e.g.
+            "admin@dev.local") into a DIFFERENT employee's credential form,
+            which the Admin may not notice before saving — appearing as
+            "wrong employee" even though React/the server had the right one
+            the whole time. These two hidden, off-screen decoy fields give
+            the browser's autofill something else to target first; the
+            visible fields below also use non-login-shaped `name` values
+            for the same reason. This does not change any real behavior —
+            purely a browser-autofill deflection. */}
+        <input type="text" name="username" autoComplete="username" tabIndex={-1} aria-hidden="true" style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
+        <input type="password" name="password" autoComplete="current-password" tabIndex={-1} aria-hidden="true" style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
+
         <div>
           <label className="mb-1 block text-sm font-medium text-inkSoft">Korisničko ime</label>
           <input
             type="text"
+            name="tablecore-employee-login-name"
             autoComplete="off"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -404,6 +456,7 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
           <div className="relative">
             <input
               type={showPassword ? "text" : "password"}
+              name="tablecore-employee-new-password"
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -426,6 +479,7 @@ function SetLoginCredentialsModal({ employee, onCancel, onDone }: { employee: Em
           <label className="mb-1 block text-sm font-medium text-inkSoft">Potvrdi lozinku</label>
           <input
             type={showPassword ? "text" : "password"}
+            name="tablecore-employee-new-password-confirm"
             autoComplete="new-password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
@@ -487,6 +541,7 @@ function DeleteEmployeeModal({
   return (
     <ModalShell title="Obriši zaposlenog" onCancel={onCancel}>
       <div className="space-y-3">
+        <EmployeeIdentityBanner employee={employee} />
         <div className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
           Ovo je <strong>trajno i nepovratno</strong> brisanje naloga za <strong>{fullName}</strong>. Ako zaposleni ima
           bilo kakvu istoriju (porudžbine, uplate, smene, poništavanja…), brisanje će biti odbijeno — u tom slučaju
@@ -687,7 +742,7 @@ export function StaffClient() {
                     Izmeni
                   </button>
                   <button onClick={() => setChangingPin(emp)} className="rounded-md border border-line py-2.5 text-gold-dark">
-                    Promeni PIN
+                    {pinActionLabel(emp)}
                   </button>
                   <button onClick={() => setSettingCredentials(emp)} className="rounded-md border border-line py-2.5 text-gold-dark">
                     {emp.hasLoginCredentials ? "Resetuj pristup" : "Postavi pristup"}
@@ -762,7 +817,7 @@ export function StaffClient() {
                           Izmeni
                         </button>
                         <button onClick={() => setChangingPin(emp)} className="inline-flex min-h-8 items-center rounded-md px-2 text-gold-dark hover:bg-gold-soft">
-                          PIN
+                          {pinActionLabel(emp)}
                         </button>
                         <button
                           onClick={() => togglePinLogin(emp)}
@@ -818,8 +873,8 @@ export function StaffClient() {
           locations={locations}
           onCancel={() => setEditing(null)}
           onSaved={() => {
+            setNotice(`Podaci za ${editing.firstName} ${editing.lastName} su sačuvani.`);
             setEditing(null);
-            setNotice("Podaci zaposlenog su sačuvani.");
             load();
           }}
         />
@@ -829,8 +884,8 @@ export function StaffClient() {
           employee={changingPin}
           onCancel={() => setChangingPin(null)}
           onDone={() => {
+            setNotice(`PIN je uspešno promenjen za ${changingPin.firstName} ${changingPin.lastName}.`);
             setChangingPin(null);
-            setNotice("PIN je uspešno promenjen.");
             load();
           }}
         />
@@ -840,8 +895,8 @@ export function StaffClient() {
           employee={settingCredentials}
           onCancel={() => setSettingCredentials(null)}
           onDone={() => {
+            setNotice(`Pristupni podaci su uspešno postavljeni za ${settingCredentials.firstName} ${settingCredentials.lastName}.`);
             setSettingCredentials(null);
-            setNotice("Pristupni podaci su uspešno postavljeni.");
             load();
           }}
         />

@@ -525,6 +525,39 @@ describe("staff management: security boundaries", () => {
     await expect(employees.updateEmployee(owner, otherEmployee.id, { firstName: "Hacked" })).rejects.toThrow("nije pronađen");
     await expect(employees.setEmployeeStatus(owner, otherEmployee.id, "SUSPENDED")).rejects.toThrow("nije pronađen");
     await expect(employees.resetEmployeePin(owner, otherEmployee.id, "0000")).rejects.toThrow("nije pronađen");
+    // Admin -> Osoblje urgent QA follow-up (2026-09-15): setEmployeeLoginPassword
+    // had no dedicated tenant-isolation coverage — the other target-employee
+    // mutations above were already tested, this one was not.
+    await expect(
+      employees.setEmployeeLoginPassword(owner, otherEmployee.id, { username: `${randomUUID()}@test.local`, password: "supersecretpw" })
+    ).rejects.toThrow("nije pronađen");
+  });
+
+  it("never mutates the calling Admin's own account when acting on a different employee (Osoblje urgent QA follow-up)", async () => {
+    const fixture = await createFixture();
+    const owner = await createOwner(fixture);
+    const waiter = await employees.createEmployee(owner, {
+      firstName: "Marko",
+      lastName: "M",
+      pin: "1234",
+      roleNames: ["WAITER"],
+      locationIds: [fixture.locationId],
+    });
+
+    await employees.resetEmployeePin(owner, waiter.id, "9999");
+    await employees.setEmployeeLoginPassword(owner, waiter.id, { username: `${randomUUID()}@test.local`, password: "supersecretpw" });
+    await employees.setEmployeeStatus(owner, waiter.id, "SUSPENDED");
+
+    const ownerRow = await prisma.employee.findUniqueOrThrow({ where: { id: owner.employeeId! } });
+    expect(ownerRow.pinHash).toBeNull();
+    expect(ownerRow.userId).toBeNull();
+    expect(ownerRow.status).toBe("ACTIVE");
+    expect(ownerRow.firstName).toBe("Owner");
+
+    const waiterRow = await prisma.employee.findUniqueOrThrow({ where: { id: waiter.id }, include: { user: true } });
+    expect(waiterRow.pinHash).not.toBeNull();
+    expect(waiterRow.user?.username).not.toBeNull();
+    expect(waiterRow.status).toBe("SUSPENDED");
   });
 });
 
