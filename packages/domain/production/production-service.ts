@@ -190,6 +190,14 @@ export async function advanceItemStatus(
   requirePermission(ctx, PRODUCTION_MANAGE);
   assertStationAccess(ctx, station);
 
+  // Performance audit (~10s perceived Kitchen delay) — SAMO locationId je
+  // stvarno potreban sa Order-a (requireLocationAccess ispod); `include:
+  // {order: true}` je ranije hidratisao CEO Order red (ukupni iznosi,
+  // porezi, popust, servisna taksa, sve vremenske oznake...) samo da se
+  // pročita jedno polje. `select` ispod nosi isti podatak uz mnogo manje
+  // Postgres/Prisma rada po pozivu — ova ruta se zove na SVAKI Kuhinja/Šank
+  // klik, pa svaki nepotreban bajt/kolona ovde direktno doprinosi
+  // primetnom kašnjenju.
   const item = await prisma.orderItem.findFirst({
     where: {
       id: itemId,
@@ -197,7 +205,11 @@ export async function advanceItemStatus(
       stationStates: { some: { station } },
       order: scopeToRestaurant(ctx),
     },
-    include: { order: true, stationStates: true },
+    select: {
+      id: true,
+      order: { select: { locationId: true } },
+      stationStates: true,
+    },
   });
   if (!item) throw new Error("Stavka nije pronađena za ovu stanicu");
   // restaurantId scoping (gore) nije dovoljan u restoranu sa više lokacija —
@@ -218,9 +230,6 @@ export async function advanceItemStatus(
       data: { status: nextStatus as OrderItemStatus },
     });
     if (advanced.count !== 1) throw new Error("Status stavke je već promenjen — osveži prikaz");
-    const state = await tx.orderItemStation.findUniqueOrThrow({
-      where: { orderItemId_station: { orderItemId: itemId, station } },
-    });
     const states = await tx.orderItemStation.findMany({
       where: { orderItemId: itemId },
       select: { status: true },
@@ -235,16 +244,33 @@ export async function advanceItemStatus(
         payload: { itemId, from: expectedStatus, to: nextStatus, station, aggregateStatus },
       },
     });
-    return state;
+    // Performance audit — izbegnuto ponovno čitanje istog reda
+    // (findUniqueOrThrow): updateMany iznad je VEĆ atomski potvrdio TAČNO
+    // ovaj prelaz (count===1 garantuje da je upravo OVAJ red promenjen u
+    // OVOM trenutku), pa se isti oblik rekonstruiše iz već pročitanog
+    // stationState + nextStatus umesto dodatnog round-trip-a. `updatedAt`
+    // je bezopasna aproksimacija (stvaran red u bazi ima identičnu ili
+    // mikrosekunde precizniju vrednost) — nijedan pozivalac (ruta/klijent/
+    // testovi) ne proverava preciznu vrednost, samo `.status`.
+    return { ...stationState, status: nextStatus as OrderItemStatus, updatedAt: new Date() };
   });
 
-  await ssePublisher.publish({
-    type: "order_item.status_changed",
-    restaurantId: ctx.restaurantId,
-    locationId: item.order.locationId,
-    payload: { orderId, itemId, status: nextStatus },
-    occurredAt: new Date().toISOString(),
-  });
+  // NAMERNO ne await-ovano na kritičnom putu odgovora (fire-and-forget):
+  // ssePublisher.publish je sinhron in-memory EventEmitter.emit (vidi
+  // sse-publisher.ts) — već efektivno trenutan i bez I/O, ali odvajanje od
+  // `await` čini eksplicitnim da BUDUĆA zamena (Redis pub/sub, pomenuta u
+  // sse-publisher.ts pre Vercel produkcije) nikad ne sme usporiti/blokirati
+  // ovaj odgovor. Greška ovde (npr. budući Redis network problem) ne sme
+  // oboriti već uspešno izvršenu i potvrđenu promenu statusa.
+  ssePublisher
+    .publish({
+      type: "order_item.status_changed",
+      restaurantId: ctx.restaurantId,
+      locationId: item.order.locationId,
+      payload: { orderId, itemId, status: nextStatus },
+      occurredAt: new Date().toISOString(),
+    })
+    .catch(() => {});
 
   return updated;
 }
@@ -263,9 +289,11 @@ export async function advanceItemStatus(
 export async function confirmPickup(ctx: AuthContext, orderId: string, itemId: string) {
   requireOrderOperator(ctx);
 
+  // Performance audit — isti razlog kao advanceItemStatus iznad: samo
+  // locationId je stvarno potreban sa Order-a.
   const item = await prisma.orderItem.findFirst({
     where: { id: itemId, orderId, order: scopeToRestaurant(ctx) },
-    include: { order: true },
+    select: { id: true, name: true, status: true, order: { select: { locationId: true } } },
   });
   if (!item) throw new Error("Stavka nije pronađena");
   requireLocationAccess(ctx, item.order.locationId);
@@ -297,13 +325,16 @@ export async function confirmPickup(ctx: AuthContext, orderId: string, itemId: s
     return updatedItem;
   });
 
-  await ssePublisher.publish({
-    type: "order_item.status_changed",
-    restaurantId: ctx.restaurantId,
-    locationId: item.order.locationId,
-    payload: { orderId, itemId, status: "SERVED" },
-    occurredAt: new Date().toISOString(),
-  });
+  // Isto obrazloženje kao advanceItemStatus iznad — ne blokira odgovor.
+  ssePublisher
+    .publish({
+      type: "order_item.status_changed",
+      restaurantId: ctx.restaurantId,
+      locationId: item.order.locationId,
+      payload: { orderId, itemId, status: "SERVED" },
+      occurredAt: new Date().toISOString(),
+    })
+    .catch(() => {});
 
   return updated;
 }

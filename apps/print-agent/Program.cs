@@ -8,6 +8,18 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using TableCore.PrintAgent;
 
+// Faza 2C follow-up — OutputType je sada WinExe (GUI subsistem, vidi .csproj)
+// da Windows NIKAD ne otvori crni CMD prozor iza WinForms Setup ekrana ili
+// pri pokretanju servisa. Namerno BEZ AttachConsole(ATTACH_PARENT_PROCESS)
+// ovde — eksperimentalno dokazano da ono aktivno KVARI Console.WriteLine
+// kad je stdout već ispravno preusmeren/nasleđen (pipe/redirekcija, npr.
+// `dotnet run -- --self-test > log.txt` ili kroz test/CI alat) — .NET
+// Console.Out ostaje vezan za taj nasleđen handle i BEZ ijednog dodatnog
+// poziva, potpuno nezavisno od WinExe/Exe subsistema; AttachConsole samo
+// unosi rizik da ga pomeri na pogrešno mesto. Jedini scenario koji WinExe
+// stvarno menja je dvoklik iz Explorer-a (nema roditeljske konzole ni
+// pre ni posle) — upravo scenario koji ne sme imati crni prozor.
+
 // Faza 2C — MORA biti prva provera. Kad Service Control Manager pokrene ovaj
 // EXE (posle instalacije preko installer-a), IsWindowsService() vraća true
 // PRE bilo kakvog parsiranja args-a ispod (SCM tipično prosleđuje 0 dodatnih
@@ -60,6 +72,8 @@ if (args.Contains("--pair") || args.Contains("--heartbeat") || args.Contains("--
         return;
     }
     Console.WriteLine($"Aktivan server: {endpoint.DescribeForLog()}");
+    PairingClient.ConfigureBypassHeader(endpoint);
+    DeliveryClient.ConfigureBypassHeader(endpoint);
 
     if (args.Contains("--pair"))
     {
@@ -107,21 +121,22 @@ if (args.Contains("--pair") || args.Contains("--heartbeat") || args.Contains("--
 // grana je sada iza eksplicitnog --serve, dostupna samo razvojnim/internim
 // pozivima, nikad ciljnom korisniku iz zahteva Faze 2C).
 //
-// --mode/--server se PROPUŠTAJU u ovu granu (ne samo args.Length == 0) da
-// bi prihvatno testiranje moglo interaktivno da upari/testira preko
-// pravog UI-ja protiv test servera bez ijednog drugog prepoznatog --flag-a
-// — svaka DRUGA nepoznata opcija i dalje pada u grešku ispod, ne ovde.
+// --mode/--server/--bypass-header se PROPUŠTAJU u ovu granu (ne samo
+// args.Length == 0) da bi prihvatno testiranje moglo interaktivno da
+// upari/testira preko pravog UI-ja protiv test servera bez ijednog drugog
+// prepoznatog --flag-a — svaka DRUGA nepoznata opcija i dalje pada u
+// grešku ispod, ne ovde. --bypass-header MORA biti ovde na istoj listi kao
+// --mode/--server (isti obrazac kao AgentEndpoint.Resolve, koji ga takođe
+// tretira kao deo iste grupe endpoint argumenata) — inače PREPROD
+// instaler/prečica koja prosleđuje "--mode test --server <url>
+// --bypass-header <secret>" pada u granu "Nepoznata opcija" ispod i
+// interaktivni Setup ekran se NIKAD ne otvara (stvaran regresivni bug,
+// dokazan praznim izlazom exit code 1 bez ijednog prozora — PairingClient/
+// AgentEndpoint.Resolve se u tom slučaju nikad ni ne pozivaju).
 // Eksplicitna indeks-po-indeks provera (ne Array.IndexOf po vrednosti) da
 // vrednost argumenta (npr. "--mode" kao string vrednost --server-a, teorijski)
 // nikad ne bude pogrešno protumačena kao sam flag.
-var onlyEndpointArgs = true;
-for (var i = 0; i < args.Length && onlyEndpointArgs; i++)
-{
-    var isFlag = args[i] is "--mode" or "--server";
-    var isValueOfPrecedingFlag = i > 0 && args[i - 1] is "--mode" or "--server";
-    if (!isFlag && !isValueOfPrecedingFlag) onlyEndpointArgs = false;
-}
-if (onlyEndpointArgs)
+if (SetupArgumentDispatch.IsInteractiveSetupArgs(args))
 {
     SetupForm.RunInteractive(args);
     return;
@@ -129,7 +144,10 @@ if (onlyEndpointArgs)
 
 if (!args.Contains("--serve") && !args.Contains("--probe-printer"))
 {
-    Console.Error.WriteLine($"Nepoznata opcija: {string.Join(' ', args)}. Dostupno: --self-test, --list-printers, --pair <KOD>, --heartbeat, --run, --probe-printer, --serve.");
+    // SetupArgumentDispatch.Redact — ako je --bypass-header prisutan ali je
+    // grana ipak pala ovde (npr. neka DRUGA nepoznata opcija je uz njega),
+    // vrednost NIKAD ne sme završiti u ovoj poruci/logu.
+    Console.Error.WriteLine($"Nepoznata opcija: {SetupArgumentDispatch.Redact(args)}. Dostupno: --self-test, --list-printers, --pair <KOD>, --heartbeat, --run, --probe-printer, --serve.");
     Environment.ExitCode = 1;
     return;
 }
@@ -234,5 +252,50 @@ public static class RequestProtection
         var supplied = Encoding.UTF8.GetBytes(context.Request.Headers.Authorization.ToString());
         var expected = Encoding.UTF8.GetBytes("Bearer " + token);
         return CryptographicOperations.FixedTimeEquals(supplied, expected);
+    }
+}
+
+/// <summary>
+/// Izdvojeno iz top-level statements iznad ISKLJUČIVO radi self-testova
+/// (SelfTests.cs) — ponašanje MORA ostati identično onome što je zamenilo.
+/// Isti skup "endpoint argumenata" koji AgentEndpoint.Resolve prepoznaje
+/// (--mode/--server/--bypass-header): SAMO ako args sadrži isključivo ove
+/// flagove (i njihove vrednosti), interaktivni Setup ekran (SetupForm) se
+/// otvara bez ijednog drugog --flag-a. Bilo koja DRUGA nepoznata opcija i
+/// dalje mora pasti u granu ispod (fail closed) — ovo NE dodaje toleranciju
+/// za proizvoljne flagove, samo proširuje POSTOJEĆU grupu na tačno jedan
+/// novi, već-postojeći endpoint parametar.
+/// </summary>
+public static class SetupArgumentDispatch
+{
+    private static bool IsEndpointFlag(string arg) => arg is "--mode" or "--server" or "--bypass-header";
+
+    public static bool IsInteractiveSetupArgs(string[] args)
+    {
+        var onlyEndpointArgs = true;
+        for (var i = 0; i < args.Length && onlyEndpointArgs; i++)
+        {
+            var isFlag = IsEndpointFlag(args[i]);
+            var isValueOfPrecedingFlag = i > 0 && IsEndpointFlag(args[i - 1]);
+            if (!isFlag && !isValueOfPrecedingFlag) onlyEndpointArgs = false;
+        }
+        return onlyEndpointArgs;
+    }
+
+    /// <summary>
+    /// Bezbedno za log/konzolu — zamenjuje vrednost koja sledi
+    /// "--bypass-header" sa "***" PRE spajanja u jedan red, tako da čak i
+    /// neočekivana kombinacija (npr. --bypass-header UZ neku DRUGU
+    /// nepoznatu opciju) ne može da isprinta tajni token u "Nepoznata
+    /// opcija" poruku.
+    /// </summary>
+    public static string Redact(string[] args)
+    {
+        var redacted = new string[args.Length];
+        for (var i = 0; i < args.Length; i++)
+        {
+            redacted[i] = i > 0 && args[i - 1] == "--bypass-header" ? "***" : args[i];
+        }
+        return string.Join(' ', redacted);
     }
 }

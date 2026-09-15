@@ -19,6 +19,14 @@ public static class PairingClient
     private static readonly HttpClient Http = new();
 
     /// <summary>
+    /// Pozvano TAČNO JEDNOM, odmah posle AgentEndpoint.Resolve — vidi
+    /// AgentEndpoint.ConfigureHttpClientDefaults za pun razlog (Vercel
+    /// Deployment Protection na PREPROD Preview URL-ovima). No-op u
+    /// Production režimu.
+    /// </summary>
+    public static void ConfigureBypassHeader(AgentEndpoint endpoint) => endpoint.ConfigureHttpClientDefaults(Http);
+
+    /// <summary>
     /// Faza 2C — SADA deleguje na AgentEndpoint.Resolve (vidi AgentEndpoint.cs
     /// za PUN razlog: stvaran incident gde je tih pad-na-produkciju skoro
     /// prošao neopaženo). NIKAD ovde ne hvatati AgentEndpointConfigurationException
@@ -93,7 +101,7 @@ public static class PairingClient
         }
 
         if (!response.IsSuccessStatusCode)
-            return new PairResult(false, null, null, $"Server je odbio kod uparivanja ({(int)response.StatusCode}).");
+            return new PairResult(false, null, null, DescribeFailure((int)response.StatusCode, body));
 
         using var json = JsonDocument.Parse(body);
         var root = json.RootElement;
@@ -105,6 +113,23 @@ public static class PairingClient
         var name = root.TryGetProperty("name", out var n) ? n.GetString() : null;
         var station = root.TryGetProperty("station", out var s) ? s.GetString() : null;
         return new PairResult(true, name, station, null);
+    }
+
+    /// <summary>
+    /// Kategorizuje neuspeh SAMO po OBLIKU odgovora (nikad po sadržaju koji
+    /// bi mogao biti tajna) — razlikuje Vercel Deployment Protection (edge
+    /// blok PRE naše aplikacije, prepoznatljiv po "vercel_auth_enabled" u
+    /// telu) od stvarnog odbijanja koda od strane naše /api/agent/register
+    /// rute. Ne loguje/prikazuje ništa iz tela odgovora sem ove kategorije.
+    /// </summary>
+    private static string DescribeFailure(int statusCode, string body)
+    {
+        if (statusCode == 401 && body.Contains("vercel_auth_enabled", StringComparison.OrdinalIgnoreCase))
+        {
+            return "PREPROD server je zaštićen Vercel autentifikacijom (bypass zaglavlje nije podešeno na ovom instaleru) — " +
+                   "ovo NIJE pogrešan kod za uparivanje. Kontaktiraj administratora.";
+        }
+        return $"Server je odbio kod uparivanja ({statusCode}).";
     }
 
     public static async Task Heartbeat(string baseUrl)

@@ -39,16 +39,36 @@ public sealed class AgentEndpointConfigurationException : Exception
     public AgentEndpointConfigurationException(string message) : base(message) { }
 }
 
-public sealed record AgentEndpoint(AgentRuntimeMode Mode, string BaseUrl)
+public sealed record AgentEndpoint(AgentRuntimeMode Mode, string BaseUrl, string? BypassHeader = null)
 {
     public const string ProductionBaseUrl = "https://tablecore.net";
     private const string ProductionHost = "tablecore.net";
+
+    // Vercel Preview deployments (NIKAD Production custom domen — vidi
+    // ProductionBaseUrl iznad, koji nema ovu zaštitu) mogu imati "Vercel
+    // Authentication" (Deployment Protection) uključen na nivou projekta,
+    // što na Vercel edge-u (PRE nego što ijedan naš kod/middleware uopšte
+    // izvrši) blokira SVAKI zahtev bez browser SSO kolačića — uključujući
+    // legitimne agent-ove pozive (uparivanje/heartbeat/poll), sa 401 koji
+    // se NIKAD ne pojavljuje u runtime logovima aplikacije (blokiran je pre
+    // te tačke). Rešenje je Vercel-ovo dokumentovano "Protection Bypass for
+    // Automation" — projektni tajni token koji se šalje kao ovo zaglavlje.
+    // Ovo NIKAD ne otključava ništa unutar same aplikacije (uparivanje i
+    // dalje zahteva ispravan jednokratan kod, heartbeat i dalje zahteva
+    // Bearer kredencijal) — samo propušta zahtev kroz Vercel-ov EDGE zid.
+    public const string BypassHeaderName = "x-vercel-protection-bypass";
 
     public static AgentEndpoint Resolve(string[] args)
     {
         var mode = ParseMode(ArgValue(args, "--mode"));
         var serverArg = ArgValue(args, "--server");
-        return mode == AgentRuntimeMode.Test ? ResolveTest(serverArg) : ResolveProduction(serverArg);
+        // NAMERNO čitano OVDE (ne unutar ResolveProduction) — Production
+        // grana ispod NIKAD ne prosleđuje ovu vrednost dalje, tako da čak i
+        // greškom prosleđen --bypass-header uz produkcioni (podrazumevani)
+        // režim ostaje potpuno bez efekta, isto pravilo kao ostatak fajla:
+        // nijedan argument ne sme tiho promeniti ponašanje produkcije.
+        var bypassArg = ArgValue(args, "--bypass-header");
+        return mode == AgentRuntimeMode.Test ? ResolveTest(serverArg, bypassArg) : ResolveProduction(serverArg);
     }
 
     private static AgentRuntimeMode ParseMode(string? modeArg)
@@ -84,7 +104,7 @@ public sealed record AgentEndpoint(AgentRuntimeMode Mode, string BaseUrl)
         return new AgentEndpoint(AgentRuntimeMode.Production, uri.GetLeftPart(UriPartial.Authority));
     }
 
-    private static AgentEndpoint ResolveTest(string? serverArg)
+    private static AgentEndpoint ResolveTest(string? serverArg, string? bypassArg)
     {
         if (string.IsNullOrWhiteSpace(serverArg))
             throw new AgentEndpointConfigurationException(
@@ -97,7 +117,22 @@ public sealed record AgentEndpoint(AgentRuntimeMode Mode, string BaseUrl)
             throw new AgentEndpointConfigurationException(
                 $"--mode test ne sme pokazivati na produkcioni server ({ProductionHost}). Navedi stvaran test/razvojni server.");
         }
-        return new AgentEndpoint(AgentRuntimeMode.Test, uri.GetLeftPart(UriPartial.Authority));
+        var bypass = string.IsNullOrWhiteSpace(bypassArg) ? null : bypassArg.Trim();
+        return new AgentEndpoint(AgentRuntimeMode.Test, uri.GetLeftPart(UriPartial.Authority), bypass);
+    }
+
+    /// <summary>
+    /// Postavlja se TAČNO JEDNOM po procesu, PRE prvog HTTP zahteva (vidi
+    /// pozivaoce: Program.cs, AgentService.cs, SetupForm.cs — svako od njih
+    /// rešava AgentEndpoint tačno jednom na početku svog puta). Kad
+    /// BypassHeader nije postavljen (uvek slučaj u Production režimu), ovo
+    /// je no-op — HttpClient nikad ne dobija ovo zaglavlje.
+    /// </summary>
+    public void ConfigureHttpClientDefaults(HttpClient client)
+    {
+        if (string.IsNullOrEmpty(BypassHeader)) return;
+        client.DefaultRequestHeaders.Remove(BypassHeaderName);
+        client.DefaultRequestHeaders.Add(BypassHeaderName, BypassHeader);
     }
 
     private static Uri ParseAbsoluteHttpUri(string value)

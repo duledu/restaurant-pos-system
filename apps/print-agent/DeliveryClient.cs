@@ -8,6 +8,14 @@ namespace TableCore.PrintAgent;
 public sealed record PolledJob(string JobId, string AttemptId, string Station, JsonElement Content);
 
 /// <summary>
+/// `TestPrintRequested` je dodato uz `job` na /api/agent/poll (server:
+/// apps/web/app/api/agent/poll/route.ts) da bi Admin "Test Print" koristio
+/// ISTI brz (1-3s) ciklus kao stvarni tiketi, umesto da čeka do 25s
+/// heartbeat-a — vidi AgentRunner.cs.
+/// </summary>
+public sealed record PollOutcome(PolledJob? Job, bool TestPrintRequested);
+
+/// <summary>
 /// Faza 2B — HTTP klijent za autentifikovanu isporuku (poll/start/result) i
 /// heartbeat. Agent ISKLJUČIVO inicira odlazeće HTTPS zahteve — server
 /// nikad ne zove agenta, nema ulaznih portova na restoranskoj mreži, nema
@@ -16,6 +24,13 @@ public sealed record PolledJob(string JobId, string AttemptId, string Station, J
 public static class DeliveryClient
 {
     private static readonly HttpClient Http = new();
+
+    /// <summary>
+    /// Pozvano TAČNO JEDNOM, odmah posle AgentEndpoint.Resolve — vidi
+    /// AgentEndpoint.ConfigureHttpClientDefaults i PairingClient.ConfigureBypassHeader
+    /// za pun razlog. No-op u Production režimu.
+    /// </summary>
+    public static void ConfigureBypassHeader(AgentEndpoint endpoint) => endpoint.ConfigureHttpClientDefaults(Http);
 
     // Izostavlja null polja iz JSON tela (a ne "polje": null) — zod šeme na
     // serveru (packages/shared/workstation-schemas.ts) koriste `.optional()`
@@ -33,21 +48,24 @@ public static class DeliveryClient
         return request;
     }
 
-    public static async Task<PolledJob?> Poll(string baseUrl, string credential)
+    public static async Task<PollOutcome> Poll(string baseUrl, string credential)
     {
         using var request = AuthedRequest(HttpMethod.Post, baseUrl, "/api/agent/poll", credential);
         request.Content = JsonContent.Create(new { }, options: JsonOptions);
         using var response = await Http.SendAsync(request);
         response.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
-        var jobEl = doc.RootElement.GetProperty("job");
-        if (jobEl.ValueKind != JsonValueKind.Object) return null;
-        return new PolledJob(
+        var root = doc.RootElement;
+        var testPrintRequested = root.TryGetProperty("testPrintRequested", out var tp) && tp.ValueKind == JsonValueKind.True;
+        var jobEl = root.GetProperty("job");
+        if (jobEl.ValueKind != JsonValueKind.Object) return new PollOutcome(null, testPrintRequested);
+        var job = new PolledJob(
             JobId: jobEl.GetProperty("jobId").GetString()!,
             AttemptId: jobEl.GetProperty("attemptId").GetString()!,
             Station: jobEl.GetProperty("station").GetString()!,
             Content: jobEl.GetProperty("content").Clone()
         );
+        return new PollOutcome(job, testPrintRequested);
     }
 
     /// <summary>"Upravo počinjem fizičku pošiljku" — MORA se pozvati (i

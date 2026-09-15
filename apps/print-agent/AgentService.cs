@@ -95,6 +95,8 @@ public sealed class AgentService : BackgroundService
             throw;
         }
         AgentLog.Info($"Aktivan server: {endpoint.DescribeForLog()}");
+        PairingClient.ConfigureBypassHeader(endpoint);
+        DeliveryClient.ConfigureBypassHeader(endpoint);
 
         var baseUrl = endpoint.BaseUrl;
         var configPath = AgentPaths.ConfigFilePath;

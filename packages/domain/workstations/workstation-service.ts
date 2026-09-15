@@ -503,3 +503,22 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
   });
   return { testPrintRequested: current?.testPrintStatus === "PENDING" };
 }
+
+/**
+ * Izdvojeno iz recordHeartbeat-a iznad (ISTA logika: testPrintStatus ===
+ * "PENDING") da bi /api/agent/poll mogao da nosi isti signal na SVOM,
+ * mnogo bržem ciklusu (1-3s, vidi AgentRunner.cs ActivePollMs) umesto da
+ * Test Print čeka do 25s heartbeat-a (dokazan uzrok ~19s kašnjenja u
+ * PREPROD fizičkom testu). NAMERNO zasebna, minimalna funkcija — ne menja
+ * pollAndClaim (agent-print-service.ts) niti njegov povratni tip, koji
+ * postojeći integration testovi (agent-print-delivery.test.ts) već
+ * pretpostavljaju nepromenjenim. Pozivalac (poll rute) kombinuje oba
+ * rezultata u jedan JSON odgovor.
+ */
+export async function isTestPrintPending(wsCtx: WorkstationAuthContext): Promise<boolean> {
+  const current = await prisma.workstation.findUnique({
+    where: { id: wsCtx.workstationId },
+    select: { testPrintStatus: true },
+  });
+  return current?.testPrintStatus === "PENDING";
+}

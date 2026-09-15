@@ -67,17 +67,37 @@ export async function beginPrintJob(orderId: string, jobId: string): Promise<Pri
   return body.printJob as PrintJob;
 }
 
+// Server-autoritativan izvor za KDS (i Admin) prikaz spremnosti štampača
+// (Problem 3 + Part 13 ispravka) — NIKAD QZ/browser localStorage. `state`
+// je JEDINO diskriminisano stanje koje treba prikazati; hasWorkstation/
+// isOnline ostaju izloženi radi kompatibilnosti/detaljnijeg prikaza gde
+// zatreba, ali `state` već uračunava i konfigurisan/dostupan štampač
+// (agent online sa NEDOSTUPNIM štampačem NIKAD ne prijavljuje READY).
+export type PrinterReadinessState = "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED";
+
+export interface StationPrinterStatus {
+  hasWorkstation: boolean;
+  isOnline: boolean;
+  state: PrinterReadinessState;
+}
+
 export interface PendingStationPrintJobs {
   jobs: PrintJob[];
   autoPrintEligible: boolean;
   // Faza 2B — QZ koegzistencija: true kad postoji bar jedna omogućena,
   // neopozvana radna stanica sa nedavnim heartbeat-om za TAČNO ovu
-  // restoran/lokacija/stanica kombinaciju (agentPrinting.isAgentActiveForStation).
-  // KdsClient.tsx ovo koristi da PASIVNO povuče sopstveni auto-claim kad je
-  // Print Agent aktivan — browser/QZ i agent se NIKAD ne takmiče za iste
-  // redove (duplikat je već strukturno nemoguć preko beginPrintAttempt-a,
-  // ovo sprečava samo nasumično/nepotrebno takmičenje).
+  // restoran/lokacija/stanica kombinaciju (agentPrinting.stationPrinterStatus's
+  // isOnline). KdsClient.tsx ovo koristi da PASIVNO povuče sopstveni
+  // auto-claim kad je Print Agent aktivan — browser/QZ i agent se NIKAD ne
+  // takmiče za iste redove (duplikat je već strukturno nemoguć preko
+  // beginPrintAttempt-a, ovo sprečava samo nasumično/nepotrebno takmičenje).
   agentActiveForStation: boolean;
+  printerStatus: StationPrinterStatus;
+  // Po-poslu (ne po-stanici) signal — bar jedan FAILED/SUBMISSION_UNKNOWN
+  // tiket u `jobs` iznad. Prikazuje se kao "Poslednja štampa nije uspela"
+  // SAMO kad je stanica inače READY (vidi KdsClient.tsx) — istorijski
+  // neuspeh ne sme trajno prikazivati zdrav štampač kao pokvaren.
+  hasRecentFailure: boolean;
 }
 
 export async function fetchPendingStationPrintJobs(station: "KITCHEN" | "BAR", locationId: string): Promise<PendingStationPrintJobs> {
@@ -87,6 +107,12 @@ export async function fetchPendingStationPrintJobs(station: "KITCHEN" | "BAR", l
     jobs: body.jobs as PrintJob[],
     autoPrintEligible: Boolean(body.autoPrintEligible),
     agentActiveForStation: Boolean(body.agentActiveForStation),
+    printerStatus: {
+      hasWorkstation: Boolean(body.printerStatus?.hasWorkstation),
+      isOnline: Boolean(body.printerStatus?.isOnline),
+      state: (body.printerStatus?.state as PrinterReadinessState) ?? "NOT_CONFIGURED",
+    },
+    hasRecentFailure: Boolean(body.hasRecentFailure),
   };
 }
 

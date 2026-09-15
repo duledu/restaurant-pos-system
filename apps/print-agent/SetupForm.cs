@@ -17,15 +17,50 @@ namespace TableCore.PrintAgent;
 /// </summary>
 public sealed class SetupForm : Form
 {
+    // TableCore brend boje (isto kao apps/web/tailwind.config.* graphite/gold)
+    // — jedina promena stila u ovom fajlu je _pairButton (primarni CTA za
+    // uparivanje); ostala dugmad (_testPrintButton/_saveButton) NAMERNO
+    // ostaju podrazumevani WinForms izgled, da se ne redizajnira ceo ekran.
+    private static readonly Color BrandGraphite = Color.FromArgb(0x0A, 0x19, 0x31);
+    private static readonly Color BrandGraphiteHover = Color.FromArgb(0x1A, 0x3D, 0x63);
+    private static readonly Color BrandGraphiteDisabled = Color.FromArgb(0x9A, 0x9F, 0xA6);
+
     private readonly Label _statusLabel = new() { AutoSize = true, MaximumSize = new Size(420, 0) };
     private readonly TextBox _pairingCodeBox = new() { Width = 220, PlaceholderText = "XXXX-XXXX-XXXX" };
-    private readonly Button _pairButton = new() { Text = "Poveži" };
+    private readonly Button _pairButton = new()
+    {
+        Text = "Poveži",
+        Width = 160,
+        Height = 36,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = BrandGraphite,
+        ForeColor = Color.White,
+        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+        Cursor = Cursors.Hand,
+        Margin = new Padding(8, 0, 0, 0),
+    };
+    // AutoSize=false + fiksna visina, UVEK vidljiva (nikad Visible=false) —
+    // NAMERNO, da se prostor za ovu poruku rezerviše u layout-u OD POČETKA,
+    // pa pojava/promena teksta (npr. "Poveži" -> "Povezivanje..." ->
+    // uspeh/neuspeh) NIKAD ne pomera/menja visinu ičega ispod (Stanica/
+    // Štampač/Širina papira/Test Print/Sačuvaj) — upravo bug prijavljen sa
+    // fizičkog test računara (donja dugmad su nestajala/sekla se kad bi se
+    // ova poruka pojavila, jer je ranije bila AutoSize+Visible=false, što
+    // MENJA ukupnu visinu sadržaja u trenutku kad ekran ima fiksnu visinu).
+    private readonly Label _pairFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 32), TextAlign = ContentAlignment.TopLeft };
     private readonly ComboBox _stationBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _printerBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _paperWidthBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly Label _autoPrintLabel = new() { AutoSize = true, Text = "Automatska štampa: (nepoznato)" };
-    private readonly Button _testPrintButton = new() { Text = "Test Print" };
-    private readonly Button _saveButton = new() { Text = "Sačuvaj" };
+    // AutoSize + Padding umesto podrazumevane FIKSNE WinForms veličine
+    // dugmeta (75x23 px na 96 DPI) — taj fiksni raster ne ostavlja dovoljno
+    // vertikalnog prostora za tekst na 125%/150% Windows skaliranju (upravo
+    // prijavljen bug: "Test"/"Sačuvaj" tekst vertikalno isečen). AutoSize
+    // meri STVARNU visinu teksta pri TRENUTNOM DPI/font skaliranju i uvek
+    // ostavlja Padding oko nje — ispravno na 100/125/150% bez potrebe da se
+    // cela forma uveličava.
+    private readonly Button _testPrintButton = new() { Text = "Test štampa", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
+    private readonly Button _saveButton = new() { Text = "Sačuvaj podešavanja", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
     private readonly Label _versionLabel = new() { AutoSize = true, Text = $"TableCore Print Agent v{AgentVersion.Current}" };
     private readonly Label _endpointLabel = new() { AutoSize = true };
 
@@ -51,25 +86,54 @@ public sealed class SetupForm : Form
         try
         {
             _endpoint = AgentEndpoint.Resolve(args);
+            PairingClient.ConfigureBypassHeader(_endpoint);
         }
         catch (AgentEndpointConfigurationException ex)
         {
             _endpointError = ex.Message;
         }
         Text = "TableCore Print Agent — podešavanje";
-        Width = 480;
-        Height = 420;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
+        AcceptButton = _pairButton;
+        // AutoSize umesto fiksne Height — forma UVEK raste da stane sav
+        // sadržaj (bez obzira na DPI/font skaliranje na stvarnom Windows 11
+        // test računaru, dužinu prevoda, ili broj redova poruke), nikad ne
+        // seče donju akcionu traku (Test Print/Sačuvaj). AutoScaleMode.Font
+        // (podrazumevano za WinForms) obezbeđuje da se i sami kontrolski
+        // elementi skaliraju sa sistemskim DPI-jem pre nego što se izmeri
+        // ukupna visina za AutoSize — širina ostaje fiksna preko
+        // MinimumSize/MaximumSize, samo visina je promenljiva.
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        MinimumSize = new Size(480, 0);
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(16) };
+        _pairButton.FlatAppearance.BorderSize = 0;
+        _pairButton.FlatAppearance.MouseOverBackColor = BrandGraphiteHover;
+        _pairButton.FlatAppearance.MouseDownBackColor = BrandGraphiteHover;
+
+        // Dock=Top (ne Fill) + AutoSize — panel zauzima tačno onoliko visine
+        // koliko mu treba sadržaj, forma iznad raste da je isprati. Dodatan
+        // razmak na dnu (Padding bottom 24 umesto 16) da donja dugmad nikad
+        // ne budu tik uz ivicu prozora.
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            Padding = new Padding(16, 16, 16, 24),
+        };
         layout.Controls.Add(_statusLabel);
         layout.Controls.Add(new Label { Text = "Kod za uparivanje:", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
         var pairRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        _pairingCodeBox.Margin = new Padding(0, 6, 0, 0);
         pairRow.Controls.Add(_pairingCodeBox);
         pairRow.Controls.Add(_pairButton);
         layout.Controls.Add(pairRow);
+        _pairFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
+        layout.Controls.Add(_pairFeedbackLabel);
 
         layout.Controls.Add(new Label { Text = "Stanica:", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
         layout.Controls.Add(_stationBox);
@@ -118,9 +182,30 @@ public sealed class SetupForm : Form
         RefreshStatus(paired);
         if (_endpointError is not null)
         {
-            _pairButton.Enabled = false;
+            SetPairButtonEnabled(false);
             _pairingCodeBox.Enabled = false;
+            ShowPairFeedback($"Server nije ispravno podešen, uparivanje je onemogućeno: {_endpointError}", isError: true);
         }
+    }
+
+    /// <summary>
+    /// Flat-stilizovano dugme ne posivi automatski BackColor kad je
+    /// Enabled=false (za razliku od podrazumevanog WinForms izgleda) — ovo
+    /// eksplicitno prebacuje boju, jedino mesto gde se _pairButton.Enabled
+    /// menja u celom fajlu.
+    /// </summary>
+    private void SetPairButtonEnabled(bool enabled)
+    {
+        _pairButton.Enabled = enabled;
+        _pairButton.BackColor = enabled ? BrandGraphite : BrandGraphiteDisabled;
+    }
+
+    private void ShowPairFeedback(string message, bool isError)
+    {
+        // NIKAD ne dirati .Visible ovde — vidi komentar na deklaraciji
+        // _pairFeedbackLabel iznad (rezervisan prostor, fiksna visina).
+        _pairFeedbackLabel.Text = message;
+        _pairFeedbackLabel.ForeColor = isError ? Color.Firebrick : Color.FromArgb(0x1E, 0x7A, 0x3C);
     }
 
     private void LoadExistingConfigIfPresent()
@@ -161,22 +246,27 @@ public sealed class SetupForm : Form
     {
         if (_endpointError is not null)
         {
-            MessageBox.Show(this, $"Server nije ispravno podešen, uparivanje je onemogućeno: {_endpointError}", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowPairFeedback($"Server nije ispravno podešen, uparivanje je onemogućeno: {_endpointError}", isError: true);
             return;
         }
         var code = _pairingCodeBox.Text.Trim();
         if (code.Length == 0)
         {
-            MessageBox.Show(this, "Unesite kod za uparivanje.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ShowPairFeedback("Unesite kod za uparivanje.", isError: true);
             return;
         }
-        _pairButton.Enabled = false;
+        var previousButtonText = _pairButton.Text;
+        SetPairButtonEnabled(false);
+        _pairingCodeBox.Enabled = false;
+        _pairButton.Text = "Povezivanje…";
+        ShowPairFeedback("Povezivanje sa serverom…", isError: false);
         try
         {
             var result = await PairingClient.PairForSetup(_endpoint.BaseUrl, code);
             if (!result.Success)
             {
-                MessageBox.Show(this, result.ErrorMessage ?? "Uparivanje nije uspelo.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ShowPairFeedback(result.ErrorMessage ?? "Uparivanje nije uspelo.", isError: true);
+                _pairButton.Text = previousButtonText;
                 return;
             }
             _connectedName = result.Name;
@@ -184,11 +274,13 @@ public sealed class SetupForm : Form
             if (result.Station is "KITCHEN" or "BAR") _stationBox.SelectedItem = result.Station;
             _pairingCodeBox.Clear();
             RefreshStatus(paired: true);
-            MessageBox.Show(this, "Uspešno uparivanje. Izaberite štampač i sačuvajte podešavanja ispod.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var who = _connectedName is null ? "" : $" — {_connectedName}" + (_connectedStation is null ? "" : $" ({_connectedStation})");
+            ShowPairFeedback($"✓ Upareno{who}. Izaberite štampač i sačuvajte podešavanja ispod.", isError: false);
         }
         finally
         {
-            _pairButton.Enabled = true;
+            SetPairButtonEnabled(true);
+            _pairingCodeBox.Enabled = !CredentialStore.HasStoredCredential();
         }
     }
 

@@ -7,7 +7,7 @@
 import { prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { printerConfigSchema } from "@rcs/shared";
-import { lockPrintLocation, stationPolicy, suppressAutomaticJobs } from "../printing/print-policy";
+import { lockPrintLocation, stationPolicy, suppressAutomaticJobs, activeWorkstationFor } from "../printing/print-policy";
 import { recordAuditEntry } from "../audit/audit-service";
 import { buildCacheKey, getOrSet, cacheDel } from "../cache/cache-client";
 
@@ -118,7 +118,14 @@ export async function upsertPrinterConfig(ctx: AuthContext, input: PrinterConfig
       create: { ...data, restaurantId: ctx.restaurantId, automaticSince },
       update: { ...data, automaticSince },
     });
-    if (!enabled) await suppressAutomaticJobs(tx, ctx.restaurantId, data.locationId, data.station);
+    // Hardening audit finding: saving THIS legacy form with "Omogućen"/
+    // "Automatska štampa" unchecked must never suppress jobs a live Print
+    // Agent workstation can still serve — same rule as
+    // listPendingStationPrintJobs/dispatchStationPrintJobs (print-service.ts).
+    // RECEIPT has no Agent path at all (station is always null for it), so
+    // activeWorkstationFor is only meaningful for KITCHEN/BAR.
+    const activeWorkstation = data.station === "RECEIPT" ? null : await activeWorkstationFor(tx, ctx.restaurantId, data.locationId, data.station);
+    if (!enabled && !activeWorkstation) await suppressAutomaticJobs(tx, ctx.restaurantId, data.locationId, data.station);
     await recordAuditEntry(ctx, { entityType: "PrinterConfig", entityId: updated.id, action: "printer.policy_updated",
       previousValue: previous, newValue: updated, locationId: data.locationId }, tx);
     return updated;

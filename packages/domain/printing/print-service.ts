@@ -19,7 +19,7 @@
  */
 import { prisma, Prisma } from "@rcs/db";
 import { randomUUID } from "node:crypto";
-import { lockPrintLocation, stationPolicy, suppressAutomaticJobs } from "./print-policy";
+import { lockPrintLocation, stationPolicy, activeWorkstationFor } from "./print-policy";
 import { requireLocationAccess, requirePermission, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { getRestaurantSettings, getPrinterConfigForDispatch } from "../settings/settings-service";
@@ -125,13 +125,25 @@ export async function dispatchStationPrintJobs(
   for (const [station, rows] of byStation) {
     await prisma.$transaction(async (tx) => {
       await lockPrintLocation(tx, ctx.restaurantId, order.locationId);
-      // Snapshot širine papira ZA OVU STANICU u trenutku dispatch-a (zahtev
-      // #10/#17: kuhinja i šank mogu imati nezavisnu 58mm/80mm konfiguraciju)
-      // — nikad globalna/tvrdo ukucana vrednost, nikad naknadno preračunata.
-      const policy = await stationPolicy(tx, ctx.restaurantId, order.locationId, station);
-      const eventAt = new Date(Math.min(...rows.map((r) => (r.orderItem.submittedAt ?? order.submittedAt ?? new Date(0)).getTime())));
-      if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && eventAt <= policy.automaticSince)) return;
-      const { paperWidthMm } = policy;
+      // Print Agent spremnost je AUTORITATIVNA za normalan (automatski) put
+      // — legacy Browser/QZ "Automatska štampa novih porudžbina"/isEnabled
+      // NIKAD ne sme tiho blokirati kreiranje automatskog PrintJob-a dok je
+      // paren, spreman Print Agent za TAČNO ovu stanicu (agent poll/claim,
+      // agentPrinting.pollAndClaim, tu proveru uopšte ne čita). Legacy
+      // podešavanje ostaje relevantno SAMO kad agent NIJE aktivan (ručni/
+      // rezervni Browser/QZ put). Širina papira: agent-prijavljena vrednost
+      // kad je agent aktivan (jedini "vlasnik" te vrednosti za tu stanicu),
+      // inače legacy PrinterConfig snapshot kao pre (zahtev #10/#17).
+      const activeWorkstation = await activeWorkstationFor(tx, ctx.restaurantId, order.locationId, station);
+      let paperWidthMm: number;
+      if (activeWorkstation) {
+        paperWidthMm = activeWorkstation.paperWidthMm ?? 80;
+      } else {
+        const policy = await stationPolicy(tx, ctx.restaurantId, order.locationId, station);
+        const eventAt = new Date(Math.min(...rows.map((r) => (r.orderItem.submittedAt ?? order.submittedAt ?? new Date(0)).getTime())));
+        if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && eventAt <= policy.automaticSince)) return;
+        paperWidthMm = policy.paperWidthMm;
+      }
       const content = buildKitchenBarTicketContent({
         station,
         restaurantName: order.restaurant.name,
@@ -203,9 +215,18 @@ export async function dispatchCancellationPrintJob(ctx: AuthContext, orderItemVo
   for (const row of stationRows) {
     await prisma.$transaction(async (tx) => {
       await lockPrintLocation(tx, ctx.restaurantId, voidRecord.locationId);
-      const policy = await stationPolicy(tx, ctx.restaurantId, voidRecord.locationId, row.station);
-      if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && voidRecord.voidedAt <= policy.automaticSince)) return;
-      const { paperWidthMm } = policy;
+      // Isto pravilo kao dispatchStationPrintJobs iznad — Print Agent
+      // spremnost je autoritativna za normalan (automatski) STORNO tiket;
+      // legacy podešavanje važi samo kad agent nije aktivan.
+      const activeWorkstation = await activeWorkstationFor(tx, ctx.restaurantId, voidRecord.locationId, row.station);
+      let paperWidthMm: number;
+      if (activeWorkstation) {
+        paperWidthMm = activeWorkstation.paperWidthMm ?? 80;
+      } else {
+        const policy = await stationPolicy(tx, ctx.restaurantId, voidRecord.locationId, row.station);
+        if (!policy.isEnabled || !policy.autoPrint || (policy.automaticSince && voidRecord.voidedAt <= policy.automaticSince)) return;
+        paperWidthMm = policy.paperWidthMm;
+      }
       const content = buildCancellationTicketContent({
         station: row.station,
         tableLabel: voidRecord.tableLabel,
@@ -392,10 +413,27 @@ export async function retryPrintJob(ctx: AuthContext, orderId: string, printJobI
   if (job.station) assertStationAccess(ctx, job.station);
   return prisma.$transaction(async (tx) => {
     await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
+    // Found during hardening audit ("Pokušaj ponovo" trace): forcing
+    // isAutomatic:false unconditionally made sense ONLY for the old
+    // Browser/QZ world, where "manual retry" meant "this exact browser
+    // click prints it right now" — that's also what let retry bypass a
+    // legacy autoPrint=false toggle (beginPrintAttempt only gates on the
+    // OFF switch when isAutomatic is true). For an Agent-routed station,
+    // the KDS operator's OWN browser/device is almost never the physical
+    // printer — forcing isAutomatic:false there permanently hides the job
+    // from agentPrinting.pollAndClaim (which only polls isAutomatic:true),
+    // so retry would silently never reach the real Kitchen/Bar printer.
+    // When a live Agent owns this station, keep isAutomatic as it already
+    // is (normally true for a failed automatic dispatch) so the Agent's
+    // own fast poll (~1-3s) naturally reclaims it — beginPrintAttempt's
+    // legacy gate is already bypassed for this case (see fix above).
+    // Fallback stations (no active Agent) keep the exact original
+    // behavior — isAutomatic:false, immediate manual claim by the caller.
+    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
     const changed = await tx.printJob.updateMany({
       where: { id: job.id, status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" },
       data: { status: "PENDING", failureReason: null, attemptId: null, claimedBy: null, claimedAt: null,
-        submissionStartedAt: null, resultOutcome: null, isAutomatic: false },
+        submissionStartedAt: null, resultOutcome: null, ...(activeWorkstation ? {} : { isAutomatic: false }) },
     });
     if (!changed.count) throw new Error("Samo neuspeo pokušaj pre slanja može da se ponovi; neizvestan ishod zahteva novi otisak");
     await recordAuditEntry(ctx, { entityType: "PrintJob", entityId: job.id, action: "print.retry_requested",
@@ -412,14 +450,24 @@ export async function beginPrintAttempt(ctx: AuthContext, orderId: string, print
 
   return prisma.$transaction(async (tx) => {
     await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
-    const policy = await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
-    if (!policy.isEnabled) return null;
+    // Problem 2 fix follow-up (found during hardening audit): dispatch/
+    // suppression already bypass legacy PrinterConfig when a live Print
+    // Agent workstation exists (activeWorkstationFor) — but the ACTUAL
+    // claim step below did NOT, meaning a paired, ready Agent's own
+    // pollAndClaim (which calls THIS function) could still be silently
+    // refused a job it should serve, purely because of an unrelated
+    // Browser/QZ toggle. `policy === null` below means "an active agent
+    // owns this station — skip legacy gates entirely", exactly mirroring
+    // dispatchStationPrintJobs's rule.
+    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
+    const policy = activeWorkstation ? null : await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
+    if (policy && !policy.isEnabled) return null;
     // Also recover an individual manual/receipt claim without requiring KDS polling.
     await tx.printJob.updateMany({ where: { id: job.id, status: "PRINTING", attemptId: { not: null }, submissionStartedAt: null,
       claimedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
       data: { status: "PENDING", attemptId: null, claimedBy: null, claimedAt: null } });
     const current = await tx.printJob.findUniqueOrThrow({ where: { id: job.id } });
-    if (current.isAutomatic && !policy.autoPrint) return null;
+    if (policy && current.isAutomatic && !policy.autoPrint) return null;
     const claimed = await tx.printJob.updateMany({
       where: { id: job.id, status: "PENDING" },
       data: { status: "PRINTING", attemptId: randomUUID(), claimedBy: ctx.employeeId, claimedAt: new Date(),
@@ -441,12 +489,15 @@ export async function startPrintSubmission(ctx: AuthContext, orderId: string, pr
   if (job.station) assertStationAccess(ctx, job.station);
   return prisma.$transaction(async (tx) => {
     await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
-    const policy = await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
-    if (!policy.isEnabled) throw new Error("Štampač je isključen");
+    // Same rule as beginPrintAttempt above — an active Print Agent
+    // workstation makes legacy PrinterConfig irrelevant for this station.
+    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
+    const policy = activeWorkstation ? null : await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
+    if (policy && !policy.isEnabled) throw new Error("Štampač je isključen");
     const changed = await tx.printJob.updateMany({
       where: { id: job.id, status: "PRINTING", attemptId, claimedBy: ctx.employeeId, submissionStartedAt: null,
         claimedAt: { gte: new Date(Date.now() - STALE_PRINT_LEASE_MS) },
-        ...(policy.autoPrint ? {} : { isAutomatic: false }) },
+        ...(policy && !policy.autoPrint ? { isAutomatic: false } : {}) },
       data: { submissionStartedAt: new Date() },
     });
     if (!changed.count) throw new Error("Submission not authorized: expired, started, disabled or stale attempt");
@@ -463,31 +514,71 @@ export async function startPrintSubmission(ctx: AuthContext, orderId: string, pr
 // magic number that could drift.
 export const STALE_PRINT_LEASE_MS = 90_000;
 
+/**
+ * KDS polling audit (final performance pass) — ovo je sada ČIST READ put,
+ * pozvan svaka ~4s po otvorenom KDS tabu. Ranije je ovo bila TRANSAKCIJA sa
+ * lockPrintLocation (SELECT ... FOR UPDATE na CEO location red, ne po
+ * stanici), uslovnim suppressAutomaticJobs pozivom, i DVA bezuslovna
+ * updateMany "stale recovery" prolaza — 6-7 sekvencijalnih round-trip-ova
+ * pod bravom, na SVAKI poll, sa SVAKOG otvorenog taba (Kuhinja+Šank
+ * tabovi brave ISTI location red, pa se serijalizuju jedni iza drugih).
+ *
+ * Dva nalaza uklanjaju tu težinu bez gubitka ijedne garancije:
+ *
+ * 1) suppressAutomaticJobs OVDE je bio suvišan: settings-service.ts's
+ *    upsertPrinterConfig (stvaran "Sačuvaj" na legacy Kuhinja/Šank
+ *    formi) VEĆ poziva suppressAutomaticJobs U TRENUTKU kad se
+ *    autoPrint/isEnabled isključi — to je JEDINI trenutak kad supresija
+ *    ima smisla (dispatchStationPrintJobs sam odbija da napravi NOVI
+ *    automatski posao dok je isključeno, pa nijedan "svež" red nikad ne
+ *    postoji da bi ga ponovni KDS poll morao da otkrije i suzbije).
+ *    Ponovno pozivanje na svaki poll nikad nije radilo ništa što
+ *    upsertPrinterConfig već nije uradio ODMAH kad se desilo.
+ *
+ * 2) Oba "stale recovery" updateMany prolaza su VEĆ duplirana:
+ *    agentPrinting.pollAndClaim (Agent-ova SOPSTVENA poll petlja, 1-3s
+ *    kad je agent aktivan — brže od ovog 4s KDS poll-a) radi IDENTIČNA
+ *    dva updateMany, BEZ ikakve brave — dokaz da brava nikad nije bila
+ *    stvarno potrebna za bezbednost ovih redova (updateMany-jevi su već
+ *    sami po sebi uslovni/atomski, a diraju status='PRINTING' redove dok
+ *    beginPrintAttempt dira SAMO status='PENDING' — disjunktni skupovi,
+ *    bez trke). Za stanicu SA aktivnim agentom, KDS poll ne mora ponovo
+ *    da radi ovaj posao AT SVE. Za stanicu BEZ agenta (jedini scenario
+ *    gde bi zaglavljen ručni pokušaj inače ostao NIKAD oporavljen), isti
+ *    par updateMany-jeva se i dalje izvršava ovde, samo BEZ brave — isti
+ *    obrazac koji pollAndClaim već bezbedno koristi.
+ */
 export async function listPendingStationPrintJobs(ctx: AuthContext, locationId: string, station: "KITCHEN" | "BAR") {
   requirePermission(ctx, PRODUCTION_MANAGE);
   requireLocationAccess(ctx, locationId);
   assertStationAccess(ctx, station);
 
-  return prisma.$transaction(async (tx) => {
-    await lockPrintLocation(tx, ctx.restaurantId, locationId);
-    const policy = await stationPolicy(tx, ctx.restaurantId, locationId, station);
-    if (!policy.isEnabled || !policy.autoPrint) await suppressAutomaticJobs(tx, ctx.restaurantId, locationId, station);
+  const activeWorkstation = await activeWorkstationFor(prisma, ctx.restaurantId, locationId, station);
+  if (!activeWorkstation) {
+    // Isti par sweep-ova, isti oblik, kao agentPrinting.pollAndClaim —
+    // NAMERNO bez transakcije/brave (dokazano bezbedno tamo). Samo za
+    // stanice BEZ aktivnog agenta: to je JEDINI slučaj gde niko drugi
+    // (ni jedan agent poll) već radi ovaj oporavak.
     const scope = { ...scopeToRestaurant(ctx), locationId, station, status: "PRINTING" as const };
-    await tx.printJob.updateMany({
+    await prisma.printJob.updateMany({
       where: { ...scope, attemptId: { not: null }, submissionStartedAt: null,
         claimedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
       data: { status: "PENDING", attemptId: null, claimedBy: null, claimedAt: null },
     });
-    await tx.printJob.updateMany({
+    await prisma.printJob.updateMany({
       where: { ...scope, submissionStartedAt: { lt: new Date(Date.now() - STALE_PRINT_LEASE_MS) } },
       data: { status: "SUBMISSION_UNKNOWN", failureReason: "Potvrda štampe nedostaje; proverite štampač pre novog otiska." },
     });
-    const jobs = await tx.printJob.findMany({
+  }
+
+  const [policy, jobs] = await Promise.all([
+    stationPolicy(prisma, ctx.restaurantId, locationId, station),
+    prisma.printJob.findMany({
       where: { ...scopeToRestaurant(ctx), locationId, station, status: { in: ["PENDING", "FAILED", "SUBMISSION_UNKNOWN"] } },
       orderBy: { createdAt: "asc" },
-    });
-    return { jobs, autoPrintEligible: policy.isEnabled && policy.autoPrint };
-  });
+    }),
+  ]);
+  return { jobs, autoPrintEligible: policy.isEnabled && policy.autoPrint };
 }
 
 /** Explicit station print/reprint. Auto-order policy is intentionally not consulted. */

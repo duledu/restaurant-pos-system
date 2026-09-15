@@ -14,10 +14,11 @@ import {
   fetchPendingStationPrintJobs,
   retryPrintJob,
   type PrintJob,
+  type StationPrinterStatus,
 } from "../../lib/print-client";
 import { defaultPrintTransport, type PrintTransport } from "../../lib/print-transport";
 import { resolveAutoPrintTransport } from "../../lib/qz-auto-transport";
-import { getQzSettings, isQzAutoPrintConfigured } from "../../lib/qz-settings";
+import { getQzSettings } from "../../lib/qz-settings";
 import { ticketWaitBasis } from "../../lib/kds-wait-time";
 
 interface StationItemModifier {
@@ -81,6 +82,24 @@ const STATUS_ACTION_LABEL: Record<string, string> = {
   PREPARING: "Označi spremno",
 };
 
+// Hardening/performance audit — MORA se poklapati sa NEXT_STATUS u
+// production-service.ts. Namerno dupliran (mali, stabilan, 3-unosni
+// mapping) da klik na dugme može ODMAH da pomeri status lokalno, bez
+// čekanja na network round-trip — pravi server odgovor (advance rute
+// `{item}`) svejedno se koristi za konačno pomirenje ispod, pa čak i da
+// ova mapa ikad promaši, korisnik odmah posle vidi TAČNO stanje sa
+// servera, nikad trajno pogrešno.
+const NEXT_STATUS_CLIENT: Record<string, StationItem["status"]> = {
+  SUBMITTED: "ACCEPTED",
+  ACCEPTED: "READY",
+  PREPARING: "READY",
+};
+// Mora se poklapati sa PENDING_PRODUCTION_STATUSES u production-service.ts
+// — određuje kad porudžbina nestaje sa Aktivne (sve stavke ove stanice su
+// bar READY) ODMAH, bez čekanja na sledeći poll da je server-strani filter
+// istog imena povuče u Gotove.
+const PENDING_STATION_STATUSES_CLIENT = new Set(["SUBMITTED", "ACCEPTED", "PREPARING"]);
+
 const STATUS_BADGE: Record<string, string> = {
   SUBMITTED: "bg-gold-soft text-gold-dark",
   ACCEPTED: "bg-gold text-white",
@@ -114,16 +133,31 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   const knownOrderIds = useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [printBusyId, setPrintBusyId] = useState<string | null>(null);
+  // Performance/400 audit — prethodno posmatran 400 na /advance ("Status
+  // stavke je već promenjen") uglavnom dolazi od DUPLOG tapa na ISTU
+  // stavku pre nego što je prvi zahtev stigao (spor tok bez vizuelne
+  // potvrde je ovo ohrabrivao). Ref (ne state) — mora biti sinhrono
+  // dostupan ODMAH na klik, pre bilo kog re-rendera, da zaista spreči
+  // drugi zahtev, ne samo vizuelno onemogući dugme koje bi (retko) moglo
+  // stići kliku pre re-renderа.
+  const advanceInFlightRef = useRef<Set<string>>(new Set());
+  const [advanceBusyIds, setAdvanceBusyIds] = useState<Set<string>>(new Set());
   const [pendingPrint, setPendingPrint] = useState<{ orderId: string; job: PrintJob; transport?: PrintTransport } | null>(null);
   const [failedPrintJobs, setFailedPrintJobs] = useState<PrintJob[]>([]);
   const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
-  // P0.17: SAMO čitanje — podešavanje QZ štampača je administratorski
-  // zadatak (vidi apps/web/app/(admin)/settings/printers), Kuhinja/Šank
-  // ovde dobija isključivo status prikaz, bez ijedne kontrole.
-  const [qzConfigured, setQzConfigured] = useState(false);
-  useEffect(() => {
-    setQzConfigured(isQzAutoPrintConfigured(getQzSettings()));
-  }, []);
+  // Problem 3 ispravka — server-autoritativan izvor za prikaz spremnosti
+  // štampača (Print Agent Workstation stanje), NIKAD QZ/browser
+  // localStorage (koje je po-računaru, ne server-strano, i nije relevantno
+  // dok Print Agent postoji kao stvaran automatski put). getQzSettings
+  // ostaje korišćen NIŽE u fajlu isključivo za stvarnu rezervnu (fallback)
+  // transport odluku kad Print Agent NIJE aktivan za ovu stanicu.
+  const [printerStatus, setPrinterStatus] = useState<StationPrinterStatus>({
+    hasWorkstation: false,
+    isOnline: false,
+    state: "NOT_CONFIGURED",
+  });
+  // Part 13 hardening — po-poslu signal iz iste ruta (ne posebna logika).
+  const [hasRecentFailure, setHasRecentFailure] = useState(false);
 
   // AUTOMATSKA ŠTAMPA (zahtev #1/#3): red čekanja + reference umesto state-a
   // za "print u toku" — `load` je stabilan useCallback (isti interval
@@ -191,7 +225,19 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     }
   }
 
+  // Performance/correctness audit (Part 11) — setInterval ne čeka da
+  // prethodni load() završi; pod usporenim odgovorom (spor Neon/Vercel
+  // hladan start, ili teška fetchPendingStationPrintJobs tranzakcija) DVA
+  // poziva mogu biti istovremeno u letu, a mrežni jitter može dovesti do
+  // toga da STARIJI odgovor stigne POSLE novijeg i prepiše sveže stanje
+  // (setOrders je pun replace, ne merge). Ovaj ref je jednostavna brava:
+  // ako je poll već u toku, sledeći (interval ili eksplicitan) poziv se
+  // tiho preskače umesto da se gomila — sledeći ciklus za 4s je dovoljan.
+  const loadInFlightRef = useRef(false);
+
   const load = useCallback(async () => {
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
     try {
       let loc = locationId;
       if (!loc) {
@@ -223,6 +269,8 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
       // prikazuju sa dugmetom "Pokušaj ponovo" (zahtev #4).
       const failed = pendingPrintRes.jobs.filter((j) => j.status === "FAILED" || j.status === "SUBMISSION_UNKNOWN");
       setFailedPrintJobs(failed);
+      setPrinterStatus(pendingPrintRes.printerStatus);
+      setHasRecentFailure(pendingPrintRes.hasRecentFailure);
       // Faza 2B — kad je TableCore Print Agent aktivan za ovu stanicu, browser
       // (QZ ili plain print) se PASIVNO povlači iz automatskog preuzimanja —
       // agent poll/claim (agent-print-service.ts) postaje jedini automatski
@@ -244,6 +292,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
       setError(e instanceof Error ? e.message : "Greška pri učitavanju");
     } finally {
       setLoading(false);
+      loadInFlightRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseEndpoint, locationId]);
@@ -254,15 +303,63 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     return () => clearInterval(interval);
   }, [load]);
 
+  // Performance audit — Kitchen mora da oseti klik ODMAH (cilj: vizuelna
+  // promena <100ms), ne tek posle network round-trip-a I punog reload-a
+  // triju endpoint-a (aktivne/završene/print-status). Redosled je SADA:
+  // (1) odmah pomeri lokalni prikaz (optimistic, iz poznate NEXT_STATUS_CLIENT
+  // mape), (2) pošalji zahtev u pozadini, (3) pomiri sa STVARNIM server
+  // odgovorom (nikad naslepo veruj optimističkom nagađanju), (4) NIKAD ne
+  // zovi puni load() ovde — postojeći 4s poll interval i dalje prirodno
+  // uskladi sve ostalo (nove porudžbine, listu Gotove, print status).
+  function applyItemStatus(orderId: string, itemId: string, nextStatus: StationItem["status"]) {
+    setOrders((prev) =>
+      prev
+        .map((o) => {
+          if (o.orderId !== orderId) return o;
+          const items = o.items.map((it) => (it.id === itemId ? { ...it, status: nextStatus } : it));
+          return { ...o, items };
+        })
+        // Ista pravilo kao server-strani PENDING_PRODUCTION_STATUSES filter:
+        // čim NIJEDNA stavka ove stanice više nije "u toku", porudžbina
+        // nestaje sa Aktivne ODMAH — Gotove listu popunjava sledeći poll
+        // (do 4s, ne 10s), ne blokira ovaj klik.
+        .filter((o) => o.orderId !== orderId || o.items.some((it) => PENDING_STATION_STATUSES_CLIENT.has(it.status)))
+    );
+  }
+
   async function advance(orderId: string, itemId: string, expectedStatus: StationItem["status"]) {
+    // Sinhrona zaštita od duplog tapa PRE ijednog await-a/re-rendera —
+    // isti uzrok kao prethodno posmatran 400 ("Status stavke je već
+    // promenjen") na ovoj ruti.
+    if (advanceInFlightRef.current.has(itemId)) return;
+    advanceInFlightRef.current.add(itemId);
+    setAdvanceBusyIds((prev) => new Set(prev).add(itemId));
+
+    const optimisticNext = NEXT_STATUS_CLIENT[expectedStatus];
+    const previousOrders = orders;
+    if (optimisticNext) applyItemStatus(orderId, itemId, optimisticNext);
+    setError(null);
     try {
-      await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
+      const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
         method: "POST",
         body: JSON.stringify({ station, expectedStatus }),
       });
-      await load();
+      // Pomiri sa STVARNIM stanjem sa servera (nikad samo veruj nagađanju
+      // iznad) — bez punog reload-a, samo ova jedna stavka.
+      const confirmedStatus = result?.item?.status as StationItem["status"] | undefined;
+      if (confirmedStatus && confirmedStatus !== optimisticNext) applyItemStatus(orderId, itemId, confirmedStatus);
     } catch (e) {
+      // Neuspeh — vrati TAČNO prethodno stanje (čist rollback), nikad
+      // ostavi ekran u nagađanom stanju koje server nije potvrdio.
+      setOrders(previousOrders);
       setError(e instanceof Error ? e.message : "Greška");
+    } finally {
+      advanceInFlightRef.current.delete(itemId);
+      setAdvanceBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(itemId);
+        return next;
+      });
     }
   }
 
@@ -293,10 +390,24 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     setError(null);
     try {
       const original = failedPrintJobs.find((j) => j.id === jobId);
-      const job = original?.resultOutcome !== "FAILED_BEFORE_SUBMISSION"
+      const isSubmissionUnknown = original?.resultOutcome !== "FAILED_BEFORE_SUBMISSION";
+      const job = isSubmissionUnknown
         ? await requestStationPrint(orderId, station, crypto.randomUUID(), jobId)
         : await retryPrintJob(orderId, jobId);
       setFailedPrintJobs((prev) => prev.filter((j) => j.id !== jobId));
+      // Hardening audit finding — kad je Print Agent aktivan za ovu
+      // stanicu, retryPrintJob (server) NAMERNO ostavlja isAutomatic:true
+      // da bi agentov sopstveni brz poll (1-3s) prirodno preuzeo posao.
+      // KDS operater može gledati ovaj ekran na SASVIM drugom uređaju od
+      // fizičkog štampača (telefon, kancelarijski račun) — pokušaj štampe
+      // iz OVOG browsera ovde nikad ne bi stigao do prave kuhinjske/šank
+      // stampe. Browser pokušaj ostaje SAMO za rezervni (bez agenta) put i
+      // za SUBMISSION_UNKNOWN novi otisak (uvek namerno ručan preko
+      // requestStationPrint, nepromenjeno).
+      if (!isSubmissionUnknown && printerStatus.isOnline) {
+        printInFlightRef.current = false;
+        return;
+      }
       // Explicit manual retry is independent of automatic policy/polling.
       autoSeenRef.current.delete(jobId);
       printInFlightRef.current = true;
@@ -408,18 +519,47 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         >
           Izveštaj
         </Link>
-        {/* P0.17: SAMO informativno — podešavanje se radi u Admin →
-            Podešavanja → Štampači (ADMIN_ROLES), nikad ovde. Nema klika,
-            nema kontrola — Kuhinja/Šank ne "podešavaju", samo vide status. */}
-        <span
-          title={qzConfigured ? "Štampač podešen za automatsku QZ štampu na ovom računaru" : "QZ štampač nije podešen — obratite se administratoru"}
-          className={`flex min-h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold ${
-            qzConfigured ? "border-success/30 bg-success/10 text-success" : "border-white/10 bg-white/[.04] text-cream-300/60"
-          }`}
-        >
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${qzConfigured ? "bg-success" : "bg-cream-300/40"}`} aria-hidden="true" />
-          {qzConfigured ? "Štampač: Spreman" : "Štampač nije podešen"}
-        </span>
+        {/* P0.17 / Problem 3 ispravka: SAMO informativno — podešavanje se
+            radi u Admin → Podešavanja → Štampači (ADMIN_ROLES), nikad ovde.
+            Nema klika, nema kontrola. Status dolazi ISKLJUČIVO sa servera
+            (Print Agent Workstation stanje), nikad iz QZ/browser
+            localStorage — taj je po-računaru i ne odražava da li je
+            restoranov Print Agent stvarno spreman. */}
+        {(() => {
+          // Part 13 hardening — JEDAN diskriminisan prekidač (isti
+          // agentPrinting.stationPrinterStatus koji Admin koristi), nikad
+          // ponovo izveden ovde. PRINTER_UNAVAILABLE (agent online, ali
+          // konfigurisan Windows štampač nedostupan) je NOVO — ranije bi
+          // ovo pogrešno prikazalo "Štampač spreman".
+          const badge: { label: string; title: string; tone: "success" | "warn" | "muted" | "danger" } =
+            printerStatus.state === "NOT_CONFIGURED"
+              ? { label: "Štampač nije podešen", title: "Nijedan Print Agent nije uparen za ovu stanicu — obratite se administratoru", tone: "muted" }
+              : printerStatus.state === "AGENT_OFFLINE"
+                ? { label: "Print Agent offline", title: "Radna stanica je uparena, ali Windows Print Agent trenutno ne javlja status", tone: "warn" }
+                : printerStatus.state === "PRINTER_UNAVAILABLE"
+                  ? { label: "Štampač nedostupan", title: "Print Agent je online, ali konfigurisan Windows štampač nije pronađen/dostupan na tom računaru", tone: "danger" }
+                  : hasRecentFailure
+                    ? { label: "Poslednja štampa nije uspela", title: "Print Agent je spreman, ali bar jedan tiket nije uspešno odštampan — proveri listu ispod", tone: "danger" }
+                    : { label: "Štampač spreman", title: "Print Agent je uparen i spreman za automatsku štampu", tone: "success" };
+          const toneClasses: Record<typeof badge.tone, string> = {
+            success: "border-success/30 bg-success/10 text-success",
+            warn: "border-gold/30 bg-gold-soft/10 text-gold",
+            danger: "border-danger/30 bg-danger-soft text-danger",
+            muted: "border-white/10 bg-white/[.04] text-cream-300/60",
+          };
+          const dotClasses: Record<typeof badge.tone, string> = {
+            success: "bg-success",
+            warn: "bg-gold",
+            danger: "bg-danger",
+            muted: "bg-cream-300/40",
+          };
+          return (
+            <span title={badge.title} className={`flex min-h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold ${toneClasses[badge.tone]}`}>
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClasses[badge.tone]}`} aria-hidden="true" />
+              {badge.label}
+            </span>
+          );
+        })()}
       </div>
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
@@ -503,6 +643,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
                         {STATUS_ACTION_LABEL[item.status] && (
                           <button
                             onClick={() => advance(order.orderId, item.id, item.status)}
+                            disabled={advanceBusyIds.has(item.id)}
                             className="mt-3 min-h-11 w-full rounded-md bg-gold py-2 text-sm font-bold text-white transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
                           >
                             {STATUS_ACTION_LABEL[item.status]}

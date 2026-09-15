@@ -45,11 +45,28 @@
 ; samo po sebi odbija "--mode test --server https://tablecore.net", pa ovaj
 ; build strukturno ne može tiho završiti na produkciji čak ni greškom u
 ; vrednosti ispod.
+; AgentBypassHeader — OPCIONO, SAMO kad Vercel Preview URL iznad ima
+; uključen "Vercel Authentication" (Deployment Protection): Vercel na
+; svom edge-u (PRE naše aplikacije) odbija SVAKI zahtev bez browser SSO
+; kolačića sa 401, uključujući agentove sopstvene pozive (uparivanje/
+; heartbeat/poll) — vidi AgentEndpoint.cs, BypassHeaderName. Vrednost je
+; projektni "Protection Bypass for Automation" tajni token iz Vercel
+; Project Settings -> Deployment Protection, NIKAD unet ovde u fajl —
+; prosleđuje se ISKLJUČIVO preko ISCC /D u trenutku build-a, isto kao
+; AgentServerUrl. Ako Preview URL nema Deployment Protection uključen,
+; jednostavno se ne prosleđuje — bez efekta, prazan AgentArgs kao pre.
+#ifndef AgentBypassHeader
+  #define AgentBypassHeader ""
+#endif
 #ifndef AgentServerUrl
   #define AgentServerUrl ""
 #endif
 #if AgentServerUrl != ""
-  #define AgentArgs " --mode test --server " + AgentServerUrl
+  #if AgentBypassHeader != ""
+    #define AgentArgs " --mode test --server " + AgentServerUrl + " --bypass-header " + AgentBypassHeader
+  #else
+    #define AgentArgs " --mode test --server " + AgentServerUrl
+  #endif
   #define BuildSuffix " (PREPROD pilot)"
   #define MyOutputBaseFilename "TableCorePrintSetup-PREPROD"
 #else

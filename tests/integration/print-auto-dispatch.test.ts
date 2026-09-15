@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import type { AuthContext } from "@rcs/auth";
-import { orders, printing } from "@rcs/domain";
+import { orders, printing, workstations, agentPrinting } from "@rcs/domain";
+import type { WorkstationAuthContext } from "@rcs/auth";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -195,6 +196,50 @@ describe("automatic print dispatch: atomic claim (beginPrintAttempt) prevents du
     expect(reclaimed?.status).toBe("PRINTING");
   });
 
+  it("KDS polling optimization (final performance pass) — does NOT run stale-claim recovery from the read path when a live Print Agent workstation is active for the station; recovery ownership shifts entirely to the agent's own pollAndClaim, never permanently stuck either way", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+
+    const claimed = await printing.beginPrintAttempt(kitchenStaff, submitted.id, kitchenJob.id);
+    expect(claimed).not.toBeNull();
+
+    // Same stale backdating as the no-agent recovery test above, but this
+    // time a live Agent workstation exists for the station.
+    const staleClaimedAt = new Date(Date.now() - 91_000);
+    await prisma.printJob.update({
+      where: { id: kitchenJob.id },
+      data: { claimedAt: staleClaimedAt },
+    });
+
+    // The KDS read path (what every open Kitchen/BAR tab polls every ~4s)
+    // must be a pure read here — it must NOT mutate this stale row itself.
+    const result = await printing.listPendingStationPrintJobs(kitchenStaff, fixture.locationId, "KITCHEN");
+    expect(result.jobs.find((j) => j.id === kitchenJob.id)).toBeUndefined();
+    const untouched = await prisma.printJob.findUniqueOrThrow({ where: { id: kitchenJob.id } });
+    expect(untouched.status).toBe("PRINTING");
+    expect(untouched.claimedAt?.getTime()).toBe(staleClaimedAt.getTime());
+
+    // Proof it is never permanently stuck: the agent's own poll/claim loop
+    // (which runs independently of any KDS tab, on its own faster cadence)
+    // still recovers it exactly as before.
+    const wsCtx: WorkstationAuthContext = {
+      workstationId: registered.workstationId,
+      restaurantId: registered.restaurantId,
+      locationId: registered.locationId,
+      station: registered.station,
+    };
+    await agentPrinting.pollAndClaim(wsCtx);
+    const recovered = await prisma.printJob.findUniqueOrThrow({ where: { id: kitchenJob.id } });
+    expect(recovered.status).toBe("PENDING");
+  });
+
   it("does NOT recover a PRINTING claim that is still within the lease window (fresh in-progress print is left alone)", async () => {
     const fixture = await createFixture();
     const waiter = context(fixture, ["WAITER"], "waiter-1");
@@ -258,5 +303,306 @@ describe("automatic print dispatch: station queue listing", () => {
     });
     const afterConfig = await printing.listPendingStationPrintJobs(kitchenStaff, fixture.locationId, "KITCHEN");
     expect(afterConfig.autoPrintEligible).toBe(false);
+  });
+});
+
+async function pairActiveWorkstation(fixture: Fixture, station: "KITCHEN" | "BAR", ownerCtx: AuthContext) {
+  const pairing = await workstations.createPairing(ownerCtx, { locationId: fixture.locationId, station });
+  const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+  // Simulates a heartbeat that already reported a configured, available
+  // printer with its own paper width — exactly what AgentRunner.cs's
+  // SendHeartbeat sends every ~25s while the Windows Print Agent runs.
+  await prisma.workstation.update({
+    where: { id: registered.workstationId },
+    data: { lastSeenAt: new Date(), configuredPrinterName: "POS-58", printerAvailable: true, paperWidthMm: 58 },
+  });
+  return registered;
+}
+
+describe("automatic print dispatch: Print Agent readiness overrides legacy Browser/QZ config (Problem 2 fix)", () => {
+  it("still creates the automatic KITCHEN PrintJob when legacy PrinterConfig has autoPrint=false, as long as a live Print Agent workstation exists for that station", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    // The exact latent risk this fixes: an explicit legacy row with
+    // autoPrint=false must NOT silently block the agent-servisced station.
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: false, isEnabled: true },
+    });
+    await pairActiveWorkstation(fixture, "KITCHEN", owner);
+
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN");
+    expect(kitchenJob).toBeDefined();
+    expect(kitchenJob?.status).toBe("PENDING");
+    expect(kitchenJob?.isAutomatic).toBe(true);
+  });
+
+  it("uses the active workstation's own reported paper width, not the legacy PrinterConfig value, once a Print Agent is live for that station", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: true, isEnabled: true, paperWidthMm: 80 },
+    });
+    await pairActiveWorkstation(fixture, "KITCHEN", owner); // reports paperWidthMm: 58 via heartbeat
+
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    expect((kitchenJob.content as { paperWidthMm: number }).paperWidthMm).toBe(58);
+  });
+
+  it("still respects legacy autoPrint=false when NO Print Agent workstation is active for that station (manual/fallback path unaffected)", async () => {
+    const fixture = await createFixture();
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: false, isEnabled: true },
+    });
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    expect(jobs.find((j) => j.type === "KITCHEN")).toBeUndefined();
+  });
+
+  it("does not suppress PENDING automatic jobs for a station with a live Print Agent, even if legacy autoPrint is off (KDS listing must not delete work the agent can still claim)", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+
+    // Now the admin flips the LEGACY box off — the agent should be
+    // completely unaffected. A KDS tab open on this station must never
+    // suppress the job the agent can still serve.
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: false, isEnabled: true },
+    });
+    const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
+    await printing.listPendingStationPrintJobs(kitchenStaff, fixture.locationId, "KITCHEN");
+
+    const row = await prisma.printJob.findUniqueOrThrow({ where: { id: kitchenJob.id } });
+    expect(row.status).toBe("PENDING");
+  });
+});
+
+describe("automatic print dispatch: the CLAIM step itself must not be blocked by legacy config (hardening audit finding)", () => {
+  it("agentPrinting.pollAndClaim actually succeeds even when legacy autoPrint=false, for a live Agent workstation (dispatch alone bypassing the legacy gate is not enough — the claim step had the same gate)", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: false, isEnabled: true },
+    });
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    await submitMixedOrder(fixture, waiter);
+
+    const wsCtx: WorkstationAuthContext = {
+      workstationId: registered.workstationId,
+      restaurantId: registered.restaurantId,
+      locationId: registered.locationId,
+      station: registered.station,
+    };
+    const claimed = await agentPrinting.pollAndClaim(wsCtx);
+    expect(claimed).not.toBeNull();
+    expect(claimed?.station).toBe("KITCHEN");
+  });
+
+  it("legacy PrinterConfig.isEnabled=false does NOT block the claim while the Agent workstation is active — both legacy gates (isEnabled and autoPrint) are equally irrelevant to the Agent path, by design", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    // Explicit master-disabled legacy row — this must be exactly as
+    // irrelevant to the Agent path as autoPrint=false is (both are
+    // Browser/QZ-only concerns once a live Workstation owns the station).
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", isEnabled: false, autoPrint: false },
+    });
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    await submitMixedOrder(fixture, waiter);
+
+    const wsCtx: WorkstationAuthContext = {
+      workstationId: registered.workstationId,
+      restaurantId: registered.restaurantId,
+      locationId: registered.locationId,
+      station: registered.station,
+    };
+    const claimed = await agentPrinting.pollAndClaim(wsCtx);
+    expect(claimed).not.toBeNull();
+  });
+
+  it("the WORKSTATION's own isEnabled=false (not legacy PrinterConfig) is the correct, real control surface for pausing an Agent-served station — activeWorkstationFor stops treating it as active as soon as it's disabled", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner); // reports paperWidthMm: 58
+
+    // Admin uses "Podešavanja" (updateWorkstation) to pause this exact
+    // workstation — the intended control surface in the Agent world,
+    // reversible unlike revoke.
+    await workstations.updateWorkstation(owner, registered.workstationId, { isEnabled: false });
+
+    // A new order dispatched now must fall back to the legacy default
+    // (80mm, no PrinterConfig row) rather than the disabled workstation's
+    // own 58mm — direct proof that activeWorkstationFor no longer
+    // considers it "active" the instant isEnabled flips to false.
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    expect((kitchenJob.content as { paperWidthMm: number }).paperWidthMm).toBe(80);
+  });
+});
+
+describe("'Pokušaj ponovo' retry routing (hardening audit finding)", () => {
+  it("retrying a failed automatic job keeps isAutomatic=true when a live Agent owns the station, so the Agent's own fast poll reclaims it", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    expect(kitchenJob.isAutomatic).toBe(true);
+
+    const wsCtx: WorkstationAuthContext = {
+      workstationId: registered.workstationId,
+      restaurantId: registered.restaurantId,
+      locationId: registered.locationId,
+      station: registered.station,
+    };
+    // Agent claims and reports a real driver failure (e.g. printable area).
+    const claimed = await agentPrinting.pollAndClaim(wsCtx);
+    expect(claimed).not.toBeNull();
+    await agentPrinting.submitResult(wsCtx, claimed!.jobId, claimed!.attemptId, "FAILED_BEFORE_SUBMISSION", "Driver printable area is too small for this ticket.");
+    expect((await prisma.printJob.findUniqueOrThrow({ where: { id: kitchenJob.id } })).status).toBe("FAILED");
+
+    // Operator clicks "Pokušaj ponovo" on the KDS screen.
+    const retried = await printing.retryPrintJob(kitchenStaff, submitted.id, kitchenJob.id);
+    expect(retried.status).toBe("PENDING");
+    expect(retried.isAutomatic).toBe(true); // the actual bug this closes: used to force false, hiding it from pollAndClaim forever
+
+    // The Agent's own next poll (not a manual KDS/browser claim) must be
+    // able to pick this exact job back up.
+    const reclaimed = await agentPrinting.pollAndClaim(wsCtx);
+    expect(reclaimed?.jobId).toBe(kitchenJob.id);
+  });
+
+  it("retrying with NO active Agent for the station preserves the original manual-retry behavior (isAutomatic=false, immediate claim by the caller)", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    const claim = (await printing.beginPrintAttempt(kitchenStaff, submitted.id, kitchenJob.id))!;
+    await printing.confirmPrintResult(kitchenStaff, submitted.id, kitchenJob.id, { attemptId: claim.attemptId!, outcome: "FAILED_BEFORE_SUBMISSION" });
+
+    const retried = await printing.retryPrintJob(kitchenStaff, submitted.id, kitchenJob.id);
+    expect(retried.isAutomatic).toBe(false);
+  });
+});
+
+describe("stale/offline workstation correctly falls back to legacy policy (hardening audit — heartbeat freshness)", () => {
+  it("a workstation that stopped heartbeating (stale lastSeenAt) is no longer 'active' — dispatch falls back to legacy PrinterConfig, exactly as if no Agent ever existed", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner); // reports paperWidthMm: 58
+    // Simulate the Agent process being gone/offline for well beyond the
+    // 2-minute AGENT_ACTIVE_WINDOW_MS threshold (print-policy.ts) — no new
+    // heartbeat has landed, this is a real "PC turned off"/"network down"
+    // scenario, not a revoke or disable.
+    await prisma.workstation.update({
+      where: { id: registered.workstationId },
+      data: { lastSeenAt: new Date(Date.now() - 5 * 60 * 1000) },
+    });
+    await prisma.printerConfig.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, station: "KITCHEN", name: "Kuhinja", autoPrint: true, paperWidthMm: 80 },
+    });
+
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    // Legacy paper width (80), NOT the offline workstation's own (58) —
+    // proves the stale workstation is genuinely excluded, not merely
+    // deprioritized.
+    expect((kitchenJob.content as { paperWidthMm: number }).paperWidthMm).toBe(80);
+
+    // And the offline workstation's own credential naturally finds nothing
+    // to claim (it isn't heartbeating, so in reality it wouldn't even be
+    // polling — this proves the job is reachable through the legacy/manual
+    // path instead, matching stationPrinterStatus's "Print Agent offline"
+    // KDS state rather than a silently vanished ticket).
+    const kitchenStaff = context(fixture, ["KITCHEN"], "kitchen-1");
+    expect(await printing.beginPrintAttempt(kitchenStaff, submitted.id, kitchenJob.id)).not.toBeNull();
+  });
+});
+
+describe("stationPrinterStatus — one authoritative discriminated readiness state (hardening audit Part 13)", () => {
+  it("NOT_CONFIGURED when no workstation was ever paired for the station", async () => {
+    const fixture = await createFixture();
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status).toEqual({ hasWorkstation: false, isOnline: false, state: "NOT_CONFIGURED" });
+  });
+
+  it("AGENT_OFFLINE when a workstation exists but hasn't heartbeated within the freshness window", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    await prisma.workstation.update({
+      where: { id: registered.workstationId },
+      data: { lastSeenAt: new Date(Date.now() - 5 * 60 * 1000) },
+    });
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status.state).toBe("AGENT_OFFLINE");
+    expect(status.hasWorkstation).toBe(true);
+    expect(status.isOnline).toBe(false);
+  });
+
+  it("PRINTER_UNAVAILABLE when the Agent is online but the configured Windows printer is missing (printerAvailable=false) — must NOT report READY", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    await prisma.workstation.update({
+      where: { id: registered.workstationId },
+      data: { printerAvailable: false },
+    });
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status.state).toBe("PRINTER_UNAVAILABLE");
+  });
+
+  it("PRINTER_UNAVAILABLE when the Agent is online but has never reported a configured printer at all (fresh pairing, printerAvailable=null)", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const pairing = await workstations.createPairing(owner, { locationId: fixture.locationId, station: "KITCHEN" });
+    const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+    // Heartbeat WITHOUT ever reporting a printer — printerAvailable stays
+    // null (never reported), configuredPrinterName stays null.
+    await prisma.workstation.update({ where: { id: registered.workstationId }, data: { lastSeenAt: new Date() } });
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status.state).toBe("PRINTER_UNAVAILABLE");
+  });
+
+  it("READY only when online AND a specific printer is both configured and confirmed available", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    await pairActiveWorkstation(fixture, "KITCHEN", owner); // reports configuredPrinterName + printerAvailable:true
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status).toEqual({ hasWorkstation: true, isOnline: true, state: "READY" });
+  });
+
+  it("a revoked workstation is treated exactly like NOT_CONFIGURED — revocation must not leave a lingering 'offline' state", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    await workstations.revokeWorkstation(owner, registered.workstationId);
+    const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");
+    expect(status.state).toBe("NOT_CONFIGURED");
   });
 });

@@ -50,6 +50,68 @@ internal static class SelfTests
         var failure = WindowsPrinter.Print(new("KITCHEN", "TableCore-Nonexistent-" + Guid.NewGuid(), 58), Ticket.Example("KITCHEN"), "self-test");
         Check(failure.Status == "FAILED_BEFORE_SUBMISSION", "missing printer fails before submission");
 
+        // Faza 2C follow-up — PREPROD fizički test dokazao "Driver printable
+        // area is too small for this ticket." za stvarnu (dužu) porudžbinu na
+        // POS-58, dok je kratak Test Print prolazio. Uzrok: fiksnih ~4mm
+        // bafera (staro HeightUnits) nije bilo dovoljno za STVARNU marginu tog
+        // drajvera. ComputeFinalHeightUnits je čista aritmetika (bez Windows
+        // API-ja) izdvojena baš da bi se ovo moglo dokazati sa sintetičkim
+        // marginama, bez potrebe za baš tim tačnim drajverom.
+        Check(WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits: 1000, probeBoundsHeight: 1000, probePrintableAreaHeight: 1000) == 1000,
+            "zero-margin driver: final height equals content height exactly");
+        Check(WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits: 1000, probeBoundsHeight: 1000, probePrintableAreaHeight: 984) == 1016,
+            "~4mm-margin driver: final height adds the real 16-unit margin (same as the old fixed guess, here proven measured not assumed)");
+        Check(WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits: 1000, probeBoundsHeight: 1000, probePrintableAreaHeight: 961) == 1039,
+            "large-margin driver (~10mm, exceeds the old fixed ~4mm guess): final height adapts instead of using a hardcoded buffer — proves the PREPROD failure mode is now handled");
+        Check(WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits: 1000, probeBoundsHeight: 1000, probePrintableAreaHeight: 1005) == 1000,
+            "driver reporting printable area LARGER than bounds (unusual but possible rounding) never subtracts — content height is never shrunk below itself, i.e. never truncated");
+        for (var contentHeight = 100; contentHeight <= 5000; contentHeight += 733)
+        {
+            var final = WindowsPrinter.ComputeFinalHeightUnits(contentHeight, probeBoundsHeight: 1000, probePrintableAreaHeight: 950);
+            Check(final >= contentHeight, $"final height ({final}) never smaller than content height ({contentHeight}) — no truncation, for any ticket length");
+        }
+
+        // Real end-to-end dry-run against the ACTUAL installed driver(s) on
+        // this build machine — no physical printing (dryRun: true), same
+        // PREFLIGHT_ONLY path used by --probe-printer. Skipped gracefully
+        // when a given printer isn't installed, so this suite stays portable
+        // to machines without it.
+        var installedPrinters = WindowsPrinter.Enumerate();
+        foreach (var printerName in new[] { "POS-58" })
+        {
+            if (!installedPrinters.Contains(printerName, StringComparer.Ordinal))
+            {
+                Console.WriteLine($"SKIP: real-driver dry-run tests for \"{printerName}\" — not installed on this machine.");
+                continue;
+            }
+            var shortTicket = Ticket.Example("KITCHEN");
+            var shortResult = WindowsPrinter.Print(new("KITCHEN", printerName, 58), shortTicket, "self-test-short", dryRun: true);
+            Check(shortResult.Status == "PREFLIGHT_ONLY", $"[{printerName}] short Test-Print-shaped ticket fits real driver printable area");
+
+            // Realistic multi-item kitchen ticket — same shape/length class as
+            // the PREPROD order that failed ("Driver printable area is too
+            // small for this ticket."). Proves the two-pass, driver-measured
+            // sizing (not the old fixed ~4mm buffer) now fits a REAL longer
+            // ticket on THIS same driver.
+            var longLines = new List<TicketLine> { new("TABLECORE", 16, true), new("KUHINJA", 14, true), new("STO 12", 18, true) };
+            for (var i = 1; i <= 18; i++) longLines.Add(new($"{i}x Stavka jelovnika broj {i} sa dodacima", 12));
+            longLines.Add(new("Napomena:", 10));
+            longLines.Add(new("BEZ LUKA, EXTRA LJUTO, PAZI NA ALERGIJU", 13, true));
+            var longTicket = new Ticket([.. longLines]);
+            var longResult = WindowsPrinter.Print(new("KITCHEN", printerName, 58), longTicket, "self-test-long", dryRun: true);
+            Check(longResult.Status == "PREFLIGHT_ONLY",
+                $"[{printerName}] REGRESSION PROOF: realistic 21-line kitchen ticket (same class as the PREPROD failure) now fits — {longResult.Guarantee}");
+
+            // 80mm width still supported by TicketRaster's width math (the fix
+            // only touches height/margin sizing, never width) — verified even
+            // though this specific driver is a 58mm roll printer and will
+            // reject the 80mm request for its own (unrelated, expected)
+            // reasons; we only assert that no WIDTH-related exception occurs
+            // before the driver's own width rejection would.
+            using var raster80 = new TicketRaster(Ticket.Example("BAR"), 80);
+            Check(raster80.WidthUnits == 315, $"[{printerName}] 80mm width math unaffected by the height/margin fix");
+        }
+
         // Faza 2B Korak 0 — DPAPI CredentialStore round-trip. Sačuvaj/vrati
         // BILO KOJI stvaran (već upareni) kredencijal pre/posle testa — ovaj
         // self-test se sme pokrenuti i na već uparenoj mašini i ne sme ga
@@ -147,6 +209,76 @@ internal static class SelfTests
             "DescribeForLog format is endpoint-only (mode+scheme+host), structurally cannot carry a credential");
         Check(!test.DescribeForLog().Contains("tcpa1_", StringComparison.Ordinal) && !test.DescribeForLog().Contains("Bearer", StringComparison.Ordinal),
             "DescribeForLog never resembles a credential/bearer token");
+
+        // Faza 2C follow-up — Vercel Deployment Protection na PREPROD Preview
+        // URL-ovima blokira agentove sopstvene pozive PRE naše aplikacije
+        // (401 sa vercel_auth_enabled u telu, dokazano direktnim curl
+        // reprodukcijama protiv stvarnog PREPROD deployment-a). Rešenje je
+        // opciono --bypass-header, ali SAMO u test režimu — ovi testovi
+        // dokazuju da produkcija nikad ne može nositi ovo zaglavlje čak i
+        // ako je --bypass-header greškom prosleđen uz nju.
+        var testWithBypass = AgentEndpoint.Resolve(["--mode", "test", "--server", "http://127.0.0.1:3101", "--bypass-header", "secret123"]);
+        Check(testWithBypass.BypassHeader == "secret123", "test mode captures --bypass-header value");
+        var testWithoutBypass = AgentEndpoint.Resolve(["--mode", "test", "--server", "http://127.0.0.1:3101"]);
+        Check(testWithoutBypass.BypassHeader is null, "test mode without --bypass-header leaves it null (no forced dependency)");
+        var prodWithBypassArg = AgentEndpoint.Resolve(["--bypass-header", "secret123"]);
+        Check(prodWithBypassArg.BypassHeader is null, "production mode NEVER carries --bypass-header even if the arg is present (fail closed)");
+        using (var bypassClient = new HttpClient())
+        {
+            testWithBypass.ConfigureHttpClientDefaults(bypassClient);
+            Check(bypassClient.DefaultRequestHeaders.TryGetValues(AgentEndpoint.BypassHeaderName, out var values) && values.Single() == "secret123",
+                "ConfigureHttpClientDefaults adds the bypass header for a test-mode endpoint that has one");
+        }
+        using (var prodClient = new HttpClient())
+        {
+            prodWithBypassArg.ConfigureHttpClientDefaults(prodClient);
+            Check(!prodClient.DefaultRequestHeaders.Contains(AgentEndpoint.BypassHeaderName),
+                "ConfigureHttpClientDefaults is a no-op for a production endpoint — never adds the bypass header");
+        }
+
+        // Regresija (dokazana empirijski praznim exit code 1, bez ijednog
+        // prozora, dana pre ovog fixa) — SetupArgumentDispatch.IsInteractiveSetupArgs
+        // je izdvojena kopija Program.cs top-level provere koja odlučuje da
+        // li se SetupForm uopšte otvara. --bypass-header MORA biti u istoj
+        // grupi kao --mode/--server, inače PREPROD instaler/prečica
+        // ("--mode test --server <url> --bypass-header <secret>") pada u
+        // granu "Nepoznata opcija" i Setup ekran se nikad ne prikaže.
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(
+                ["--mode", "test", "--server", "http://127.0.0.1:3101", "--bypass-header", "secret123"]),
+            "Setup args (--mode test --server <non-prod-url> --bypass-header <value>) are accepted — the exact PREPROD shortcut/service argument shape");
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs([]), "no args (plain double-click) still opens Setup — unchanged");
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(["--mode", "test", "--server", "http://127.0.0.1:3101"]),
+            "Setup args without --bypass-header still work — unchanged prior behavior");
+        Check(!SetupArgumentDispatch.IsInteractiveSetupArgs(["--mode", "test", "--server", "http://127.0.0.1:3101", "--bypass-header", "secret123", "--unknown"]),
+            "an actually unknown flag alongside --bypass-header still fails closed (no validation weakened)");
+        Check(!SetupArgumentDispatch.IsInteractiveSetupArgs(["--run"]), "an unrelated known CLI flag (--run) is still NOT treated as an interactive Setup arg");
+        // Dispatch samo odlučuje DA LI se Setup ekran otvara (isto ponašanje
+        // kao već postojeće "--mode" ili "--server" samostalno, PRE ovog
+        // fixa) — stvaran fail-closed zahtev (vrednost mora postojati i biti
+        // ispravna) je ISKLJUČIVO odgovornost AgentEndpoint.Resolve ispod,
+        // koji SetupForm poziva i čiji izuzetak prikazuje kao _endpointError
+        // (dugme za uparivanje ostaje onemogućeno). Dispatch-nivo provera
+        // namerno ne duplira tu proveru.
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(["--bypass-header"]),
+            "a bare --bypass-header with no value still opens Setup (dispatch-level, same as bare --mode/--server before this fix) — AgentEndpoint.Resolve is the actual fail-closed gate");
+        // "Production mode does NOT accept/use/forward bypass header" — proveno
+        // već iznad preko AgentEndpoint (prodWithBypassArg.BypassHeader is null);
+        // ovo ovde dokazuje da čak i kad DISPATCH prepozna --bypass-header kao
+        // deo "endpoint argumenata" grupe (dozvoljava da se Setup otvori),
+        // stvarna rezolucija servera i dalje potpuno ignoriše tu vrednost čim
+        // --mode nije "test" — isti fail-closed rezultat kao gore, sada uz
+        // potvrdu da dispatch-nivo promena ovo ni na koji način ne slabi.
+        var prodDispatchArgs = new[] { "--server", "https://tablecore.net", "--bypass-header", "secret123" };
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(prodDispatchArgs), "production-mode endpoint args + --bypass-header still open Setup (dispatch only decides whether to show the screen)");
+        var prodDispatchEndpoint = AgentEndpoint.Resolve(prodDispatchArgs);
+        Check(prodDispatchEndpoint.Mode == AgentRuntimeMode.Production && prodDispatchEndpoint.BypassHeader is null,
+            "...but resolves to Production with BypassHeader still null — existing fail-closed Production behavior is unchanged by the dispatch fix");
+        // "no secret is printed to logs/errors/test output" — Redact() menja
+        // SAMO vrednost koja sledi "--bypass-header" u "***" pre spajanja u
+        // jedan red, nikad ne otkriva stvaran sadržaj.
+        var redacted = SetupArgumentDispatch.Redact(["--mode", "test", "--bypass-header", "secret123", "--unknown"]);
+        Check(!redacted.Contains("secret123", StringComparison.Ordinal) && redacted.Contains("***", StringComparison.Ordinal),
+            "Redact() never lets a --bypass-header value reach an error/log line, even in the fail-closed 'Nepoznata opcija' branch");
 
         // Faza 2C — Ticket.TestPrint (Admin "Test Print" dugme, autentifikovan
         // put preko AgentRunner.HandleTestPrintRequest). Mora biti jasno

@@ -66,13 +66,24 @@ public static class AgentRunner
                 lastHeartbeatAtUtc = DateTime.UtcNow;
             }
 
-            PolledJob? job = null;
-            try { job = await DeliveryClient.Poll(baseUrl, credential); }
+            var poll = new PollOutcome(null, false);
+            try { poll = await DeliveryClient.Poll(baseUrl, credential); }
             catch (HttpRequestException ex) { LogWarn($"Poll mrežna greška (nastavljam): {ex.Message}"); }
 
-            if (job is not null)
+            // Faza 2C follow-up — Test Print se SADA otkriva i preko OVOG
+            // brzog (1-3s) poll ciklusa, ne samo preko 25s heartbeat-a ispod
+            // (SendHeartbeat i dalje nezavisno nosi isti signal — namerno
+            // NEPROMENJENO, ovo je dodatan brži put, ne zamena). Dokazan
+            // uzrok ~19s kašnjenja u PREPROD fizičkom testu: Test Print je
+            // ranije čekao ISKLJUČIVO sledeći heartbeat. HandleTestPrintRequest
+            // ostaje idempotentno na isti način kao pre (server prebacuje
+            // testPrintStatus sa PENDING čim se prvi pokušaj prijavi, pa
+            // sledeći poll/heartbeat u ISTOM ciklusu više ne vidi PENDING).
+            if (poll.TestPrintRequested) await HandleTestPrintRequest(baseUrl, credential, config);
+
+            if (poll.Job is not null)
             {
-                await HandleJob(baseUrl, credential, config, job);
+                await HandleJob(baseUrl, credential, config, poll.Job);
                 pollIntervalMs = ActivePollMs;
                 lastJobAtUtc = DateTime.UtcNow;
                 continue; // odmah proveri ima li još — bez čekanja

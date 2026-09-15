@@ -197,100 +197,114 @@ export function PrintersSettingsClient() {
       ) : (
         <div className="space-y-4">
           <WorkstationsPanel locationId={locationId} />
-          {STATIONS.map(({ value: station, label }) => {
-            const cfg = configFor(station);
-            return (
-              <Card key={station} className="p-5">
-                <div className="mb-3 flex items-center justify-between">
-                  <h2 className="font-semibold text-ink">{label} — štampač</h2>
-                  <label className="flex items-center gap-2 text-sm text-inkSoft">
-                    <input
-                      type="checkbox"
-                      checked={cfg.isEnabled}
-                      onChange={(e) => updateDraft(station, { isEnabled: e.target.checked })}
-                    />
-                    Omogućen
-                  </label>
-                </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-xs text-inkSoft">Naziv</label>
-                    <input
-                      value={cfg.name}
-                      onChange={(e) => updateDraft(station, { name: e.target.value })}
-                      className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-inkSoft">Širina papira (mm)</label>
-                    <select
-                      value={cfg.paperWidthMm}
-                      onChange={(e) => updateDraft(station, { paperWidthMm: Number(e.target.value) })}
-                      className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
-                    >
-                      <option value={80}>80mm</option>
-                      <option value={58}>58mm</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-inkSoft">Tip štampača</label>
-                    <select
-                      value={cfg.printerType}
-                      onChange={(e) => updateDraft(station, { printerType: e.target.value as PrinterConfig["printerType"] })}
-                      className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
-                    >
-                      <option value="BROWSER">Browser (podrazumevano)</option>
-                      <option value="ESC_POS_LAN" disabled>ESC/POS mrežni (uskoro)</option>
-                      <option value="NETWORK" disabled>Mrežni (uskoro)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-inkSoft">Broj kopija</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={cfg.copies}
-                      onChange={(e) => updateDraft(station, { copies: Number(e.target.value) })}
-                      className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
-                    />
-                  </div>
-                  <div className="col-span-2">
-                    <label className="flex items-center gap-2 text-sm text-inkSoft">
-                      <input
-                        type="checkbox"
-                        checked={cfg.autoPrint}
-                        onChange={(e) => updateDraft(station, { autoPrint: e.target.checked })}
-                      />
-                      {station === "RECEIPT" ? "Automatska štampa računa (rezervisano; pregled ostaje dostupan)" : "Automatska štampa novih porudžbina (isključivanje ne utiče na KDS)"}
-                    </label>
-                  </div>
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => save(cfg)}
-                    disabled={saving === station || !cfg.name}
-                    className="min-h-11 rounded-md bg-graphite px-5 py-2 text-sm font-semibold text-cream-100 disabled:opacity-40"
-                  >
-                    {saving === station ? "Čuvanje…" : "Sačuvaj"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTestPrintContent(buildTestPrintContent(station, cfg.paperWidthMm))}
-                    className="min-h-11 rounded-md border border-line px-5 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
-                  >
-                    Probna štampa
-                  </button>
-                </div>
-              </Card>
-            );
-          })}
+
+          {/* Problem 1 ispravka — legacy Browser/QZ/ESC-POS podešavanje po
+              stanici NIKAD ne sme vizuelno konkurisati Print Agent toku
+              iznad (koji je normalna produkciona arhitektura). Ostaje
+              dostupno (RECEIPT/računi nema drugi put dok Print Agent ne
+              dobije RAČUNI/POS stanicu — vidi audit izveštaj), samo
+              skrolovano/sažeto ispod, zatvoreno po podrazumevanju. */}
           <details className="rounded-md border border-line">
             <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-inkSoft">
-              Napredna podešavanja — rezervni ručni metod (QZ)
+              Napredno / rezervni način štampe (Browser, QZ, ESC-POS)
             </summary>
-            <div className="border-t border-line p-4">
+            <div className="space-y-4 border-t border-line p-4">
+              <p className="text-xs text-inkSoft">
+                Ovo je rezervni/ručni put za slučaj da TableCore Print Agent nije uparen za neku stanicu, i jedini trenutni
+                put za štampu računa (Računi/POS preko Print Agent-a još nije dostupno). Za normalan rad kuhinje i šanka
+                koristi TableCore Print Agent iznad.
+              </p>
+              {STATIONS.map(({ value: station, label }) => {
+                const cfg = configFor(station);
+                return (
+                  <Card key={station} className="p-5">
+                    <div className="mb-3 flex items-center justify-between">
+                      <h2 className="font-semibold text-ink">{label} — štampač</h2>
+                      <label className="flex items-center gap-2 text-sm text-inkSoft">
+                        <input
+                          type="checkbox"
+                          checked={cfg.isEnabled}
+                          onChange={(e) => updateDraft(station, { isEnabled: e.target.checked })}
+                        />
+                        Omogućen
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1 block text-xs text-inkSoft">Naziv</label>
+                        <input
+                          value={cfg.name}
+                          onChange={(e) => updateDraft(station, { name: e.target.value })}
+                          className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-inkSoft">Širina papira (mm)</label>
+                        <select
+                          value={cfg.paperWidthMm}
+                          onChange={(e) => updateDraft(station, { paperWidthMm: Number(e.target.value) })}
+                          className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+                        >
+                          <option value={80}>80mm</option>
+                          <option value={58}>58mm</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-inkSoft">Tip štampača</label>
+                        <select
+                          value={cfg.printerType}
+                          onChange={(e) => updateDraft(station, { printerType: e.target.value as PrinterConfig["printerType"] })}
+                          className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+                        >
+                          <option value="BROWSER">Browser (podrazumevano)</option>
+                          <option value="ESC_POS_LAN" disabled>ESC/POS mrežni (uskoro)</option>
+                          <option value="NETWORK" disabled>Mrežni (uskoro)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-inkSoft">Broj kopija</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10}
+                          value={cfg.copies}
+                          onChange={(e) => updateDraft(station, { copies: Number(e.target.value) })}
+                          className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="flex items-center gap-2 text-sm text-inkSoft">
+                          <input
+                            type="checkbox"
+                            checked={cfg.autoPrint}
+                            onChange={(e) => updateDraft(station, { autoPrint: e.target.checked })}
+                          />
+                          {station === "RECEIPT"
+                            ? "Automatska štampa računa (rezervisano; pregled ostaje dostupan)"
+                            : "Automatska štampa novih porudžbina (samo dok TableCore Print Agent nije uparen za ovu stanicu)"}
+                        </label>
+                      </div>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => save(cfg)}
+                        disabled={saving === station || !cfg.name}
+                        className="min-h-11 rounded-md bg-graphite px-5 py-2 text-sm font-semibold text-cream-100 disabled:opacity-40"
+                      >
+                        {saving === station ? "Čuvanje…" : "Sačuvaj"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTestPrintContent(buildTestPrintContent(station, cfg.paperWidthMm))}
+                        className="min-h-11 rounded-md border border-line px-5 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
+                      >
+                        Probna štampa
+                      </button>
+                    </div>
+                  </Card>
+                );
+              })}
               <QzSettingsPanel />
             </div>
           </details>

@@ -67,7 +67,17 @@ public sealed class TicketRaster : IDisposable
 {
     public Bitmap Image { get; }
     public int WidthUnits { get; }
+    // NAMERNO nepromenjeno (sadržaj + fiksnih ~4mm) — koristi se ISKLJUČIVO
+    // kao PRVI (probni) zahtev ka drajveru u WindowsPrinter.Print, da se
+    // izmeri STVARNA neštampiva margina TOG drajvera. Konačna visina papira
+    // koja se stvarno šalje na štampu se računa OTUD (ContentHeightUnits +
+    // izmerena margina), NIKAD od ove fiksne procene — vidi WindowsPrinter.Print.
     public int HeightUnits { get; }
+    // Čist sadržaj, BEZ ikakvog bafera — jedina vrednost koja mora stati
+    // unutar page.PrintableArea.Height posle ispravnog sizing-a. Nikad se ne
+    // skraćuje/seče; WindowsPrinter.Print traži dovoljno prostora OKO ove
+    // vrednosti, nikad je ne umanjuje.
+    public int ContentHeightUnits { get; }
     public const float Dpi = 203;
     public TicketRaster(Ticket ticket, int widthMm)
     {
@@ -100,6 +110,11 @@ public sealed class TicketRaster : IDisposable
             y += heights[i];
         }
         WidthUnits = (int)Math.Round(widthMm / 25.4 * 100);
+        ContentHeightUnits = (int)Math.Ceiling(height / Dpi * 100);
+        // Nepromenjena formula (ceiling nad ZBIROM, ne zbir dva ceiling-a) —
+        // isti bajt-za-bajt rezultat kao pre ovog fixa, da postojeći
+        // self-test ("page height includes measured raster and 4 mm feed")
+        // ostane tačan bez izmene.
         HeightUnits = (int)Math.Ceiling(height / Dpi * 100 + 4 / 25.4 * 100);
     }
     public void Dispose() => Image.Dispose();
@@ -128,23 +143,44 @@ public static class WindowsPrinter
             document.PrintController = new StandardPrintController();
             document.DefaultPageSettings.Landscape = false;
             document.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
-            document.DefaultPageSettings.PaperSize = new PaperSize("TableCore ticket", raster.WidthUnits, raster.HeightUnits);
-            // Round-trip through the driver before StartDoc. Reject an A4/default fallback.
-            var devmode = document.PrinterSettings.GetHdevmode(document.DefaultPageSettings);
-            try { document.DefaultPageSettings.SetHdevmode(devmode); }
-            finally { GlobalFree(devmode); }
+
+            // PRVI (probni) prolaz — traži stranicu veličine raster.HeightUnits
+            // (sadržaj + nominalnih ~4mm, TicketRaster.HeightUnits, nepromenjeno)
+            // SAMO da bi se izmerila STVARNA neštampiva margina OVOG drajvera
+            // za ovu širinu papira (page.Bounds.Height - page.PrintableArea.Height).
+            // Ta margina je svojstvo drajvera/hardvera, ne nešto što nagađamo —
+            // upravo ono što je nedostajalo pre ovog fixa (fiksnih ~4mm je bilo
+            // dovoljno za kratak Test Print, ali ne i za dužu pravu porudžbinu
+            // na istom štampaču, jer stvarna margina ovog drajvera premašuje 4mm).
+            RoundTripPaperSize(document, raster.WidthUnits, raster.HeightUnits);
+            var probePage = document.DefaultPageSettings;
+
+            // DRUGI (konačan) prolaz — tačna visina = čist sadržaj
+            // (ContentHeightUnits, NIKAD skraćen/isečen) + STVARNO izmerena
+            // margina ovog drajvera. Nikad fiksan/nagađan broj. Zasebna,
+            // čisto-aritmetička funkcija (ComputeFinalHeightUnits ispod) —
+            // testirana direktno u SelfTests.cs sa sintetičkim vrednostima
+            // margine, bez potrebe za stvarnim/virtuelnim štampačem koji baš
+            // ima nenulti margin.
+            var finalHeightUnits = ComputeFinalHeightUnits(raster.ContentHeightUnits, probePage.Bounds.Height, probePage.PrintableArea.Height);
+            RoundTripPaperSize(document, raster.WidthUnits, finalHeightUnits);
             var page = document.DefaultPageSettings;
-            if (Math.Abs(page.Bounds.Width - raster.WidthUnits) > 2 || Math.Abs(page.Bounds.Height - raster.HeightUnits) > 2)
+            if (Math.Abs(page.Bounds.Width - raster.WidthUnits) > 2 || Math.Abs(page.Bounds.Height - finalHeightUnits) > 2)
                 throw new InvalidOperationException("Driver rejected compact custom paper size. Configure its roll/custom form.");
             float imageWidth = raster.Image.Width / TicketRaster.Dpi * 100;
             float imageHeight = raster.Image.Height / TicketRaster.Dpi * 100;
+            // I posle ispravnog sizing-a prema stvarnoj drajver margini, ovo
+            // ostaje kao STVARNA bezbednosna provera (zahtev specifikacije:
+            // "only fail if content truly cannot fit after proper sizing") —
+            // nikad se ne pretvara u "štampaj svejedno"; sadržaj se NIKAD ne
+            // seče/skraćuje da bi prošao ovu proveru.
             if (page.PrintableArea.Width < imageWidth || page.PrintableArea.Height < imageHeight)
                 throw new InvalidOperationException("Driver printable area is too small for this ticket.");
             if (dryRun)
                 return new("PREFLIGHT_ONLY", $"Driver reports {page.Bounds.Width} x {page.Bounds.Height} hundredths of an inch; printable area {page.PrintableArea.Width} x {page.PrintableArea.Height}. No Print call, no spool submission.");
             document.PrintPage += (_, e) => {
                 if (e.Graphics is null) throw new InvalidOperationException("No printer graphics context.");
-                if (Math.Abs(e.PageBounds.Width - raster.WidthUnits) > 2 || Math.Abs(e.PageBounds.Height - raster.HeightUnits) > 2)
+                if (Math.Abs(e.PageBounds.Width - raster.WidthUnits) > 2 || Math.Abs(e.PageBounds.Height - finalHeightUnits) > 2)
                     throw new InvalidOperationException("Driver changed paper size during submission.");
                 e.Graphics.PageUnit = GraphicsUnit.Display;
                 // Graphics origin is the printable area; center within that area.
@@ -161,6 +197,37 @@ public static class WindowsPrinter
             return new(submissionStarted ? "SUBMISSION_UNKNOWN" : "FAILED_BEFORE_SUBMISSION",
                 submissionStarted ? "Windows submission was attempted; partial output is possible. Do not automatically retry." : "PrintDocument.Print was not called.", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Čista aritmetika (bez ijednog Windows/GDI poziva) — namerno izdvojeno
+    /// da bi SelfTests.cs moglo direktno da proveri ponašanje za RAZLIČITE
+    /// margine drajvera (0, ~4mm, margina veća od stare fiksne procene) bez
+    /// potrebe za stvarnim štampačem koji baš ima tu tačnu marginu. Nikad ne
+    /// vraća manje od contentHeightUnits (sadržaj se nikad ne skraćuje) —
+    /// samo dodaje STVARNO izmerenu marginu drajvera (probeBoundsHeight -
+    /// probePrintableAreaHeight, nikad negativno, zaokruženo NAGORE).
+    /// </summary>
+    internal static int ComputeFinalHeightUnits(int contentHeightUnits, int probeBoundsHeight, float probePrintableAreaHeight)
+    {
+        var verticalInsetUnits = (int)Math.Ceiling(Math.Max(0f, probeBoundsHeight - probePrintableAreaHeight));
+        return contentHeightUnits + verticalInsetUnits;
+    }
+
+    /// <summary>
+    /// Postavlja traženu veličinu papira i odmah je "vraća kroz" drajver
+    /// (GetHdevmode/SetHdevmode) tako da document.DefaultPageSettings posle
+    /// ovog poziva odražava ono što je DRAJVER stvarno prihvatio/izmerio
+    /// (Bounds/PrintableArea), ne samo ono što smo tražili. Pozvano DVA puta
+    /// u Print() — jednom da se izmeri stvarna margina, jednom sa konačnom,
+    /// ispravnom visinom.
+    /// </summary>
+    private static void RoundTripPaperSize(PrintDocument document, int widthUnits, int heightUnits)
+    {
+        document.DefaultPageSettings.PaperSize = new PaperSize("TableCore ticket", widthUnits, heightUnits);
+        var devmode = document.PrinterSettings.GetHdevmode(document.DefaultPageSettings);
+        try { document.DefaultPageSettings.SetHdevmode(devmode); }
+        finally { GlobalFree(devmode); }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]

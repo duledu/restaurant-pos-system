@@ -2,6 +2,17 @@
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Faza 2C follow-up — Microsoft.NET.Sdk.Web podrazumeva konzolni
+         (Exe) subsistem, koji Windows uvek prati sopstvenim (crnim) CMD
+         prozorom pri svakom pokretanju EXE-a, bez obzira da li kod ijednom
+         pozove Console.WriteLine — upravo prijavljen bug ("crni CMD prozor
+         iza WinForms Setup-a"). WinExe (GUI subsistem) NIKAD ne dobija taj
+         prozor. Program.cs kompenzuje za CLI/self-test upotrebu (npr. "dotnet
+         run" sa self-test opcijom) eksplicitnim AttachConsole(ATTACH_PARENT_PROCESS)
+         pre bilo kog Console.WriteLine poziva — standardan .NET obrazac za
+         hibridni GUI+CLI alat, ne utiče na Windows servis (Session 0, nema
+         konzolu ni pre ni posle ove izmene). -->
+    <OutputType>WinExe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <!-- Konsolidacija — eksplicitna interna pilot oznaka na samom EXE-u

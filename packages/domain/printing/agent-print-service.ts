@@ -19,6 +19,7 @@
 import { prisma } from "@rcs/db";
 import type { AuthContext, WorkstationAuthContext, WorkstationStationValue } from "@rcs/auth";
 import { beginPrintAttempt, startPrintSubmission, confirmPrintResult, STALE_PRINT_LEASE_MS } from "./print-service";
+import { activeWorkstationFor, AGENT_ACTIVE_WINDOW_MS } from "./print-policy";
 
 function workstationAsPrintClaimant(wsCtx: WorkstationAuthContext): AuthContext {
   const claimantId = `workstation:${wsCtx.workstationId}`;
@@ -156,23 +157,75 @@ export async function submitResult(
  * takmičenje (koji transport "pobedi" trku bio bi nepredvidiv bez ovoga),
  * ne sam duplikat (taj je već nemoguć).
  */
-const AGENT_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
-
+// AGENT_ACTIVE_WINDOW_MS i sama "aktivan" provera žive u print-policy.ts
+// (activeWorkstationFor) — JEDNO mesto, deljeno između dispatch-a
+// (dispatchStationPrintJobs/listPendingStationPrintJobs) i ovog statusnog
+// upita, da nikad ne mogu tiho da se razminu.
 export async function isAgentActiveForStation(
   restaurantId: string,
   locationId: string,
   station: WorkstationStationValue
 ): Promise<boolean> {
-  const active = await prisma.workstation.findFirst({
-    where: {
-      restaurantId,
-      locationId,
-      station,
-      isEnabled: true,
-      revokedAt: null,
-      lastSeenAt: { gt: new Date(Date.now() - AGENT_ACTIVE_WINDOW_MS) },
-    },
-    select: { id: true },
+  return Boolean(await activeWorkstationFor(prisma, restaurantId, locationId, station));
+}
+
+// Hardening audit (Part 13) — Admin's own "Automatska štampa: Spremna"
+// (WorkstationsPanel.tsx silentPrintReady) already required
+// isEnabled && online && configuredPrinterName && printerAvailable===true,
+// but KDS's earlier stationPrinterStatus stopped at "hasWorkstation +
+// isOnline" — meaning KDS could show "Štampač spreman" for a station whose
+// Agent is online but whose configured Windows printer is missing/renamed.
+// ONE discriminated state, computed HERE ONLY, is now the sole source of
+// truth for BOTH surfaces — no second, slightly-different definition
+// anywhere else.
+export type PrinterReadinessState =
+  | "READY"
+  | "AGENT_OFFLINE"
+  | "PRINTER_UNAVAILABLE"
+  | "NOT_CONFIGURED";
+
+export interface StationPrinterStatus {
+  // Nijedna omogućena/neopozvana radna stanica nikad nije uparena za ovu
+  // stanicu — Admin je nikad nije podesio (ili je opozvana/onemogućena).
+  hasWorkstation: boolean;
+  // Radna stanica postoji, ali joj heartbeat nije stigao u poslednja 2 min
+  // (isti prag kao AGENT_ACTIVE_WINDOW_MS) — Windows Print Agent proces
+  // verovatno nije pokrenut/nema mrežu, ne "nikad podešeno".
+  isOnline: boolean;
+  // Puno diskriminisano stanje — jedina stvar koju bi KDS/Admin treba da
+  // prikažu kao "spremnost". LAST_PRINT_FAILED namerno NIJE ovde: to je
+  // po-poslu (PrintJob) signal, ne po-stanici — pozivalac (KDS ruta) ga
+  // sklapa preko VEĆ dobijene liste poslova, bez dodatnog upita ovde.
+  state: PrinterReadinessState;
+}
+
+/**
+ * Faza follow-up (KDS status ispravka + Part 13 hardening) — jedini
+ * server-autoritativan izvor za "da li je štampač za ovu stanicu spreman"
+ * koji i KDS i Admin treba da prikažu. NAMERNO nezavisno od QZ/browser
+ * localStorage (getQzSettings) — to je po-računaru, ne server-strano
+ * stanje, i ne sme biti "normalan" indikator spremnosti dok TableCore
+ * Print Agent postoji kao stvaran put.
+ */
+export async function stationPrinterStatus(
+  restaurantId: string,
+  locationId: string,
+  station: WorkstationStationValue
+): Promise<StationPrinterStatus> {
+  const workstation = await prisma.workstation.findFirst({
+    where: { restaurantId, locationId, station, isEnabled: true, revokedAt: null },
+    select: { lastSeenAt: true, configuredPrinterName: true, printerAvailable: true },
+    orderBy: { lastSeenAt: "desc" },
   });
-  return Boolean(active);
+  if (!workstation) return { hasWorkstation: false, isOnline: false, state: "NOT_CONFIGURED" };
+  const isOnline = Boolean(workstation.lastSeenAt && workstation.lastSeenAt.getTime() > Date.now() - AGENT_ACTIVE_WINDOW_MS);
+  if (!isOnline) return { hasWorkstation: true, isOnline: false, state: "AGENT_OFFLINE" };
+  // printerAvailable === true is required, not just "not false" — null
+  // means the agent has not reported yet (fresh pairing, printer choice
+  // not yet confirmed against the live Windows printer list), which is
+  // exactly as un-ready as a confirmed-missing printer for this purpose.
+  if (!workstation.configuredPrinterName || workstation.printerAvailable !== true) {
+    return { hasWorkstation: true, isOnline: true, state: "PRINTER_UNAVAILABLE" };
+  }
+  return { hasWorkstation: true, isOnline: true, state: "READY" };
 }
