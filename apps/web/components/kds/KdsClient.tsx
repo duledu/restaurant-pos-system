@@ -107,10 +107,22 @@ const STATUS_BADGE: Record<string, string> = {
   READY: "bg-success text-white",
 };
 
+interface ApiError extends Error {
+  status?: number;
+}
+
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
+  if (!res.ok) {
+    // Physical QA follow-up — the status code (specifically 409, see
+    // production-service.ts StaleItemStatusError) must survive past this
+    // helper so advance() below can tell "stale-status conflict, safe to
+    // auto-reconcile" apart from every other failure.
+    const error: ApiError = new Error(body.error ?? `Greška (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
   return body;
 }
 
@@ -235,9 +247,34 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
   // tiho preskače umesto da se gomila — sledeći ciklus za 4s je dovoljan.
   const loadInFlightRef = useRef(false);
 
+  // PREPROD physical QA follow-up — real-device root cause trace (see
+  // advance()/applyItemStatus below for the full writeup): a poll GET can
+  // be issued BEFORE a tap and resolve AFTER that tap's optimistic+confirmed
+  // update; setOrders(freshOrders) as a blind full replace would then
+  // silently revert that item to the stale pre-tap status. That is the
+  // proven cause of the physical QA video's mixed-state/"Status stavke je
+  // već promenjen" report — NOT a backend bug, and NOT something more
+  // frequent polling or SSE would fix on their own (an SSE event can race
+  // the exact same way; see sse-publisher.ts's own note that in-memory
+  // pub/sub isn't even reliable cross-instance on Vercel, which is why KDS
+  // deliberately does not add SSE here).
+  //
+  // Fix: a monotonic counter orders every poll-start and every local
+  // (optimistic/confirmed/invalidated) item write on ONE shared timeline.
+  // `itemKnownAsOfSeq` records, per item, the seq as of which its CURRENT
+  // local status is at least as fresh as any poll that could still be in
+  // flight. A poll response only overwrites an item if the poll was
+  // ISSUED (seq captured before its await) at or after that item's last
+  // known-fresh seq — i.e., older-than-known responses can never regress
+  // a newer local write, regardless of which one's network round-trip
+  // happens to finish first.
+  const seqRef = useRef(0);
+  const itemKnownAsOfSeq = useRef<Map<string, number>>(new Map());
+
   const load = useCallback(async () => {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
+    const pollSeq = ++seqRef.current;
     try {
       let loc = locationId;
       if (!loc) {
@@ -250,13 +287,36 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         apiFetch(`${baseEndpoint}/completed?locationId=${loc}`),
         fetchPendingStationPrintJobs(station, loc!),
       ]);
-      const newOrders: StationOrder[] = activeRes.orders;
+      const freshOrders: StationOrder[] = activeRes.orders;
 
-      const newIds = newOrders.map((o) => o.orderId).filter((id) => !knownOrderIds.current.has(id));
+      const newIds = freshOrders.map((o) => o.orderId).filter((id) => !knownOrderIds.current.has(id));
       if (newIds.length > 0 && knownOrderIds.current.size > 0) beep();
-      knownOrderIds.current = new Set(newOrders.map((o) => o.orderId));
+      knownOrderIds.current = new Set(freshOrders.map((o) => o.orderId));
 
-      setOrders(newOrders);
+      setOrders((prevOrders) => {
+        const prevStatusById = new Map<string, StationItem["status"]>();
+        for (const o of prevOrders) for (const it of o.items) prevStatusById.set(it.id, it.status);
+        return freshOrders
+          .map((o) => ({
+            ...o,
+            items: o.items.map((it) => {
+              const knownAsOf = itemKnownAsOfSeq.current.get(it.id) ?? 0;
+              if (knownAsOf > pollSeq && prevStatusById.has(it.id)) {
+                // A newer local write already exists for this item than
+                // this poll request — keep the fresher local status.
+                return { ...it, status: prevStatusById.get(it.id)! };
+              }
+              itemKnownAsOfSeq.current.set(it.id, pollSeq);
+              return it;
+            }),
+          }))
+          // Same rule as applyItemStatus below — an item can be locally
+          // fresher (already terminal) than what this specific poll's own
+          // order-list membership assumed; re-apply the identical
+          // Aktivne-membership rule after merging so a stale poll can
+          // never "resurrect" an order already correctly moved to Gotove.
+          .filter((o) => o.items.some((it) => PENDING_STATION_STATUSES_CLIENT.has(it.status)));
+      });
       setCompletedOrders(completedRes.orders);
 
       // AUTOMATSKA ŠTAMPA: svaki PENDING tiket za ovu stanicu koji još nismo
@@ -336,8 +396,16 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
     setAdvanceBusyIds((prev) => new Set(prev).add(itemId));
 
     const optimisticNext = NEXT_STATUS_CLIENT[expectedStatus];
-    const previousOrders = orders;
-    if (optimisticNext) applyItemStatus(orderId, itemId, optimisticNext);
+    // Svaki lokalni upis (optimistički ili potvrđen) dobija SVEŽ redni broj
+    // na ISTOJ vremenskoj liniji kao load()'s pollSeq iznad — ovo je ono
+    // što sprečava da bilo koji poll GET koji je već bio "u letu" PRE ovog
+    // tapa ikad prepiše rezultat ovog tapa, bez obzira kad se taj GET
+    // stvarno vrati (dokazan uzrok fizičkog QA "Status stavke je već
+    // promenjen" izveštaja — vidi napomenu na load() iznad).
+    if (optimisticNext) {
+      itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
+      applyItemStatus(orderId, itemId, optimisticNext);
+    }
     setError(null);
     try {
       const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
@@ -347,12 +415,34 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
       // Pomiri sa STVARNIM stanjem sa servera (nikad samo veruj nagađanju
       // iznad) — bez punog reload-a, samo ova jedna stavka.
       const confirmedStatus = result?.item?.status as StationItem["status"] | undefined;
-      if (confirmedStatus && confirmedStatus !== optimisticNext) applyItemStatus(orderId, itemId, confirmedStatus);
+      if (confirmedStatus && confirmedStatus !== optimisticNext) {
+        itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
+        applyItemStatus(orderId, itemId, confirmedStatus);
+      }
     } catch (e) {
-      // Neuspeh — vrati TAČNO prethodno stanje (čist rollback), nikad
-      // ostavi ekran u nagađanom stanju koje server nije potvrdio.
-      setOrders(previousOrders);
-      setError(e instanceof Error ? e.message : "Greška");
+      const apiError = e instanceof Error ? (e as ApiError) : undefined;
+      // Naše optimističko nagađanje je SADA dokazano pogrešno u oba
+      // slučaja ispod — nikad ga više ne tretiraj kao poznato-svež (sledeći
+      // load() sme slobodno da ga prepiše autoritativnim stanjem).
+      itemKnownAsOfSeq.current.delete(itemId);
+      if (apiError?.status === 409) {
+        // Zahtev #6 (fizički QA nalaz) — "Status stavke je već promenjen"
+        // je OČEKIVANA, bezopasna trka (drugi tap/uređaj/poll je već
+        // pomerio TAČNO ovu stavku), NIKAD razlog da se osoblju kaže da
+        // ručno osveži ekran. Tiho zatraži svež, autoritativan prikaz —
+        // koji god je stvarni pobednik trke, ekran ga odmah preuzima.
+        load();
+      } else {
+        // Stvaran neuspeh (mreža/dozvole/itd.) — ISTO zatraži svež prikaz
+        // (nikad vrati ceo `orders` snapshot iz trenutka klika, što bi
+        // moglo da regresira i DRUGE stavke promenjene u međuvremenu), ali
+        // ovde JOŠ UVEK prijavi grešku — ovo zahteva ljudsku pažnju.
+        // NAMERNO await-ovano (za razliku od 409 grane iznad): load()'s
+        // sopstveni uspešan put zove setError(null) na kraju — poziv bez
+        // čekanja bi tu poruku obrisao pre nego što je iko vidi.
+        await load();
+        setError(apiError?.message ?? "Greška");
+      }
     } finally {
       advanceInFlightRef.current.delete(itemId);
       setAdvanceBusyIds((prev) => {

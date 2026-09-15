@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "../ui/Card";
 
 interface Location {
@@ -106,8 +106,22 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [editEnabled, setEditEnabled] = useState(true);
   const [codeCopied, setCodeCopied] = useState(false);
 
+  // PREPROD physical QA follow-up (Part A2) — ranije se ovo učitavalo TAČNO
+  // JEDNOM pri montiranju, pa je Admin morao da se ručno F5-uje da vidi
+  // uparivanje/online-offline/promenu štampača/heartbeat/opoziv itd. SSE
+  // infrastruktura POSTOJI (realtime/sse-publisher.ts) ali je sopstvenom
+  // dokumentacijom označena kao NEPOUZDANA na Vercel Serverless Functions u
+  // produkciji (in-memory EventEmitter ne deli memoriju između invokacija —
+  // publish sa jedne instance ne stiže do SSE konekcije na drugoj, "garancija
+  // ne postoji na serverless platformi"). Umesto da se oslonimo na tu
+  // nepouzdanu putanju, ovo koristi ISTI, već dokazan obrazac kao
+  // KdsClient.tsx: lagan `setInterval` poll + in-flight brava (bez preklapanja)
+  // — jedan jeftin GET na postojeću rutu, bez ijedne nove zavisnosti.
+  const loadInFlightRef = useRef(false);
+
   const load = useCallback(async () => {
-    setLoading(true);
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
     setError(null);
     try {
       const res = await apiFetch("/api/admin/workstations");
@@ -117,11 +131,17 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       setError(e instanceof Error ? e.message : "Greška pri učitavanju radnih stanica");
     } finally {
       setLoading(false);
+      loadInFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     load();
+    // 5s — dovoljno brzo da agent online/offline/promena štampača/heartbeat
+    // izgledaju kao "automatski", a Admin ekran je posmatračka površina
+    // (nema tipkanja/brzih tapova kao KDS) pa nema razloga za KDS-ov 4s.
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval);
   }, [load]);
 
   useEffect(() => {

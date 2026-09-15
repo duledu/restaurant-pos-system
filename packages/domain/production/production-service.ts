@@ -39,6 +39,24 @@ export function assertStationAccess(ctx: AuthContext, station: Station): void {
 const PENDING_PRODUCTION_STATUSES: OrderItemStatus[] = ["SUBMITTED", "ACCEPTED", "PREPARING"];
 
 /**
+ * PREPROD physical QA follow-up — real-device Kitchen tracing found the
+ * KDS client had no way to tell "your guess about the prior status was
+ * wrong, reconcile silently" apart from any other failure (network,
+ * permission). Same instanceof-distinguishable-error shape as the existing
+ * StaleDirectStockQuantityError/StaleLineError pattern elsewhere in this
+ * codebase (inventory-service.ts, inventura-service.ts) — the thrown
+ * condition and its guard are UNCHANGED, this only lets the API route map
+ * it to a distinct HTTP status (409) so the client can auto-recover
+ * instead of surfacing "osveži prikaz" as if it were unrecoverable.
+ */
+export class StaleItemStatusError extends Error {
+  constructor(message = "Status stavke je već promenjen — osveži prikaz") {
+    super(message);
+    this.name = "StaleItemStatusError";
+  }
+}
+
+/**
  * Vraća porudžbine koje imaju bar jednu aktivnu stavku za datu stanicu,
  * sa SAMO tim stavkama (ne celom porudžbinom) — kuhinjski ekran ne dobija
  * podatke o pićima čak ni posredno kroz `order.items`.
@@ -219,7 +237,7 @@ export async function advanceItemStatus(
   const stationState = item.stationStates.find((state) => state.station === station);
   if (!stationState) throw new Error("Stavka nije pronađena za ovu stanicu");
   if (stationState.status !== expectedStatus) {
-    throw new Error("Status stavke je već promenjen — osveži prikaz");
+    throw new StaleItemStatusError();
   }
   const nextStatus = NEXT_STATUS[expectedStatus];
   if (!nextStatus) throw new Error(`Stavka u statusu ${expectedStatus} se ne može dalje pomeriti`);
@@ -229,7 +247,7 @@ export async function advanceItemStatus(
       where: { orderItemId: itemId, station, status: expectedStatus },
       data: { status: nextStatus as OrderItemStatus },
     });
-    if (advanced.count !== 1) throw new Error("Status stavke je već promenjen — osveži prikaz");
+    if (advanced.count !== 1) throw new StaleItemStatusError();
     const states = await tx.orderItemStation.findMany({
       where: { orderItemId: itemId },
       select: { status: true },

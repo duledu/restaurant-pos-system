@@ -35,7 +35,12 @@ public static class AgentRunner
         AgentDatabase.PruneAcked(TimeSpan.FromDays(7));
 
         AgentConfig? config = null;
-        try { config = AgentConfig.Parse(File.ReadAllText(configPath)); }
+        var configLastWriteUtc = DateTime.MinValue;
+        try
+        {
+            config = AgentConfig.Parse(File.ReadAllText(configPath));
+            configLastWriteUtc = File.GetLastWriteTimeUtc(configPath);
+        }
         catch (Exception ex) { LogWarn($"{configPath} nije čitljiv/validan ({ex.Message}) — štampa je onemogućena dok se ne ispravi, poll/heartbeat i dalje rade."); }
 
         LogInfo($"Pokrećem agenta v{AgentVersion.Current}, stanica={config?.Station ?? "(nepoznato)"}.");
@@ -60,6 +65,32 @@ public static class AgentRunner
 
         while (!cts.IsCancellationRequested)
         {
+            // PREPROD physical QA follow-up (Print Agent Setup UX, Part A1)
+            // — config je RANIJE učitan TAČNO JEDNOM ovde pri pokretanju;
+            // Setup ekran (SetupForm.cs OnSave) upisuje agent.local.json u
+            // svakom trenutku dok je servis već pokrenut, pa je "Sačuvano.
+            // Servis će koristiti nova podešavanja u sledećem poll ciklusu"
+            // poruka ranije bila NETAČNA (servis ga stvarno nikad nije
+            // ponovo pročitao bez restarta). Jeftina provera vremena
+            // poslednje izmene (bez novog paketa/FileSystemWatcher-a) na
+            // POSTOJEĆOJ 1-3s poll petlji — poll/claim/print tok ispod je
+            // NEPROMENJEN, menja se SAMO odakle `config` promenljiva dobija
+            // vrednost.
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    var writeUtc = File.GetLastWriteTimeUtc(configPath);
+                    if (writeUtc != configLastWriteUtc)
+                    {
+                        config = AgentConfig.Parse(File.ReadAllText(configPath));
+                        configLastWriteUtc = writeUtc;
+                        LogInfo($"Nova konfiguracija učitana (stanica={config.Station}, štampač={config.PrinterName}, {config.PaperWidthMm}mm).");
+                    }
+                }
+                catch (Exception ex) { LogWarn($"{configPath} nije čitljiv/validan posle izmene ({ex.Message}) — zadržavam prethodnu konfiguraciju."); }
+            }
+
             if (DateTime.UtcNow - lastHeartbeatAtUtc >= HeartbeatInterval)
             {
                 await SendHeartbeat(baseUrl, credential, config);

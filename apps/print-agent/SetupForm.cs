@@ -61,6 +61,13 @@ public sealed class SetupForm : Form
     // cela forma uveličava.
     private readonly Button _testPrintButton = new() { Text = "Test štampa", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
     private readonly Button _saveButton = new() { Text = "Sačuvaj podešavanja", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
+    // PREPROD physical QA follow-up (Part A1) — isti "rezervisan prostor,
+    // fiksna visina" obrazac kao _pairFeedbackLabel iznad (namerno
+    // ODVOJENO od njega: ovo je povratna informacija za Sačuvaj, ne za
+    // Poveži, i pojavljuje se tek posle Testa štampe/dugmadi ispod, ne pre
+    // njih — mešanje ta dva bi zbunilo korisnika o TOME koja radnja je
+    // upravo uspela/pala).
+    private readonly Label _saveFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 40), TextAlign = ContentAlignment.TopLeft };
     private readonly Label _versionLabel = new() { AutoSize = true, Text = $"TableCore Print Agent v{AgentVersion.Current}" };
     private readonly Label _endpointLabel = new() { AutoSize = true };
 
@@ -148,6 +155,8 @@ public sealed class SetupForm : Form
         actionRow.Controls.Add(_testPrintButton);
         actionRow.Controls.Add(_saveButton);
         layout.Controls.Add(actionRow);
+        _saveFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
+        layout.Controls.Add(_saveFeedbackLabel);
 
         _versionLabel.Margin = new Padding(0, 24, 0, 0);
         layout.Controls.Add(_versionLabel);
@@ -165,7 +174,7 @@ public sealed class SetupForm : Form
         _printerBox.Items.AddRange(WindowsPrinter.Enumerate());
 
         _pairButton.Click += async (_, _) => await OnPair();
-        _saveButton.Click += (_, _) => OnSave();
+        _saveButton.Click += async (_, _) => await OnSave();
         _testPrintButton.Click += (_, _) => OnTestPrint();
 
         Load += (_, _) => Initialize();
@@ -284,20 +293,89 @@ public sealed class SetupForm : Form
         }
     }
 
-    private void OnSave()
+    /// <summary>
+    /// PREPROD physical QA follow-up (Part A1) — ranije je "Sačuvano" bio
+    /// samo uspešan upis fajla na disk (MessageBox), prozor je ostajao
+    /// otvoren, i poruka je LAGALA da će "servis koristiti nova podešavanja
+    /// u sledećem poll ciklusu" (AgentRunner.Run je ranije čitao
+    /// agent.local.json TAČNO JEDNOM pri pokretanju — sad ga ponovo čita
+    /// kad se fajl promeni, vidi AgentRunner.cs). Ovde: (1) upiši fajl kao
+    /// pre, (2) ODMAH prijavi TAČNO ovu konfiguraciju serveru preko ISTOG
+    /// Heartbeat poziva koji pozadinski servis koristi — pravi, proveriv
+    /// signal da je server (izvor istine za Admin/KDS) prihvatio TAČNO ono
+    /// što je upravo izabrano, ne samo da je disk upis uspeo — (3) zatvori
+    /// SAMO na potvrđen uspeh, NIKAD na neuspeh (zahtev: "Do NOT close on
+    /// failure").
+    /// </summary>
+    private async Task OnSave()
     {
         if (_stationBox.SelectedItem is not string station || _printerBox.SelectedItem is not string printer || _paperWidthBox.SelectedItem is not string widthText || !int.TryParse(widthText, out var width))
         {
-            MessageBox.Show(this, "Izaberite stanicu, štampač i širinu papira pre čuvanja.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _saveFeedbackLabel.Text = "Izaberite stanicu, štampač i širinu papira pre čuvanja.";
+            _saveFeedbackLabel.ForeColor = Color.Firebrick;
             return;
         }
-        var json = JsonSerializer.Serialize(new { station, printerName = printer, paperWidthMm = width },
-            new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-        AgentPaths.EnsureProgramDataDirectory();
-        var tempPath = AgentPaths.ConfigFilePath + ".tmp";
-        File.WriteAllText(tempPath, json);
-        File.Move(tempPath, AgentPaths.ConfigFilePath, overwrite: true);
-        MessageBox.Show(this, "Sačuvano. Servis će koristiti nova podešavanja u sledećem poll ciklusu (ili posle ponovnog pokretanja).", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        var credential = CredentialStore.Load();
+        if (credential is null)
+        {
+            _saveFeedbackLabel.Text = "Radna stanica još nije uparena — unesite kod za uparivanje iznad pre čuvanja.";
+            _saveFeedbackLabel.ForeColor = Color.Firebrick;
+            return;
+        }
+
+        _saveButton.Enabled = false;
+        var previousSaveText = _saveButton.Text;
+        _saveButton.Text = "Čuvanje…";
+        _saveFeedbackLabel.Text = "Čuvanje podešavanja…";
+        _saveFeedbackLabel.ForeColor = SystemColors.GrayText;
+        try
+        {
+            var json = JsonSerializer.Serialize(new { station, printerName = printer, paperWidthMm = width },
+                new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+            AgentPaths.EnsureProgramDataDirectory();
+            var tempPath = AgentPaths.ConfigFilePath + ".tmp";
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, AgentPaths.ConfigFilePath, overwrite: true);
+
+            var outcome = await DeliveryClient.Heartbeat(
+                _endpoint.BaseUrl, credential,
+                agentVersion: AgentVersion.Current,
+                osDescription: Environment.OSVersion.VersionString,
+                configuredPrinterName: printer,
+                paperWidthMm: width,
+                printerAvailable: true); // biran je iz WindowsPrinter.Enumerate() u OVOM trenutku — poznato dostupan.
+
+            if (!outcome.Success)
+            {
+                // Sačuvano lokalno, ali server nije potvrdio — pozadinski
+                // servis će i dalje preuzeti novu konfiguraciju na sledećem
+                // poll ciklusu, ali "Agent/service accepted" JOŠ NIJE
+                // dokazano, pa prozor NE sme da se zatvori niti da tvrdi
+                // uspeh.
+                _saveFeedbackLabel.Text = "Sačuvano lokalno, ali server trenutno nije potvrdio (proverite internet konekciju) — pokušajte ponovo pre zatvaranja.";
+                _saveFeedbackLabel.ForeColor = Color.Firebrick;
+                _saveButton.Enabled = true;
+                _saveButton.Text = previousSaveText;
+                return;
+            }
+
+            _saveFeedbackLabel.Text = $"✓ Povezano — {printer}";
+            _saveFeedbackLabel.ForeColor = Color.FromArgb(0x1E, 0x7A, 0x3C);
+            // Kratka, čitljiva potvrda pre automatskog zatvaranja — ne
+            // trenutni nestanak prozora (korisnik mora videti da je uspelo).
+            // NAMERNO ne re-enable-ovati dugme ovde niti u finally ispod —
+            // prozor se zatvara, dodirivanje kontrola posle Close() je
+            // nepotrebno i izbegava se u potpunosti.
+            await Task.Delay(1200);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            _saveFeedbackLabel.Text = $"Čuvanje nije uspelo: {ex.Message}";
+            _saveFeedbackLabel.ForeColor = Color.Firebrick;
+            _saveButton.Enabled = true;
+            _saveButton.Text = previousSaveText;
+        }
     }
 
     private void OnTestPrint()
