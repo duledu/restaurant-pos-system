@@ -17,6 +17,36 @@ internal static class SelfTests
         bool malformed = false;
         try { AgentConfig.Parse("{"); } catch (System.Text.Json.JsonException) { malformed = true; }
         Check(malformed, "malformed config JSON rejected");
+
+        // Professional installer audit (state-aware Setup launch) — the
+        // installer's NeedsSetupAfterInstall (TableCorePrintAgent.iss,
+        // Pascal Script has no JSON parser) decides "is this installation
+        // already fully configured" by text-searching agent.config.json for
+        // the EXACT substrings a real SetupForm.OnSave write would produce.
+        // This test is the contract that keeps that mirror honest: if
+        // SetupForm's serialization shape ever changes (property renamed,
+        // casing changed, an unexpected space inserted), THIS test fails
+        // here — loudly, in the same codebase — instead of the installer
+        // silently misjudging "configured" on a real machine with no test
+        // coverage at all on that side.
+        {
+            var configJson = System.Text.Json.JsonSerializer.Serialize(
+                new { station = "KITCHEN", printerName = "POS-58", paperWidthMm = 58 },
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true });
+            // WriteIndented=true (matching SetupForm.OnSave's actual options)
+            // inserts a SPACE after each colon — this test caught the
+            // installer's original Pascal-side patterns assuming no space,
+            // which would have made NeedsSetupAfterInstall ALWAYS return
+            // True (Setup reopening on every upgrade, even fully configured
+            // ones) because the real file never matches a colon-with-no-space
+            // pattern. Both sides now agree on "colon, one space, value".
+            Check(configJson.Contains("\"station\": \"KITCHEN\"", StringComparison.Ordinal),
+                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall station check");
+            Check(configJson.Contains("\"printerName\": \"POS-58\"", StringComparison.Ordinal) && !configJson.Contains("\"printerName\": \"\"", StringComparison.Ordinal),
+                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall printer check");
+            Check(configJson.Contains("\"paperWidthMm\": 58", StringComparison.Ordinal),
+                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall paper-width check");
+        }
         var example = Ticket.Example("KITCHEN", new DateTime(2026, 9, 9, 12, 45, 0));
         Check(example.Lines.Last().Text == "12:45", "test ticket uses supplied local time");
         var encoded = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(example);

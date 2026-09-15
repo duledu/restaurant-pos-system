@@ -356,5 +356,5 @@ public static class AgentRunner
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.1";
+    public const string Current = "1.0.0-pilot.2";
 }
