@@ -100,11 +100,18 @@ export function hashPairingCode(code: string): string {
 
 export type WorkstationStationValue = "KITCHEN" | "BAR";
 
+// Printing V2 — `station` is DEPRECATED here (kept only for backward
+// compatibility with workstations paired before routes existed, or paired
+// via the legacy optional `station` shortcut) and is nullable: a computer's
+// real print eligibility is now resolved per-call from its
+// WorkstationPrintRoute rows (packages/domain/printing/agent-print-service.ts),
+// never from this single scalar. Never derive routing from this field in
+// new code.
 export interface WorkstationAuthContext {
   workstationId: string;
   restaurantId: string;
   locationId: string;
-  station: WorkstationStationValue;
+  station: WorkstationStationValue | null;
 }
 
 const BEARER_PREFIX = "Bearer ";

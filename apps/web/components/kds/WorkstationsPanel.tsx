@@ -7,15 +7,24 @@ interface Location {
   id: string;
   name: string;
 }
+type RouteType = "KITCHEN" | "BAR" | "RECEIPT";
+interface PrintRoute {
+  id: string;
+  type: RouteType;
+  printerName: string | null;
+  paperWidthMm: number | null;
+  printerAvailable: boolean | null;
+  isEnabled: boolean;
+  updatedAt: string;
+}
 interface Workstation {
   id: string;
   name: string;
-  station: "KITCHEN" | "BAR";
   locationId: string;
   location: Location;
-  configuredPrinterName: string | null;
-  printerAvailable: boolean | null;
-  paperWidthMm: number | null;
+  availablePrinters: string[] | null;
+  printersReportedAt: string | null;
+  printRoutes: PrintRoute[];
   agentVersion: string | null;
   osDescription: string | null;
   isEnabled: boolean;
@@ -23,6 +32,7 @@ interface Workstation {
   lastSuccessfulCommunicationAt: string | null;
   lastPrintAt: string | null;
   testPrintRequestedAt: string | null;
+  testPrintRouteType: RouteType | null;
   testPrintStatus: "PENDING" | "SUCCEEDED" | "FAILED" | null;
   testPrintCompletedAt: string | null;
   testPrintError: string | null;
@@ -37,15 +47,20 @@ interface AgentDownloadInfo {
 }
 interface PendingPairing {
   id: string;
-  station: "KITCHEN" | "BAR";
   name: string | null;
   locationId: string;
   location: Location;
   expiresAt: string;
   createdAt: string;
 }
+interface RouteDraft {
+  printerName: string;
+  paperWidthMm: 58 | 80;
+  isEnabled: boolean;
+}
 
-const STATION_LABEL: Record<"KITCHEN" | "BAR", string> = { KITCHEN: "Kuhinja", BAR: "Šank" };
+const ROUTE_TYPES: RouteType[] = ["KITCHEN", "BAR", "RECEIPT"];
+const ROUTE_LABEL: Record<RouteType, string> = { KITCHEN: "Kuhinja", BAR: "Šank", RECEIPT: "Račun" };
 
 // Radna stanica se smatra "povezanom" ako je poslala heartbeat u poslednja
 // 2 minuta — namerno velikodušnije od HEARTBEAT_THROTTLE_MS na serveru
@@ -73,19 +88,50 @@ function remainingMinutes(expiresAt: string): number {
   return Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 60000));
 }
 
+function routeOf(w: Workstation, type: RouteType): PrintRoute | undefined {
+  return w.printRoutes.find((r) => r.type === type);
+}
+
+/** Ista diskriminovana logika kao agentPrinting.stationPrinterStatus
+ * (packages/domain/printing/agent-print-service.ts) — namerno DUPLIRANA
+ * ovde umesto pozvana preko API-ja jer ova kartica prikazuje SVAKU rutu
+ * pojedinačno iz podataka koje /api/admin/workstations već vratio, bez
+ * dodatnog upita po ruti. Ako se ijedan uslov ikad promeni, MORA se
+ * promeniti na oba mesta da Admin i KDS nikad ne prikažu suprotstavljene
+ * odgovore za isti server podatak. */
+function routeReadiness(w: Workstation, route: PrintRoute | undefined): "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" {
+  if (!route || !route.isEnabled || w.revokedAt || !w.isEnabled) return "NOT_CONFIGURED";
+  if (!isOnline(w.lastSeenAt)) return "AGENT_OFFLINE";
+  if (!route.printerName || route.printerAvailable !== true) return "PRINTER_UNAVAILABLE";
+  return "READY";
+}
+
+const READINESS_LABEL: Record<ReturnType<typeof routeReadiness>, string> = {
+  READY: "Spremna",
+  AGENT_OFFLINE: "Računar nije povezan",
+  PRINTER_UNAVAILABLE: "Štampač nedostupan",
+  NOT_CONFIGURED: "Nije podešeno",
+};
+
 /**
- * Faza 2A — Admin foundation za TableCore Print Agent radne stanice.
+ * Printing V2 — Admin foundation za TableCore Print Agent računare.
  * NAMERNO restoran-šire (ne po-lokaciji kao legacy PrinterConfig kartice,
  * sada sklonjene ispod u "Napredno / rezervni način štampe") — jedan
- * restoran može imati radne stanice na više lokacija; kreiranje uparivanja
+ * restoran može imati računare na više lokacija; kreiranje uparivanja
  * koristi TRENUTNO izabranu lokaciju sa vrha stranice.
+ *
+ * Konceptualni model od ove verzije nadalje: uparivanje uspostavlja SAMO
+ * identitet računara (nikad "ovaj računar je Kuhinja/Šank") — rute štampe
+ * (Kuhinja/Šank/Račun, svaka sa sopstvenim štampačem/širinom papira) se
+ * biraju POSLE, ovde ispod, i isti fizički štampač sme da posluži više
+ * ruta odjednom. Promena jedne rute nikad ne zahteva novo uparivanje.
  *
  * Namerno jasno razdvojeno od QzSettingsPanel-a (drugi transport, sada
  * takođe u "Napredno"): QZ je po-browseru/po-računaru podešavanje
  * (localStorage), ovo je trajan, restoran-nivo identitet nezavisnog
  * Windows procesa koji server autentifikuje sopstvenim kredencijalom — ne
- * kontrolišu ISTU stanicu "automatski" istovremeno (KdsClient.tsx bira
- * transport; kad je ovaj agent aktivan za stanicu, on je jedini automatski
+ * kontrolišu ISTU rutu "automatski" istovremeno (KdsClient.tsx bira
+ * transport; kad je ovaj agent aktivan za rutu, on je jedini automatski
  * put — QZ/legacy ostaje samo rezervni/ručni, vidi print-policy.ts
  * activeWorkstationFor).
  */
@@ -95,7 +141,6 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [newStation, setNewStation] = useState<"KITCHEN" | "BAR">("KITCHEN");
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [justCreatedCode, setJustCreatedCode] = useState<{ code: string; expiresAt: string } | null>(null);
@@ -105,6 +150,9 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [editName, setEditName] = useState("");
   const [editEnabled, setEditEnabled] = useState(true);
   const [codeCopied, setCodeCopied] = useState(false);
+  const [routeDrafts, setRouteDrafts] = useState<Record<string, RouteDraft>>({});
+  const [savingRoutesId, setSavingRoutesId] = useState<string | null>(null);
+  const [testingRoute, setTestingRoute] = useState<string | null>(null);
 
   // PREPROD physical QA follow-up (Part A2) — ranije se ovo učitavalo TAČNO
   // JEDNOM pri montiranju, pa je Admin morao da se ručno F5-uje da vidi
@@ -150,16 +198,17 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       .catch(() => setDownloadInfo(null));
   }, []);
 
-  async function testPrint(id: string) {
-    setBusyId(id);
+  async function testPrint(workstationId: string, type: RouteType) {
+    const key = `${workstationId}:${type}`;
+    setTestingRoute(key);
     setError(null);
     try {
-      await apiFetch(`/api/admin/workstations/${id}/test-print`, { method: "POST" });
+      await apiFetch(`/api/admin/workstations/${workstationId}/test-print`, { method: "POST", body: JSON.stringify({ type }) });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri zahtevu za test štampu");
     } finally {
-      setBusyId(null);
+      setTestingRoute(null);
     }
   }
 
@@ -170,7 +219,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     try {
       const res = await apiFetch("/api/admin/workstations/pairings", {
         method: "POST",
-        body: JSON.stringify({ locationId, station: newStation, name: newName.trim() || undefined }),
+        body: JSON.stringify({ locationId, name: newName.trim() || undefined }),
       });
       setJustCreatedCode({ code: res.pairing.code, expiresAt: res.pairing.expiresAt });
       setNewName("");
@@ -197,7 +246,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   }
 
   async function revoke(id: string) {
-    if (!confirm("Opozvati ovu radnu stanicu? Agent će odmah izgubiti pristup i biće potrebno novo uparivanje.")) return;
+    if (!confirm("Opozvati ovaj računar? Agent će odmah izgubiti pristup i biće potrebno novo uparivanje.")) return;
     setBusyId(id);
     setError(null);
     try {
@@ -235,10 +284,11 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
 
   // "Ponovo upari" ne dira postojeći red (agent zadržava stari kredencijal
   // dok se ne opozove) — samo unapred popunjava formu za NOVO uparivanje
-  // istim nazivom/stanicom, korisno kad se agent ponovo instalira na istom
-  // ili zamenskom računaru.
+  // istim nazivom, korisno kad se agent ponovo instalira na istom ili
+  // zamenskom računaru. Rute štampe OSTAJU nepromenjene na postojećem
+  // računaru — ovo samo generiše kod za uspostavljanje NOVOG identiteta
+  // (npr. reinstall), nikad ne menja Kuhinja/Šank/Račun podešavanja.
   function rePair(w: Workstation) {
-    setNewStation(w.station);
     setNewName(w.name);
     setShowAddForm(true);
     setJustCreatedCode(null);
@@ -276,15 +326,56 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     }
   }
 
+  function draftKey(workstationId: string, type: RouteType): string {
+    return `${workstationId}:${type}`;
+  }
+  function getRouteDraft(w: Workstation, type: RouteType): RouteDraft {
+    const key = draftKey(w.id, type);
+    const draft = routeDrafts[key];
+    if (draft) return draft;
+    const existing = routeOf(w, type);
+    return { printerName: existing?.printerName ?? "", paperWidthMm: (existing?.paperWidthMm as 58 | 80) ?? 58, isEnabled: existing?.isEnabled ?? true };
+  }
+  function patchRouteDraft(w: Workstation, type: RouteType, patch: Partial<RouteDraft>) {
+    const key = draftKey(w.id, type);
+    setRouteDrafts((prev) => ({ ...prev, [key]: { ...getRouteDraft(w, type), ...patch } }));
+  }
+
+  async function saveRoutes(w: Workstation) {
+    setSavingRoutesId(w.id);
+    setError(null);
+    try {
+      for (const type of ROUTE_TYPES) {
+        const draft = getRouteDraft(w, type);
+        await apiFetch(`/api/admin/workstations/${w.id}/routes/${type}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            printerName: draft.printerName.trim() || null,
+            paperWidthMm: draft.printerName.trim() ? draft.paperWidthMm : null,
+            isEnabled: draft.isEnabled,
+          }),
+        });
+      }
+      setRouteDrafts((prev) => {
+        const next = { ...prev };
+        for (const type of ROUTE_TYPES) delete next[draftKey(w.id, type)];
+        return next;
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri čuvanju ruta štampe");
+    } finally {
+      setSavingRoutesId(null);
+    }
+  }
+
   // Napredak koraka 1-6 je namerno IZVEDEN iz stvarnog stanja (workstation
   // lista/pending uparivanja/downloadInfo) — nikad ručno postavljen checkbox
   // koji bi mogao lagati administratora o tome šta je stvarno urađeno.
   const activeWorkstations = workstationList.filter((w) => !w.revokedAt);
-  const anyPrinterConfigured = activeWorkstations.some((w) => Boolean(w.configuredPrinterName));
+  const anyPrinterConfigured = activeWorkstations.some((w) => w.printRoutes.some((r) => r.printerName));
   const anyTestSucceeded = activeWorkstations.some((w) => w.testPrintStatus === "SUCCEEDED");
-  const anyReady = activeWorkstations.some(
-    (w) => w.isEnabled && Boolean(w.configuredPrinterName) && w.printerAvailable === true
-  );
+  const anyReady = activeWorkstations.some((w) => ROUTE_TYPES.some((t) => routeReadiness(w, routeOf(w, t)) === "READY"));
   const setupSteps = [
     { label: "Preuzmi Print Agent", done: Boolean(downloadInfo?.available) },
     { label: "Dodaj računar", done: activeWorkstations.length > 0 || pendingPairings.length > 0 },
@@ -294,41 +385,71 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     { label: "Spremno", done: anyReady },
   ];
 
-  // Problem 1/7 ispravka — aktivne radne stanice grupisane po NAMENI
-  // (Kuhinja/Šank), jasno odvojene od istorijskih/opozvanih redova, da
-  // Admin stranica liči na "fizička odredišta štampe po stanici" umesto
-  // na plosnatu listu svih redova ikad uparenih. Opozvane stanice ostaju u
-  // bazi (istorija/audit) ali se sklanjaju u sažetu sekciju ispod da se
-  // vizuelno ne mešaju sa stvarnim rutiranjem.
   const revokedWorkstations = workstationList.filter((w) => w.revokedAt);
-  const stationGroups: { station: "KITCHEN" | "BAR"; label: string }[] = [
-    { station: "KITCHEN", label: "Kuhinja" },
-    { station: "BAR", label: "Šank" },
-  ];
+
+  function renderRouteRow(w: Workstation, type: RouteType) {
+    const route = routeOf(w, type);
+    const draft = getRouteDraft(w, type);
+    const readiness = routeReadiness(w, route);
+    const revoked = Boolean(w.revokedAt);
+    const printerOptions = w.availablePrinters ?? [];
+    const testKey = `${w.id}:${type}`;
+    return (
+      <div key={type} className="grid grid-cols-1 items-center gap-2 border-t border-line/60 py-2 first:border-t-0 sm:grid-cols-[80px_1fr_90px_120px_auto]">
+        <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">{ROUTE_LABEL[type]}</span>
+        <select
+          value={draft.printerName}
+          onChange={(e) => patchRouteDraft(w, type, { printerName: e.target.value })}
+          disabled={revoked}
+          className="rounded-md border border-line px-2 py-1.5 text-xs text-ink disabled:opacity-50"
+        >
+          <option value="">— nije podešeno —</option>
+          {draft.printerName && !printerOptions.includes(draft.printerName) && (
+            <option value={draft.printerName}>{draft.printerName} (poslednje poznato)</option>
+          )}
+          {printerOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <select
+          value={draft.paperWidthMm}
+          onChange={(e) => patchRouteDraft(w, type, { paperWidthMm: Number(e.target.value) as 58 | 80 })}
+          disabled={revoked || !draft.printerName}
+          className="rounded-md border border-line px-2 py-1.5 text-xs text-ink disabled:opacity-50"
+        >
+          <option value={58}>58mm</option>
+          <option value={80}>80mm</option>
+        </select>
+        <span
+          className={`justify-self-start rounded-full px-2 py-0.5 text-[11px] font-semibold sm:justify-self-center ${
+            readiness === "READY" ? "bg-success/10 text-success" : readiness === "NOT_CONFIGURED" ? "bg-cream-200 text-inkSoft" : "bg-danger-soft text-danger"
+          }`}
+        >
+          {READINESS_LABEL[readiness]}
+        </span>
+        <button
+          type="button"
+          onClick={() => testPrint(w.id, type)}
+          disabled={revoked || !route?.printerName || testingRoute === testKey}
+          className="justify-self-start text-xs font-semibold text-ink underline disabled:opacity-40 sm:justify-self-end"
+        >
+          Test {ROUTE_LABEL[type].toLowerCase()}
+        </button>
+      </div>
+    );
+  }
 
   function renderWorkstationCard(w: Workstation) {
     const online = isOnline(w.lastSeenAt);
     const revoked = Boolean(w.revokedAt);
-    // "Automatska štampa" — sve mora biti tačno: omogućena, neopozvana,
-    // nedavno javljena, ima konfigurisan štampač I agent je taj tačan
-    // štampač poslednji put video u Windows spisku (nikad pretpostavljeno
-    // kad printerAvailable === null, tj. agent to još nije prijavio).
-    // Part 13 hardening — PROVERENO identično (isti uslovi, isti 2-minutni
-    // prag) sa agentPrinting.stationPrinterStatus-ovim READY stanjem koje
-    // KDS prikazuje (agent-print-service.ts) — namerno NIJE pozvana ista
-    // funkcija ovde jer ona vraća JEDNO agregatno stanje po STANICI, dok
-    // ova kartica prikazuje SVAKU radnu stanicu pojedinačno; ako se ijedan
-    // uslov ikad promeni, MORA se promeniti na oba mesta da Admin i KDS
-    // nikad ne prikažu suprotstavljene odgovore za isti server podatak.
-    const silentPrintReady = !revoked && w.isEnabled && online && Boolean(w.configuredPrinterName) && w.printerAvailable === true;
     return (
-      <div key={w.id} className="rounded-md border border-line px-3 py-2 text-sm">
+      <div key={w.id} className="rounded-md border border-line px-3 py-2.5 text-sm">
         <div className="flex items-center justify-between">
           <div>
             <span className="font-medium text-ink">{w.name}</span>
-            <span className="ml-2 text-xs text-inkSoft">
-              {STATION_LABEL[w.station]} · {w.location.name}
-            </span>
+            <span className="ml-2 text-xs text-inkSoft">{w.location.name}</span>
           </div>
           <span
             className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
@@ -345,30 +466,48 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           </span>
         </div>
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-inkSoft">
-          <span>Štampač: {w.configuredPrinterName ?? "nije prijavljen"}</span>
-          {w.configuredPrinterName && w.printerAvailable === false && (
-            <span className="font-semibold text-danger">Štampač nije dostupan na računaru</span>
-          )}
-          <span>Širina papira: {w.paperWidthMm ? `${w.paperWidthMm}mm` : "nije prijavljena"}</span>
-          <span className={silentPrintReady ? "font-semibold text-success" : ""}>
-            Automatska štampa: {silentPrintReady ? "Spremna" : "Nije spremna"}
+          <span>
+            Dostupni štampači: {w.availablePrinters && w.availablePrinters.length > 0 ? w.availablePrinters.join(", ") : "nijedan prijavljen"}
           </span>
           <span>Verzija agenta: {w.agentVersion ?? "—"}</span>
           <span>Poslednji kontakt: {formatDateTime(w.lastSeenAt)}</span>
           <span>Poslednja uspešna komunikacija: {formatDateTime(w.lastSuccessfulCommunicationAt)}</span>
           <span>Poslednja predaja na štampu: {formatDateTime(w.lastPrintAt)}</span>
           {w.testPrintStatus === "PENDING" && (
-            <span className="font-semibold text-inkSoft">Test štampa: čeka se sledeći kontakt agenta…</span>
+            <span className="font-semibold text-inkSoft">
+              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}): čeka se sledeći kontakt agenta…
+            </span>
           )}
           {w.testPrintStatus === "SUCCEEDED" && (
-            <span className="font-semibold text-success">Test štampa uspela ({formatDateTime(w.testPrintCompletedAt)})</span>
+            <span className="font-semibold text-success">
+              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}) uspela ({formatDateTime(w.testPrintCompletedAt)})
+            </span>
           )}
           {w.testPrintStatus === "FAILED" && (
             <span className="font-semibold text-danger">
-              Test štampa nije uspela ({formatDateTime(w.testPrintCompletedAt)}){w.testPrintError ? `: ${w.testPrintError}` : ""}
+              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}) nije uspela ({formatDateTime(w.testPrintCompletedAt)})
+              {w.testPrintError ? `: ${w.testPrintError}` : ""}
             </span>
           )}
         </div>
+
+        {!revoked && (
+          <div className="mt-3 rounded-md border border-line/70 bg-cream-100/60 px-2.5 py-1.5">
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-inkSoft">Rute štampe</p>
+            {ROUTE_TYPES.map((type) => renderRouteRow(w, type))}
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => saveRoutes(w)}
+                disabled={savingRoutesId === w.id}
+                className="min-h-8 rounded-md bg-graphite px-3 text-xs font-semibold text-cream-100 disabled:opacity-40"
+              >
+                {savingRoutesId === w.id ? "Čuvanje…" : "Sačuvaj rute"}
+              </button>
+            </div>
+          </div>
+        )}
+
         {editingId === w.id ? (
           <div className="mt-2 rounded-md border border-line bg-cream-100 p-2.5">
             <label className="mb-1 block text-xs text-inkSoft" htmlFor={`ws-name-${w.id}`}>Naziv</label>
@@ -380,7 +519,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             />
             <label className="mb-2 flex items-center gap-2 text-xs text-inkSoft">
               <input type="checkbox" checked={editEnabled} onChange={(e) => setEditEnabled(e.target.checked)} />
-              Omogućena (isključi da privremeno zaustaviš automatsku štampu bez opoziva)
+              Omogućen (isključi da privremeno zaustaviš automatsku štampu bez opoziva)
             </label>
             <div className="flex gap-2">
               <button
@@ -403,24 +542,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         ) : (
           <div className="mt-2 flex flex-wrap gap-3">
             {!revoked && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => testPrint(w.id)}
-                  disabled={busyId === w.id || w.testPrintStatus === "PENDING"}
-                  className="text-xs font-semibold text-ink underline disabled:opacity-40"
-                >
-                  Test štampa
-                </button>
-                <button
-                  type="button"
-                  onClick={() => startEditing(w)}
-                  disabled={busyId === w.id}
-                  className="text-xs font-semibold text-ink underline disabled:opacity-40"
-                >
-                  Podešavanja
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => startEditing(w)}
+                disabled={busyId === w.id}
+                className="text-xs font-semibold text-ink underline disabled:opacity-40"
+              >
+                Podešavanja
+              </button>
             )}
             <button type="button" onClick={() => rePair(w)} className="text-xs font-semibold text-inkSoft underline">
               Ponovo upari
@@ -449,9 +578,9 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         </div>
         <h2 className="font-semibold text-ink">TableCore Print Agent</h2>
         <p className="mt-0.5 text-xs text-inkSoft">
-          Omogućava tihu, automatsku štampu na kuhinjskom/šank računaru — bez otvaranja browsera, bez Chrome
-          dijaloga za štampu i bez ručnog odobrenja po tiketu. Kad je računar uparen i ima izabran štampač, ta
-          stanica (Kuhinja/Šank) automatski prima i štampa svaki novi tiket.
+          Omogućava tihu, automatsku štampu na računaru u kuhinji/šanku — bez otvaranja browsera, bez Chrome
+          dijaloga za štampu i bez ručnog odobrenja po tiketu. Jedan uparen računar može imati više ruta štampe
+          (Kuhinja, Šank, Račun) — isti fizički štampač sme da posluži sve tri.
         </p>
       </div>
 
@@ -486,8 +615,8 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
               Preuzmi Print Agent za Windows
             </a>
             <p className="mt-1.5 text-xs text-inkSoft">
-              Verzija {downloadInfo.version} · {downloadInfo.supportedOS}. Pokreni preuzeti fajl na kuhinjskom/šank
-              računaru, prati podešavanje, pa unesi kod za uparivanje sa liste ispod.
+              Verzija {downloadInfo.version} · {downloadInfo.supportedOS}. Pokreni preuzeti fajl na računaru u
+              kuhinji/šanku, prati podešavanje, pa unesi kod za uparivanje sa liste ispod.
             </p>
           </>
         ) : (
@@ -515,7 +644,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           </div>
           <p className="mt-1 text-xs text-inkSoft">
             Ističe za {remainingMinutes(justCreatedCode.expiresAt)} min — prikazuje se samo ovde, jednom. Sačuvaj ovaj ekran otvoren dok ne
-            upariš agenta.
+            upariš agenta. Rute štampe (Kuhinja/Šank/Račun) podešavaš posle uparivanja, ispod.
           </p>
           <button
             type="button"
@@ -541,9 +670,9 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                 {pendingPairings.map((p) => (
                   <div key={p.id} className="flex items-center justify-between rounded-md border border-line px-3 py-2 text-sm">
                     <div>
-                      <span className="font-medium text-ink">{p.name || STATION_LABEL[p.station]}</span>
+                      <span className="font-medium text-ink">{p.name || "Novi računar"}</span>
                       <span className="ml-2 text-xs text-inkSoft">
-                        {STATION_LABEL[p.station]} · {p.location.name} · ističe za {remainingMinutes(p.expiresAt)} min
+                        {p.location.name} · ističe za {remainingMinutes(p.expiresAt)} min
                       </span>
                     </div>
                     <button
@@ -560,34 +689,21 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             </div>
           )}
 
-          <div className="mb-4 space-y-4">
-            {stationGroups.map(({ station, label }) => {
-              const stationWorkstations = activeWorkstations.filter((w) => w.station === station);
-              return (
-                <div key={station}>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">{label}</p>
-                  {stationWorkstations.length > 0 ? (
-                    <div className="space-y-2">{stationWorkstations.map(renderWorkstationCard)}</div>
-                  ) : (
-                    <p className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-inkSoft">
-                      Nijedan računar nije uparen za {label.toLowerCase()}u.
-                    </p>
-                  )}
-                </div>
-              );
-            })}
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Računi / POS</p>
+          <div className="mb-4">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Računari</p>
+            {activeWorkstations.length > 0 ? (
+              <div className="space-y-2">{activeWorkstations.map(renderWorkstationCard)}</div>
+            ) : (
               <p className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-inkSoft">
-                Uskoro — štampa računa preko Print Agent-a još nije dostupna. Koristi rezervni metod ispod (Napredno) za sada.
+                Još nijedan računar nije uparen. Dodaj računar dugmetom ispod.
               </p>
-            </div>
+            )}
           </div>
 
           {revokedWorkstations.length > 0 && (
             <details className="mb-4 rounded-md border border-line">
               <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-inkSoft">
-                Neaktivne / opozvane stanice ({revokedWorkstations.length})
+                Neaktivni / opozvani računari ({revokedWorkstations.length})
               </summary>
               <div className="space-y-2 border-t border-line p-3">{revokedWorkstations.map(renderWorkstationCard)}</div>
             </details>
@@ -595,27 +711,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
 
           {showAddForm ? (
             <div className="rounded-md border border-line p-3">
-              <div className="mb-3 flex flex-wrap gap-3">
-                <div>
-                  <label className="mb-1 block text-xs text-inkSoft">Namena</label>
-                  <select
-                    value={newStation}
-                    onChange={(e) => setNewStation(e.target.value as "KITCHEN" | "BAR")}
-                    className="rounded-md border border-line px-3 py-2 text-sm text-ink"
-                  >
-                    <option value="KITCHEN">Kuhinja</option>
-                    <option value="BAR">Šank</option>
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="mb-1 block text-xs text-inkSoft">Naziv (opciono)</label>
-                  <input
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="npr. Kuhinjski računar"
-                    className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
-                  />
-                </div>
+              <div className="mb-3">
+                <label className="mb-1 block text-xs text-inkSoft">Naziv (opciono)</label>
+                <input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="npr. Kuhinjski računar"
+                  className="w-full max-w-sm rounded-md border border-line px-3 py-2 text-sm text-ink"
+                />
               </div>
               <div className="flex gap-2">
                 <button
@@ -642,7 +745,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
               disabled={!locationId}
               className="min-h-11 rounded-md border border-line px-5 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink disabled:opacity-40"
             >
-              + Dodaj računar
+              + Dodaj Print Agent računar
             </button>
           )}
         </>

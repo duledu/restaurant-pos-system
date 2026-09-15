@@ -45,31 +45,42 @@ export async function suppressAutomaticJobs(tx: Prisma.TransactionClient, restau
 // (agent-print-service.ts) nikad ne mogu tiho da se razminu.
 export const AGENT_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
 
+// Printing V2 — widened from the old "KITCHEN"|"BAR" (a single Workstation
+// locked to one station) to the full PrintJobType so RECEIPT can finally be
+// agent-routed too: eligibility now comes from an enabled WorkstationPrintRoute
+// row of this exact type, joined to its parent workstation, rather than a
+// scalar Workstation.station column. A workstation can have several routes
+// (KITCHEN/BAR/RECEIPT), each independently active.
 export async function activeWorkstationFor(
   tx: Prisma.TransactionClient,
   restaurantId: string,
   locationId: string,
-  station: "KITCHEN" | "BAR"
+  type: "KITCHEN" | "BAR" | "RECEIPT"
 ): Promise<{ paperWidthMm: number | null } | null> {
   // Hardening audit finding: if an admin mistakenly pairs two workstations
-  // to the same station (both live), findFirst without an explicit order
-  // depends on undefined DB row order — deterministically prefer the MOST
-  // RECENTLY active one (same convention as stationPrinterStatus below),
-  // so which one's paperWidthMm gets snapshotted into ticket content is at
-  // least predictable rather than arbitrary. This does not change which
-  // physical workstation actually wins the print CLAIM (that stays a fair,
-  // atomic race via beginPrintAttempt's updateMany) — only which one's
-  // reported paper width is used to size the ticket that gets created.
-  return tx.workstation.findFirst({
+  // with an active route of the same type (both live), findFirst without an
+  // explicit order depends on undefined DB row order — deterministically
+  // prefer the MOST RECENTLY active one (same convention as
+  // stationPrinterStatus below), so which one's paperWidthMm gets
+  // snapshotted into ticket content is at least predictable rather than
+  // arbitrary. This does not change which physical workstation actually
+  // wins the print CLAIM (that stays a fair, atomic race via
+  // beginPrintAttempt's updateMany) — only which one's reported paper width
+  // is used to size the ticket that gets created.
+  const route = await tx.workstationPrintRoute.findFirst({
     where: {
       restaurantId,
       locationId,
-      station,
+      type,
       isEnabled: true,
-      revokedAt: null,
-      lastSeenAt: { gt: new Date(Date.now() - AGENT_ACTIVE_WINDOW_MS) },
+      workstation: {
+        isEnabled: true,
+        revokedAt: null,
+        lastSeenAt: { gt: new Date(Date.now() - AGENT_ACTIVE_WINDOW_MS) },
+      },
     },
-    orderBy: { lastSeenAt: "desc" },
+    orderBy: { workstation: { lastSeenAt: "desc" } },
     select: { paperWidthMm: true },
   });
+  return route;
 }

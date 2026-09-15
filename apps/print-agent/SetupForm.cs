@@ -48,10 +48,14 @@ public sealed class SetupForm : Form
     // ova poruka pojavila, jer je ranije bila AutoSize+Visible=false, što
     // MENJA ukupnu visinu sadržaja u trenutku kad ekran ima fiksnu visinu).
     private readonly Label _pairFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 32), TextAlign = ContentAlignment.TopLeft };
-    private readonly ComboBox _stationBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+    // Printing V2 — rute štampe (Kuhinja/Šank/Račun -> štampač) se BIRAJU u
+    // Admin panelu POSLE uparivanja, nikad ovde — ovi kontroli su SADA čisto
+    // lokalna dijagnostika ("probaj bilo koji instaliran štampač odmah"),
+    // potpuno odvojeni od stvarnog rutiranja. Vidi OnTestPrint/OnSave ispod.
+    private readonly ComboBox _testRouteTypeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _printerBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _paperWidthBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
-    private readonly Label _autoPrintLabel = new() { AutoSize = true, Text = "Automatska štampa: (nepoznato)" };
+    private readonly Label _autoPrintLabel = new() { AutoSize = true, Text = "Rute štampe: podešavaju se u Admin panelu (Podešavanja → Štampači) posle uparivanja." };
     // AutoSize + Padding umesto podrazumevane FIKSNE WinForms veličine
     // dugmeta (75x23 px na 96 DPI) — taj fiksni raster ne ostavlja dovoljno
     // vertikalnog prostora za tekst na 125%/150% Windows skaliranju (upravo
@@ -150,11 +154,11 @@ public sealed class SetupForm : Form
         _pairFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
         layout.Controls.Add(_pairFeedbackLabel);
 
-        layout.Controls.Add(new Label { Text = "Stanica:", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
-        layout.Controls.Add(_stationBox);
-        layout.Controls.Add(new Label { Text = "Štampač:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
+        layout.Controls.Add(new Label { Text = "Probna štampa — vrsta (oznaka na tiketu):", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
+        layout.Controls.Add(_testRouteTypeBox);
+        layout.Controls.Add(new Label { Text = "Probna štampa — štampač:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         layout.Controls.Add(_printerBox);
-        layout.Controls.Add(new Label { Text = "Širina papira:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
+        layout.Controls.Add(new Label { Text = "Probna štampa — širina papira:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         layout.Controls.Add(_paperWidthBox);
         _autoPrintLabel.Margin = new Padding(0, 12, 0, 0);
         layout.Controls.Add(_autoPrintLabel);
@@ -177,7 +181,8 @@ public sealed class SetupForm : Form
 
         Controls.Add(layout);
 
-        _stationBox.Items.AddRange(["KITCHEN", "BAR"]);
+        _testRouteTypeBox.Items.AddRange(["KITCHEN", "BAR", "RECEIPT"]);
+        _testRouteTypeBox.SelectedIndex = 0;
         _paperWidthBox.Items.AddRange(["58", "80"]);
         _printerBox.Items.AddRange(WindowsPrinter.Enumerate());
 
@@ -189,7 +194,7 @@ public sealed class SetupForm : Form
     }
 
     private string? _connectedName;
-    private string? _connectedStation;
+    private int _configuredRouteCount;
 
     private void Initialize()
     {
@@ -225,20 +230,27 @@ public sealed class SetupForm : Form
         _pairFeedbackLabel.ForeColor = isError ? Color.Firebrick : Color.FromArgb(0x1E, 0x7A, 0x3C);
     }
 
+    /// <summary>Samo za popunjavanje probne-štampe kontrola pogodnom
+    /// polaznom vrednošću (poslednja poznata ruta, ako postoji) — nikad ne
+    /// utiče na stvarno rutiranje, koje je server-autoritativno (vidi
+    /// AgentRunner.ApplyServerRoutes).</summary>
     private void LoadExistingConfigIfPresent()
     {
         if (!File.Exists(AgentPaths.ConfigFilePath)) return;
         try
         {
             var config = AgentConfig.Parse(File.ReadAllText(AgentPaths.ConfigFilePath));
-            _stationBox.SelectedItem = config.Station;
-            _paperWidthBox.SelectedItem = config.PaperWidthMm.ToString();
-            if (_printerBox.Items.Contains(config.PrinterName)) _printerBox.SelectedItem = config.PrinterName;
+            _configuredRouteCount = config.Routes.Length;
+            var first = config.Routes.FirstOrDefault();
+            if (first is null) return;
+            _testRouteTypeBox.SelectedItem = first.Type;
+            _paperWidthBox.SelectedItem = first.PaperWidthMm.ToString();
+            if (_printerBox.Items.Contains(first.PrinterName)) _printerBox.SelectedItem = first.PrinterName;
         }
         catch
         {
-            // Nepotpuna/oštećena konfiguracija — korisnik je jednostavno
-            // popunjava iznova ispod, ne blokiramo Setup ekran zbog toga.
+            // Nepotpuna/oštećena konfiguracija — korisnik i dalje može
+            // upariti/testirati ispod, ne blokiramo Setup ekran zbog toga.
         }
     }
 
@@ -246,7 +258,10 @@ public sealed class SetupForm : Form
     {
         if (paired)
         {
-            var label = _connectedName is null ? "Povezano sa TableCore." : $"Povezano sa TableCore: {_connectedName}" + (_connectedStation is null ? "" : $" ({_connectedStation})");
+            var routesText = _configuredRouteCount > 0
+                ? $"{_configuredRouteCount} {(_configuredRouteCount == 1 ? "ruta štampe podešena" : "rute štampe podešene")}."
+                : "Rute štampe još nisu podešene — podesi ih u Admin panelu (Podešavanja → Štampači).";
+            var label = (_connectedName is null ? "Povezano sa TableCore." : $"Povezano sa TableCore: {_connectedName}.") + " " + routesText;
             _statusLabel.Text = label;
             _pairingCodeBox.Enabled = false;
             _pairButton.Text = "Ponovo upari (novi kod)";
@@ -287,12 +302,10 @@ public sealed class SetupForm : Form
                 return;
             }
             _connectedName = result.Name;
-            _connectedStation = result.Station;
-            if (result.Station is "KITCHEN" or "BAR") _stationBox.SelectedItem = result.Station;
             _pairingCodeBox.Clear();
             RefreshStatus(paired: true);
-            var who = _connectedName is null ? "" : $" — {_connectedName}" + (_connectedStation is null ? "" : $" ({_connectedStation})");
-            ShowPairFeedback($"✓ Upareno{who}. Izaberite štampač i sačuvajte podešavanja ispod.", isError: false);
+            var who = _connectedName is null ? "" : $" — {_connectedName}";
+            ShowPairFeedback($"✓ Upareno{who}. Klikni dugme ispod da preuzmeš rute štampe sa servera.", isError: false);
         }
         finally
         {
@@ -302,77 +315,77 @@ public sealed class SetupForm : Form
     }
 
     /// <summary>
-    /// PREPROD physical QA follow-up (Part A1) — ranije je "Sačuvano" bio
-    /// samo uspešan upis fajla na disk (MessageBox), prozor je ostajao
-    /// otvoren, i poruka je LAGALA da će "servis koristiti nova podešavanja
-    /// u sledećem poll ciklusu" (AgentRunner.Run je ranije čitao
-    /// agent.local.json TAČNO JEDNOM pri pokretanju — sad ga ponovo čita
-    /// kad se fajl promeni, vidi AgentRunner.cs). Ovde: (1) upiši fajl kao
-    /// pre, (2) ODMAH prijavi TAČNO ovu konfiguraciju serveru preko ISTOG
-    /// Heartbeat poziva koji pozadinski servis koristi — pravi, proveriv
-    /// signal da je server (izvor istine za Admin/KDS) prihvatio TAČNO ono
-    /// što je upravo izabrano, ne samo da je disk upis uspeo — (3) zatvori
-    /// SAMO na potvrđen uspeh, NIKAD na neuspeh (zahtev: "Do NOT close on
-    /// failure").
+    /// Printing V2 — routes are server-authoritative and no longer chosen in
+    /// Setup at all (see WorkstationsPanel.tsx "Rute štampe"). This button's
+    /// job shrinks to: confirm pairing actually works end-to-end by doing a
+    /// REAL heartbeat (reporting this machine's full printer list) and
+    /// pulling down whatever routes the server currently has for this
+    /// workstation, persisting them locally exactly like the running
+    /// service would (AgentRunner.ApplyServerRoutes) — so Setup can show a
+    /// real, proven "N rute učitane" confirmation instead of just "file
+    /// written to disk". Zero routes configured yet is NOT an error (Admin
+    /// may not have set any up); Setup still closes, and the background
+    /// service will pick up routes automatically the moment Admin adds one
+    /// — see PREPROD physical QA follow-up (Part A1) note below for why
+    /// this only closes on a CONFIRMED server round-trip, never a bare local
+    /// write.
     /// </summary>
     private async Task OnSave()
     {
-        if (_stationBox.SelectedItem is not string station || _printerBox.SelectedItem is not string printer || _paperWidthBox.SelectedItem is not string widthText || !int.TryParse(widthText, out var width))
-        {
-            _saveFeedbackLabel.Text = "Izaberite stanicu, štampač i širinu papira pre čuvanja.";
-            _saveFeedbackLabel.ForeColor = Color.Firebrick;
-            return;
-        }
         var credential = CredentialStore.Load();
         if (credential is null)
         {
-            _saveFeedbackLabel.Text = "Radna stanica još nije uparena — unesite kod za uparivanje iznad pre čuvanja.";
+            _saveFeedbackLabel.Text = "Radna stanica još nije uparena — unesite kod za uparivanje iznad pre nastavka.";
             _saveFeedbackLabel.ForeColor = Color.Firebrick;
             return;
         }
 
         _saveButton.Enabled = false;
         var previousSaveText = _saveButton.Text;
-        _saveButton.Text = "Čuvanje…";
-        _saveFeedbackLabel.Text = "Čuvanje podešavanja…";
+        _saveButton.Text = "Povezivanje…";
+        _saveFeedbackLabel.Text = "Preuzimanje ruta štampe sa servera…";
         _saveFeedbackLabel.ForeColor = SystemColors.GrayText;
         try
         {
-            var json = JsonSerializer.Serialize(new { station, printerName = printer, paperWidthMm = width },
-                new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
             AgentPaths.EnsureProgramDataDirectory();
-            var tempPath = AgentPaths.ConfigFilePath + ".tmp";
-            File.WriteAllText(tempPath, json);
-            File.Move(tempPath, AgentPaths.ConfigFilePath, overwrite: true);
-
+            var installedPrinters = WindowsPrinter.Enumerate();
             var outcome = await DeliveryClient.Heartbeat(
                 _endpoint.BaseUrl, credential,
                 agentVersion: AgentVersion.Current,
                 osDescription: Environment.OSVersion.VersionString,
-                configuredPrinterName: printer,
-                paperWidthMm: width,
-                printerAvailable: true); // biran je iz WindowsPrinter.Enumerate() u OVOM trenutku — poznato dostupan.
+                availablePrinters: installedPrinters,
+                routes: null);
 
             if (!outcome.Success)
             {
-                // Sačuvano lokalno, ali server nije potvrdio — pozadinski
-                // servis će i dalje preuzeti novu konfiguraciju na sledećem
-                // poll ciklusu, ali "Agent/service accepted" JOŠ NIJE
-                // dokazano, pa prozor NE sme da se zatvori niti da tvrdi
-                // uspeh. Professional error UX audit — "proverite internet
-                // konekciju" tvrdio je UZROK koji nikad nije bio dokazan
-                // (stvaran slučaj koji je ovo otkrio bio je nedostajuće
-                // propusno zaglavlje, ne mreža) — poruka sada ostaje
-                // kategorična bez nagađanja uzroka.
-                _saveFeedbackLabel.Text = "Sačuvano lokalno, ali server trenutno nije potvrdio povezivanje. Pokušajte ponovo za par trenutaka pre zatvaranja.";
+                // PREPROD physical QA follow-up (Part A1) — "Do NOT close on
+                // failure": server nije potvrdio povezivanje, prozor ostaje
+                // otvoren. Professional error UX audit — poruka ostaje
+                // kategorična bez nagađanja uzroka (stvaran slučaj koji je
+                // ovo otkrio bio je nedostajuće propusno zaglavlje, ne mreža).
+                _saveFeedbackLabel.Text = "Server trenutno nije potvrdio povezivanje. Pokušajte ponovo za par trenutaka pre zatvaranja.";
                 _saveFeedbackLabel.ForeColor = Color.Firebrick;
                 _saveButton.Enabled = true;
                 _saveButton.Text = previousSaveText;
                 return;
             }
 
-            _saveFeedbackLabel.Text = $"✓ Povezano — {printer}";
+            if (outcome.Routes.Count > 0)
+            {
+                var config = new AgentConfig([.. outcome.Routes.Select(r => new PrintRoute(r.Type, r.PrinterName, r.PaperWidthMm))]);
+                var tempPath = AgentPaths.ConfigFilePath + ".tmp";
+                File.WriteAllText(tempPath, config.ToJson());
+                File.Move(tempPath, AgentPaths.ConfigFilePath, overwrite: true);
+                _configuredRouteCount = outcome.Routes.Count;
+                _saveFeedbackLabel.Text = $"✓ Povezano — {outcome.Routes.Count} {(outcome.Routes.Count == 1 ? "ruta štampe učitana" : "rute štampe učitane")}.";
+            }
+            else
+            {
+                _configuredRouteCount = 0;
+                _saveFeedbackLabel.Text = "✓ Povezano. Rute štampe još nisu podešene — podesi ih u Admin panelu, servis će ih automatski preuzeti.";
+            }
             _saveFeedbackLabel.ForeColor = Color.FromArgb(0x1E, 0x7A, 0x3C);
+            RefreshStatus(paired: true);
             // Kratka, čitljiva potvrda pre automatskog zatvaranja — ne
             // trenutni nestanak prozora (korisnik mora videti da je uspelo).
             // NAMERNO ne re-enable-ovati dugme ovde niti u finally ispod —
@@ -383,24 +396,32 @@ public sealed class SetupForm : Form
         }
         catch (Exception ex)
         {
-            _saveFeedbackLabel.Text = $"Čuvanje nije uspelo: {ex.Message}";
+            _saveFeedbackLabel.Text = $"Povezivanje nije uspelo: {ex.Message}";
             _saveFeedbackLabel.ForeColor = Color.Firebrick;
             _saveButton.Enabled = true;
             _saveButton.Text = previousSaveText;
         }
     }
 
+    /// <summary>
+    /// Printing V2 — purely local, ad hoc diagnostic: print one test ticket
+    /// to any Windows printer this machine can see, RIGHT NOW, regardless of
+    /// pairing/route state. Never persisted, never touches
+    /// agent.config.json/the server's routes — exactly the "local diagnostic
+    /// or initial convenience" the spec calls for, decoupled from the
+    /// machine's real (server-configured) routing.
+    /// </summary>
     private void OnTestPrint()
     {
-        if (_stationBox.SelectedItem is not string station || _printerBox.SelectedItem is not string printer || _paperWidthBox.SelectedItem is not string widthText || !int.TryParse(widthText, out var width))
+        if (_testRouteTypeBox.SelectedItem is not string type || _printerBox.SelectedItem is not string printer || _paperWidthBox.SelectedItem is not string widthText || !int.TryParse(widthText, out var width))
         {
-            MessageBox.Show(this, "Izaberite stanicu, štampač i širinu papira pre testne štampe.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Izaberite vrstu, štampač i širinu papira pre probne štampe.", "TableCore", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        var config = new AgentConfig(station, printer, width);
+        var route = new PrintRoute(type, printer, width);
         var workstationName = Environment.MachineName;
-        var ticket = Ticket.TestPrint(workstationName, station, printer, width, AgentVersion.Current);
-        var outcome = WindowsPrinter.Print(config, ticket, "test-" + Guid.NewGuid().ToString("N"));
+        var ticket = Ticket.TestPrint(workstationName, type, printer, width, AgentVersion.Current);
+        var outcome = WindowsPrinter.Print(route, ticket, "test-" + Guid.NewGuid().ToString("N"));
         var icon = outcome.Status == "SUBMITTED_TO_SPOOLER" ? MessageBoxIcon.Information : MessageBoxIcon.Error;
         MessageBox.Show(this, $"{outcome.Status}: {outcome.Guarantee}" + (outcome.Error is null ? "" : $"\n\n{outcome.Error}"), "TableCore — Test Print", MessageBoxButtons.OK, icon);
     }

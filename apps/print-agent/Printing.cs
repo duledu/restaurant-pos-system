@@ -4,8 +4,36 @@ using System.Drawing.Text;
 
 namespace TableCore.PrintAgent;
 
-public sealed record AgentConfig(string Station, string PrinterName, int PaperWidthMm)
+/// <summary>
+/// Printing V2 — one route (KITCHEN/BAR/RECEIPT) mapped to one Windows
+/// printer + paper width. Replaces the old flat AgentConfig(Station,
+/// PrinterName, PaperWidthMm), which locked one whole agent installation to
+/// exactly one station/printer forever. The same physical printer may
+/// appear in more than one PrintRoute (e.g. all three routes -> POS-58).
+/// </summary>
+public sealed record PrintRoute(string Type, string PrinterName, int PaperWidthMm)
 {
+    public void Validate()
+    {
+        if (Type is not ("KITCHEN" or "BAR" or "RECEIPT") || string.IsNullOrWhiteSpace(PrinterName) || PaperWidthMm is not (58 or 80))
+            throw new ArgumentException("Configure KITCHEN/BAR/RECEIPT, an exact printerName and paperWidthMm 58/80.");
+    }
+}
+
+/// <summary>
+/// Printing V2 — local cache of this agent's server-authoritative print
+/// routes. Setup/Admin no longer write a single station/printer here;
+/// AgentRunner persists whatever the server's poll/heartbeat response
+/// reports (see DeliveryClient), so this file is always a mirror, never a
+/// competing source of truth. Only FULLY configured routes (real printer
+/// name + paper width) are ever included — see workstation-service.ts
+/// getAgentRoutes, which never reports a route with no printer chosen yet.
+/// </summary>
+public sealed record AgentConfig(PrintRoute[] Routes)
+{
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true };
+
     public static AgentConfig Parse(string json)
     {
         var config = System.Text.Json.JsonSerializer.Deserialize<AgentConfig>(json,
@@ -16,8 +44,54 @@ public sealed record AgentConfig(string Station, string PrinterName, int PaperWi
     }
     public void Validate()
     {
-        if (Station is not ("KITCHEN" or "BAR") || string.IsNullOrWhiteSpace(PrinterName) || PaperWidthMm is not (58 or 80))
-            throw new ArgumentException("Configure KITCHEN/BAR, an exact printerName and paperWidthMm 58/80.");
+        if (Routes is null || Routes.Length == 0)
+            throw new ArgumentException("Configure at least one print route (KITCHEN/BAR/RECEIPT).");
+        foreach (var route in Routes) route.Validate();
+        if (Routes.Select(r => r.Type).Distinct().Count() != Routes.Length)
+            throw new ArgumentException("Each route type (KITCHEN/BAR/RECEIPT) may appear at most once.");
+    }
+    public PrintRoute? RouteFor(string type) => Routes.FirstOrDefault(r => r.Type == type);
+    public string ToJson() => System.Text.Json.JsonSerializer.Serialize(this, JsonOptions);
+
+    /// <summary>
+    /// Printing V2 upgrade path — a machine paired before this version wrote
+    /// a flat {"station":"KITCHEN","printerName":"POS-58","paperWidthMm":58}
+    /// agent.config.json, which no longer parses as the new {"routes":[...]}
+    /// shape. Falls back to reading that OLD shape and converting it
+    /// in-memory to a one-route AgentConfig, so an upgraded agent keeps
+    /// printing with NO re-pairing/reinstall — AgentRunner persists the
+    /// converted result back to disk in the new shape on first successful
+    /// parse (see AgentRunner.Run). Returns MigratedFromLegacy=false (and
+    /// the normal Parse result) whenever the file is already in the new
+    /// shape or genuinely invalid either way.
+    /// </summary>
+    public static (AgentConfig Config, bool MigratedFromLegacy) ParseWithLegacyFallback(string json)
+    {
+        try { return (Parse(json), false); }
+        catch (Exception primary)
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("station", out var stationEl) && stationEl.ValueKind == System.Text.Json.JsonValueKind.String
+                    && root.TryGetProperty("printerName", out var printerEl) && printerEl.ValueKind == System.Text.Json.JsonValueKind.String
+                    && root.TryGetProperty("paperWidthMm", out var widthEl) && widthEl.ValueKind == System.Text.Json.JsonValueKind.Number)
+                {
+                    var legacy = new AgentConfig([new PrintRoute(stationEl.GetString()!, printerEl.GetString()!, widthEl.GetInt32())]);
+                    legacy.Validate();
+                    return (legacy, true);
+                }
+            }
+            catch
+            {
+                // Legacy shape didn't match/validate either — fall through
+                // and surface the ORIGINAL (new-shape) parse error, which is
+                // more useful for a genuinely corrupt/unrelated file.
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            throw; // unreachable — Throw() above always throws; satisfies the compiler's return-path analysis.
+        }
     }
 }
 
@@ -126,17 +200,17 @@ public static class WindowsPrinter
 {
     public static string[] Enumerate() => PrinterSettings.InstalledPrinters.Cast<string>().ToArray();
 
-    public static PrintOutcome Print(AgentConfig config, Ticket ticket, string requestId, bool dryRun = false)
+    public static PrintOutcome Print(PrintRoute route, Ticket ticket, string requestId, bool dryRun = false)
     {
         bool submissionStarted = false;
         try
         {
-            config.Validate();
-            if (!Enumerate().Contains(config.PrinterName, StringComparer.Ordinal))
+            route.Validate();
+            if (!Enumerate().Contains(route.PrinterName, StringComparer.Ordinal))
                 throw new ArgumentException("Configured printer is not installed for this Windows account.");
-            using var raster = new TicketRaster(ticket, config.PaperWidthMm);
+            using var raster = new TicketRaster(ticket, route.PaperWidthMm);
             using var document = new PrintDocument();
-            document.PrinterSettings.PrinterName = config.PrinterName;
+            document.PrinterSettings.PrinterName = route.PrinterName;
             document.PrinterSettings.Copies = 1;
             document.PrinterSettings.PrintToFile = false;
             document.DocumentName = "TableCore-" + requestId;

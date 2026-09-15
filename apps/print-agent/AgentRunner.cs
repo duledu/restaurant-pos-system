@@ -38,12 +38,26 @@ public static class AgentRunner
         var configLastWriteUtc = DateTime.MinValue;
         try
         {
-            config = AgentConfig.Parse(File.ReadAllText(configPath));
+            var raw = File.ReadAllText(configPath);
+            var (parsed, migratedFromLegacy) = AgentConfig.ParseWithLegacyFallback(raw);
+            config = parsed;
             configLastWriteUtc = File.GetLastWriteTimeUtc(configPath);
+            if (migratedFromLegacy)
+            {
+                // Printing V2 upgrade path — the previous build wrote one flat
+                // {station,printerName,paperWidthMm}; converted in-memory to a
+                // one-route list and persisted back in the new shape so this
+                // machine keeps printing with NO re-pairing/reinstall. The
+                // next successful poll/heartbeat still reconciles against
+                // whatever Admin has actually configured server-side.
+                LogInfo("Stara konfiguracija (jedna stanica/štampač) automatski pretvorena u novi format ruta.");
+                PersistConfig(configPath, config);
+                configLastWriteUtc = File.GetLastWriteTimeUtc(configPath);
+            }
         }
         catch (Exception ex) { LogWarn($"{configPath} nije čitljiv/validan ({ex.Message}) — štampa je onemogućena dok se ne ispravi, poll/heartbeat i dalje rade."); }
 
-        LogInfo($"Pokrećem agenta v{AgentVersion.Current}, stanica={config?.Station ?? "(nepoznato)"}.");
+        LogInfo($"Pokrećem agenta v{AgentVersion.Current}, rute={(config is null ? "(nepoznato)" : string.Join(", ", config.Routes.Select(r => r.Type)))}.");
         LogInfo("Pomirenje sa serverom pre nastavka (nerešeni lokalni pokušaji, ako ih ima) ...");
         await ReconcileOnStartup(baseUrl, credential);
 
@@ -76,6 +90,9 @@ public static class AgentRunner
             // POSTOJEĆOJ 1-3s poll petlji — poll/claim/print tok ispod je
             // NEPROMENJEN, menja se SAMO odakle `config` promenljiva dobija
             // vrednost.
+            // Safety-net manual-edit reload — normally routes come from the
+            // server (below), but if support/an admin manually edits
+            // agent.config.json on the box, pick it up without a restart.
             if (File.Exists(configPath))
             {
                 try
@@ -85,7 +102,7 @@ public static class AgentRunner
                     {
                         config = AgentConfig.Parse(File.ReadAllText(configPath));
                         configLastWriteUtc = writeUtc;
-                        LogInfo($"Nova konfiguracija učitana (stanica={config.Station}, štampač={config.PrinterName}, {config.PaperWidthMm}mm).");
+                        LogInfo($"Nova konfiguracija učitana sa diska (rute={string.Join(", ", config.Routes.Select(r => r.Type))}).");
                     }
                 }
                 catch (Exception ex) { LogWarn($"{configPath} nije čitljiv/validan posle izmene ({ex.Message}) — zadržavam prethodnu konfiguraciju."); }
@@ -93,31 +110,46 @@ public static class AgentRunner
 
             if (DateTime.UtcNow - lastHeartbeatAtUtc >= HeartbeatInterval)
             {
-                await SendHeartbeat(baseUrl, credential, config);
+                var heartbeatOutcome = await SendHeartbeat(baseUrl, credential, config);
+                if (heartbeatOutcome is { Success: true })
+                {
+                    config = ApplyServerRoutes(configPath, config, heartbeatOutcome.Routes, ref configLastWriteUtc);
+                    if (heartbeatOutcome.TestPrintRequested) await HandleTestPrintRequest(baseUrl, credential, config, heartbeatOutcome.TestPrintRoute);
+                }
                 lastHeartbeatAtUtc = DateTime.UtcNow;
             }
 
-            var poll = new PollOutcome(null, false);
+            PollOutcome? poll = null;
             try { poll = await DeliveryClient.Poll(baseUrl, credential); }
             catch (HttpRequestException ex) { LogWarn($"Poll mrežna greška (nastavljam): {ex.Message}"); }
 
-            // Faza 2C follow-up — Test Print se SADA otkriva i preko OVOG
-            // brzog (1-3s) poll ciklusa, ne samo preko 25s heartbeat-a ispod
-            // (SendHeartbeat i dalje nezavisno nosi isti signal — namerno
-            // NEPROMENJENO, ovo je dodatan brži put, ne zamena). Dokazan
-            // uzrok ~19s kašnjenja u PREPROD fizičkom testu: Test Print je
-            // ranije čekao ISKLJUČIVO sledeći heartbeat. HandleTestPrintRequest
-            // ostaje idempotentno na isti način kao pre (server prebacuje
-            // testPrintStatus sa PENDING čim se prvi pokušaj prijavi, pa
-            // sledeći poll/heartbeat u ISTOM ciklusu više ne vidi PENDING).
-            if (poll.TestPrintRequested) await HandleTestPrintRequest(baseUrl, credential, config);
-
-            if (poll.Job is not null)
+            if (poll is not null)
             {
-                await HandleJob(baseUrl, credential, config, poll.Job);
-                pollIntervalMs = ActivePollMs;
-                lastJobAtUtc = DateTime.UtcNow;
-                continue; // odmah proveri ima li još — bez čekanja
+                // Printing V2 — routes are server-authoritative; sync down on
+                // EVERY successful poll (1-3s), not just the slower 25s
+                // heartbeat, so an Admin route change (new printer, disabled
+                // route) takes effect almost immediately, same latency class
+                // as the existing Test Print fast-path below.
+                config = ApplyServerRoutes(configPath, config, poll.Routes, ref configLastWriteUtc);
+
+                // Faza 2C follow-up — Test Print se SADA otkriva i preko OVOG
+                // brzog (1-3s) poll ciklusa, ne samo preko 25s heartbeat-a ispod
+                // (SendHeartbeat i dalje nezavisno nosi isti signal — namerno
+                // NEPROMENJENO, ovo je dodatan brži put, ne zamena). Dokazan
+                // uzrok ~19s kašnjenja u PREPROD fizičkom testu: Test Print je
+                // ranije čekao ISKLJUČIVO sledeći heartbeat. HandleTestPrintRequest
+                // ostaje idempotentno na isti način kao pre (server prebacuje
+                // testPrintStatus sa PENDING čim se prvi pokušaj prijavi, pa
+                // sledeći poll/heartbeat u ISTOM ciklusu više ne vidi PENDING).
+                if (poll.TestPrintRequested) await HandleTestPrintRequest(baseUrl, credential, config, poll.TestPrintRoute);
+
+                if (poll.Job is not null)
+                {
+                    await HandleJob(baseUrl, credential, config, poll.Job);
+                    pollIntervalMs = ActivePollMs;
+                    lastJobAtUtc = DateTime.UtcNow;
+                    continue; // odmah proveri ima li još — bez čekanja
+                }
             }
 
             var idleFor = DateTime.UtcNow - lastJobAtUtc;
@@ -127,24 +159,76 @@ public static class AgentRunner
         LogInfo("Zaustavljeno.");
     }
 
-    private static async Task SendHeartbeat(string baseUrl, string credential, AgentConfig? config)
+    /// <summary>
+    /// Printing V2 — routes come DOWN from the server on every successful
+    /// poll/heartbeat (see workstation-service.ts getAgentRoutes); this is
+    /// the ONLY place the agent ever writes agent.config.json going
+    /// forward (Setup no longer authors routes). No-ops if the reported set
+    /// is identical to what's already on disk, so a normal 1-3s poll cycle
+    /// does not thrash the file/log when nothing changed.
+    /// </summary>
+    private static AgentConfig? ApplyServerRoutes(string configPath, AgentConfig? current, IReadOnlyList<AgentRouteInfo> serverRoutes, ref DateTime configLastWriteUtc)
     {
-        bool? printerAvailable = config is null ? null : WindowsPrinter.Enumerate().Contains(config.PrinterName, StringComparer.Ordinal);
-        if (printerAvailable == false) LogWarn($"Konfigurisan štampač \"{config?.PrinterName}\" trenutno nije dostupan na ovom računaru.");
-        DeliveryClient.HeartbeatOutcome outcome;
+        if (RoutesMatch(current?.Routes, serverRoutes)) return current;
+        var routes = serverRoutes.Select(r => new PrintRoute(r.Type, r.PrinterName, r.PaperWidthMm)).ToArray();
+        if (routes.Length == 0)
+        {
+            LogInfo("Server ne izveštava nijednu podešenu rutu štampe za ovaj računar — štampa je onemogućena dok se rute ne podese u Admin panelu.");
+            try { if (File.Exists(configPath)) File.Delete(configPath); } catch (Exception ex) { LogWarn($"Brisanje {configPath} nije uspelo: {ex.Message}"); }
+            configLastWriteUtc = DateTime.MinValue;
+            return null;
+        }
+        var next = new AgentConfig(routes);
+        LogInfo($"Rute štampe ažurirane sa servera: {string.Join(", ", routes.Select(r => $"{r.Type}->{r.PrinterName}({r.PaperWidthMm}mm)"))}.");
+        PersistConfig(configPath, next);
+        configLastWriteUtc = File.GetLastWriteTimeUtc(configPath);
+        return next;
+    }
+
+    private static bool RoutesMatch(PrintRoute[]? local, IReadOnlyList<AgentRouteInfo> server)
+    {
+        var localArr = local ?? [];
+        if (localArr.Length != server.Count) return false;
+        var localSorted = localArr.OrderBy(r => r.Type, StringComparer.Ordinal).ToArray();
+        var serverSorted = server.OrderBy(r => r.Type, StringComparer.Ordinal).ToArray();
+        for (var i = 0; i < localSorted.Length; i++)
+        {
+            if (localSorted[i].Type != serverSorted[i].Type
+                || localSorted[i].PrinterName != serverSorted[i].PrinterName
+                || localSorted[i].PaperWidthMm != serverSorted[i].PaperWidthMm)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>Same atomic temp-file-then-move pattern the old SetupForm.OnSave
+    /// used — write beside the target, then move over it, so a reader never
+    /// observes a half-written file.</summary>
+    private static void PersistConfig(string configPath, AgentConfig config)
+    {
+        var tempPath = configPath + ".tmp";
+        File.WriteAllText(tempPath, config.ToJson());
+        File.Move(tempPath, configPath, overwrite: true);
+    }
+
+    private static async Task<DeliveryClient.HeartbeatOutcome?> SendHeartbeat(string baseUrl, string credential, AgentConfig? config)
+    {
+        var installedPrinters = WindowsPrinter.Enumerate();
+        var routeAvailability = (config?.Routes ?? [])
+            .Select(r => new RoutePrinterAvailability(r.Type, installedPrinters.Contains(r.PrinterName, StringComparer.Ordinal)))
+            .ToArray();
+        foreach (var r in routeAvailability.Where(r => !r.PrinterAvailable))
+            LogWarn($"Konfigurisan štampač za rutu {r.Type} trenutno nije dostupan na ovom računaru.");
         try
         {
-            outcome = await DeliveryClient.Heartbeat(
+            return await DeliveryClient.Heartbeat(
                 baseUrl, credential,
                 agentVersion: AgentVersion.Current,
                 osDescription: Environment.OSVersion.VersionString,
-                configuredPrinterName: config?.PrinterName,
-                paperWidthMm: config?.PaperWidthMm,
-                printerAvailable: printerAvailable);
+                availablePrinters: installedPrinters,
+                routes: routeAvailability);
         }
-        catch (HttpRequestException ex) { LogWarn($"Heartbeat mrežna greška (nastavljam): {ex.Message}"); return; }
-
-        if (outcome.TestPrintRequested) await HandleTestPrintRequest(baseUrl, credential, config);
+        catch (HttpRequestException ex) { LogWarn($"Heartbeat mrežna greška (nastavljam): {ex.Message}"); return null; }
     }
 
     /// <summary>
@@ -153,26 +237,36 @@ public static class AgentRunner
     /// claim/start/reconcile, nikad ne dotiče Order/Payment. Ako je
     /// štampač nepoznat/nedostupan, prijavljujemo FAILED umesto da tiho
     /// preskočimo — Admin panel mora videti STVARAN ishod.
+    ///
+    /// Printing V2 — <paramref name="routeType"/> bira KOJU rutu (i time koji
+    /// lokalno konfigurisan štampač/širinu) testirati, jer jedan agent sad
+    /// može imati više različitih štampača.
     /// </summary>
-    private static async Task HandleTestPrintRequest(string baseUrl, string credential, AgentConfig? config)
+    private static async Task HandleTestPrintRequest(string baseUrl, string credential, AgentConfig? config, string? routeType)
     {
-        LogInfo("Test Print zatražen preko Admin panela — štampam lokalno.");
+        LogInfo($"Test Print zatražen preko Admin panela (ruta={routeType ?? "?"}) — štampam lokalno.");
         string status;
         string? error;
-        if (config is null)
+        var route = routeType is null ? null : config?.RouteFor(routeType);
+        if (routeType is null)
         {
             status = "FAILED";
-            error = "Radna stanica nema podešen štampač/stanicu (agent.config.json).";
+            error = "Server nije naveo koju rutu treba testirati.";
         }
-        else if (!WindowsPrinter.Enumerate().Contains(config.PrinterName, StringComparer.Ordinal))
+        else if (route is null)
         {
             status = "FAILED";
-            error = $"Konfigurisan štampač \"{config.PrinterName}\" nije dostupan na ovom računaru.";
+            error = $"Ruta {routeType} nije lokalno podešena na ovom računaru (agent.config.json).";
+        }
+        else if (!WindowsPrinter.Enumerate().Contains(route.PrinterName, StringComparer.Ordinal))
+        {
+            status = "FAILED";
+            error = $"Konfigurisan štampač \"{route.PrinterName}\" nije dostupan na ovom računaru.";
         }
         else
         {
-            var ticket = Ticket.TestPrint(Environment.MachineName, config.Station, config.PrinterName, config.PaperWidthMm, AgentVersion.Current);
-            var outcome = WindowsPrinter.Print(config, ticket, "test-" + Guid.NewGuid().ToString("N"));
+            var ticket = Ticket.TestPrint(Environment.MachineName, route.Type, route.PrinterName, route.PaperWidthMm, AgentVersion.Current);
+            var outcome = WindowsPrinter.Print(route, ticket, "test-" + Guid.NewGuid().ToString("N"));
             status = outcome.Status == "SUBMITTED_TO_SPOOLER" ? "SUCCEEDED" : "FAILED";
             error = outcome.Status == "SUBMITTED_TO_SPOOLER" ? null : (outcome.Error ?? outcome.Guarantee);
         }
@@ -200,6 +294,14 @@ public static class AgentRunner
     /// pokretanju (ReconcileOnStartup, za redove još u stanju Received) —
     /// namerno JEDAN put od "zahtevaj dozvolu" do "prijavi ishod", nikad
     /// dva paralelna.
+    ///
+    /// Printing V2 — `station` iz servera je zapravo PrintJob.type (KITCHEN/
+    /// BAR/RECEIPT — RECEIPT je sad podržan), i bira se odgovarajuća lokalna
+    /// PrintRoute iz config.Routes po tipu umesto poređenja sa jednom
+    /// globalnom stanicom. Server već ograničava koje tipove ovaj agent uopšte
+    /// vidi (samo tipovi njegovih omogućenih ruta — agent-print-service.ts
+    /// pollAndClaim), ali agent NIKAD ne veruje slepo serveru za stvaran
+    /// fizički efekat — ista odbrana u dubinu kao pre.
     /// </summary>
     private static async Task ProcessReceivedJob(string baseUrl, string credential, AgentConfig? config, string jobId, string attemptId, string station, JsonElement content)
     {
@@ -216,33 +318,34 @@ public static class AgentRunner
 
         if (config is null)
         {
-            await ReportOutcome(baseUrl, credential, jobId, attemptId, "FAILED_BEFORE_SUBMISSION", "agent.local.json nije podešen/čitljiv — štampač nepoznat.");
+            await ReportOutcome(baseUrl, credential, jobId, attemptId, "FAILED_BEFORE_SUBMISSION", "agent.config.json nije podešen/čitljiv — nijedna ruta štampe nije konfigurisana.");
             return;
         }
-        if (station != config.Station)
+        var route = config.RouteFor(station);
+        if (route is null)
         {
             await ReportOutcome(baseUrl, credential, jobId, attemptId, "FAILED_BEFORE_SUBMISSION",
-                $"Stanica servera ({station}) se ne poklapa sa lokalnom konfiguracijom ({config.Station}) — proveri uparivanje/agent.local.json.");
+                $"Ruta servera ({station}) nije lokalno podešena na ovom računaru — proveri Admin panel/agent.config.json.");
             return;
         }
-        if (!WindowsPrinter.Enumerate().Contains(config.PrinterName, StringComparer.Ordinal))
+        if (!WindowsPrinter.Enumerate().Contains(route.PrinterName, StringComparer.Ordinal))
         {
             // Zahtev specifikacije: NIKAD tiho ne biraj drugi štampač.
-            LogWarn($"Konfigurisan štampač \"{config.PrinterName}\" nije dostupan — jobId={jobId} NE šalje se na štampu.");
+            LogWarn($"Konfigurisan štampač \"{route.PrinterName}\" nije dostupan — jobId={jobId} NE šalje se na štampu.");
             await ReportOutcome(baseUrl, credential, jobId, attemptId, "FAILED_BEFORE_SUBMISSION",
-                $"Konfigurisan štampač \"{config.PrinterName}\" nije dostupan na ovom računaru.");
+                $"Konfigurisan štampač \"{route.PrinterName}\" nije dostupan na ovom računaru.");
             return;
         }
 
         var (ticket, paperWidthMm, _) = TicketPayload.Parse(content);
-        var effectiveConfig = config with { PaperWidthMm = paperWidthMm is 58 or 80 ? paperWidthMm : config.PaperWidthMm };
+        var effectiveRoute = route with { PaperWidthMm = paperWidthMm is 58 or 80 ? paperWidthMm : route.PaperWidthMm };
 
         // Poslednji upis PRE nepovratnog koraka — ako proces padne TAČNO
         // unutar WindowsPrinter.Print poziva ispod, restart MORA videti da
         // je štampa MOGLA biti pokrenuta i NIKAD sam ne pokušava ponovo
         // (vidi ReconcileOnStartup, stanje PrintInvoked -> SUBMISSION_UNKNOWN).
         AgentDatabase.RecordPrintInvoked(jobId);
-        var outcome = WindowsPrinter.Print(effectiveConfig, ticket, jobId);
+        var outcome = WindowsPrinter.Print(effectiveRoute, ticket, jobId);
         var mappedStatus = outcome.Status == "PREFLIGHT_ONLY" ? "SUBMISSION_UNKNOWN" : outcome.Status;
         AgentDatabase.RecordResultKnown(jobId, mappedStatus, outcome.Error);
         LogInfo($"Ishod za jobId={jobId}: {mappedStatus}{(outcome.Error is null ? "" : $" ({outcome.Error})")}");
@@ -356,5 +459,5 @@ public static class AgentRunner
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.2";
+    public const string Current = "1.0.0-pilot.3";
 }

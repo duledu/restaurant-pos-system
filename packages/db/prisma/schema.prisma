@@ -1287,9 +1287,16 @@ model PrinterConfig {
 // Deljene šablone (isEnabled, revocation, audit akcije, dozvola u domain
 // servisu) svesno ponavlja iz Device/PrinterConfig konvencije.
 //
-// Ponovo koristi POSTOJEĆI ProductionStation enum (već tačno KITCHEN|BAR,
-// bez RECEIPT — radna stanica u ovoj fazi štampa isključivo kuhinjske/šank
-// tikete, nikad račun) umesto novog enuma.
+// PRINTING ARCHITECTURE V2 (2026-09-15) — pairing establishes ONLY a
+// computer/Print Agent identity now; `station` on both models below is kept
+// but is DEPRECATED/nullable and no longer written by new code (see
+// WorkstationPrintRoute below, which reuses the existing PrintJobType enum
+// KITCHEN|BAR|RECEIPT — NOT ProductionStation, which remains a distinct,
+// narrower concept for kitchen/bar order-item *production* state and must
+// never be conflated with print routing). The deprecated scalar columns are
+// intentionally kept (not dropped) for one release cycle as a rollback
+// safety net until the real physical Agent has passed QA on the new
+// route-based model — see docs left in the migration for the follow-up drop.
 // ─────────────────────────────────────────────────────────────────────────
 
 enum PairingStatus {
@@ -1305,19 +1312,23 @@ enum PairingStatus {
 // na kreiranje. Isticanje (`expiresAt`) se proverava dinamički pri
 // potrošnji — nema odvojenog EXPIRED statusa niti pozadinskog posla koji ga
 // upisuje, da status reda nikad ne zastari.
+//
+// `station` je DEPRECATED (nullable, više se ne postavlja) — uparivanje od
+// V2 nadalje uspostavlja SAMO identitet računara; ruta štampe se bira posle
+// uparivanja, u Admin panelu (WorkstationPrintRoute).
 model WorkstationPairing {
-  id            String            @id @default(uuid())
+  id            String             @id @default(uuid())
   restaurantId  String
   locationId    String
-  station       ProductionStation
+  station       ProductionStation?
   name          String?
-  codeHash      String            @unique
-  status        PairingStatus     @default(PENDING)
+  codeHash      String             @unique
+  status        PairingStatus      @default(PENDING)
   expiresAt     DateTime
   consumedAt    DateTime?
   workstationId String?
   createdBy     String // employeeId admina koji je kreirao sesiju
-  createdAt     DateTime          @default(now())
+  createdAt     DateTime           @default(now())
 
   restaurant  Restaurant   @relation(fields: [restaurantId], references: [id])
   location    Location     @relation(fields: [locationId], references: [id])
@@ -1334,22 +1345,34 @@ model WorkstationPairing {
 // kredencijal se vraća agentu TAČNO JEDNOM, u odgovoru na uspešnu potrošnju
 // uparivanja, i nikad više nije čitljiv iz baze. `isEnabled` je reverzibilna
 // administratorska pauza; `revokedAt` je trajno/nepovratno oduzimanje
-// pristupa (nova radna stanica zahteva novo uparivanje). `paperWidthMm` je
-// null dok se ne konfiguriše/prijavi (58 ili 80, ista konvencija kao
-// PrinterConfig.paperWidthMm) — agent NIKAD ne bira sopstvenu širinu papira
-// bez administratorske potvrde/konfiguracije.
+// pristupa (nova radna stanica zahteva novo uparivanje).
+//
+// `station`/`configuredPrinterName`/`paperWidthMm`/`printerAvailable` su
+// DEPRECATED od Printing V2 nadalje — jedan Workstation više NIJE zaključan
+// na tačno jednu stanicu/štampač, vidi WorkstationPrintRoute (1:N). Ova
+// četiri polja se NE popunjavaju za nove Workstation redove i nijedan novi
+// kod ih ne čita; ostavljena su nepromenjena (i nullable, kao pre) isključivo
+// radi bezbedne migracije unazad i mogućnosti rollback-a dok se novi model
+// ne potvrdi na fizičkom uređaju. Planirano uklanjanje u posebnoj kasnijoj
+// migraciji.
 model Workstation {
   id                            String            @id @default(uuid())
   restaurantId                  String
   locationId                    String
   name                          String
-  station                       ProductionStation
+  station                       ProductionStation?
   configuredPrinterName         String?
   // Faza 2B — agent lokalno proverava da li configuredPrinterName zaista
   // postoji u Windows spisku štampača (nikad tiho ne bira drugi) i
   // prijavljuje ovo preko heartbeat-a. Null = još nije prijavljeno.
   printerAvailable              Boolean?
   paperWidthMm                  Int?
+  // Printing V2 — pun spisak Windows štampača koje je agent poslednji put
+  // prijavio preko heartbeat-a (WindowsPrinter.Enumerate() na agentu), da bi
+  // Admin birao štampač iz stvarne liste te mašine umesto ručnog unosa
+  // imena. Null = agent još nije prijavio (pre prvog heartbeat-a).
+  availablePrinters             Json?
+  printersReportedAt            DateTime?
   agentVersion                  String?
   osDescription                 String?
   isEnabled                     Boolean           @default(true)
@@ -1365,6 +1388,13 @@ model Workstation {
   // null (nikad zatraženo) | "PENDING" | "SUCCEEDED" | "FAILED".
   testPrintRequestedAt          DateTime?
   testPrintRequestedBy          String?
+  // Printing V2 — koju rutu (i time koji lokalno konfigurisan štampač/
+  // širinu iz agent.config.json Routes liste) da agent koristi za OVU
+  // testnu štampu. Neophodno od trenutka kad jedan agent može imati više
+  // različitih štampača — bez ovoga agent ne bi znao koji od 2-3 štampača
+  // da testira. Null = nema testa na čekanju (isto značenje kao
+  // testPrintStatus null/van PENDING).
+  testPrintRouteType            PrintJobType?
   testPrintStatus               String?
   testPrintCompletedAt          DateTime?
   testPrintError                String?
@@ -1375,13 +1405,47 @@ model Workstation {
   createdAt                     DateTime          @default(now())
   updatedAt                     DateTime          @updatedAt
 
-  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
-  location   Location             @relation(fields: [locationId], references: [id])
+  restaurant Restaurant               @relation(fields: [restaurantId], references: [id])
+  location   Location                 @relation(fields: [locationId], references: [id])
   pairings   WorkstationPairing[]
+  printRoutes WorkstationPrintRoute[]
 
   @@index([restaurantId])
   @@index([locationId])
   @@map("workstations")
+}
+
+// Printing V2 — jedan Workstation (fizički Windows Print Agent) sada može
+// imati VIŠE nezavisnih ruta štampe (KITCHEN/BAR/RECEIPT), svaka sa
+// sopstvenim Windows štampačem i širinom papira. Isti fizički štampač sme da
+// se ponovi u više ruta (npr. KITCHEN, BAR i RECEIPT sve na istom POS-58) —
+// zato NEMA unique ograničenja na printerName. `@@unique([workstationId,
+// type])` je jedino stvarno logičko ograničenje: jedan računar ne može imati
+// dve različite KITCHEN rute (dvosmisleno — koji bi štampač dobio posao).
+// Više Workstation-a i dalje SME da ima aktivnu rutu istog tipa za istu
+// lokaciju (ista dvosmislenost kao i danas kod activeWorkstationFor —
+// rešava se "poslednji aktivan pobeđuje", namerno ne redizajnirano ovde,
+// vidi print-policy.ts).
+model WorkstationPrintRoute {
+  id               String       @id @default(uuid())
+  restaurantId     String
+  locationId       String
+  workstationId    String
+  type             PrintJobType // KITCHEN | BAR | RECEIPT
+  printerName      String?
+  paperWidthMm     Int?
+  printerAvailable Boolean?
+  isEnabled        Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  workstation Workstation @relation(fields: [workstationId], references: [id])
+
+  @@unique([workstationId, type])
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([type])
+  @@map("workstation_print_routes")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

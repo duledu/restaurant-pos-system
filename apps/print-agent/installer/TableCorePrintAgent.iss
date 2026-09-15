@@ -31,7 +31,7 @@
 ; sam po sebi da potvrdi KOJI je tačno instaler instaliran (samo SHA-256
 ; je to razlikovao). Uvećaj OVAJ broj pri SVAKOM novom fizičkom-QA
 ; kandidatu ubuduće.
-#define MyAppVersion "1.0.0-pilot.2"
+#define MyAppVersion "1.0.0-pilot.3"
 #define MyAppPublisher "TableCore"
 #define MyServiceName "TableCorePrintAgent"
 #define MyServiceAccount "NT SERVICE\TableCorePrintAgent"
@@ -222,21 +222,35 @@ Filename: "{sys}\sc.exe"; Parameters: "stop {#MyServiceName}"; Flags: runhidden 
 Filename: "{sys}\sc.exe"; Parameters: "delete {#MyServiceName}"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteService"
 
 [Code]
-// Profesionalni instalacioni audit (Deo A/B/C) — TAČNA, deterministička
-// definicija "dovoljno kompletne konfiguracije da se Setup NE otvara
-// ponovo automatski", ogledalo (u Pascal Script-u, koji nema JSON
-// parser) AgentConfig.Validate()-a u Printing.cs: Station mora biti
-// KITCHEN/BAR, PrinterName ne sme biti prazan, PaperWidthMm mora biti
-// 58/80. Ako se TA definicija ikad promeni u Printing.cs, OVA funkcija
-// mora ostati usaglašena. Namerno tekstualna (Pos-bazirana) provera
-// umesto pravog JSON parsiranja: Inno Pascal Script nema ugrađen JSON
-// parser, a jedini pisac ovog fajla je SetupForm.OnSave (uvek isti,
-// kontrolisan, UVLAČEN (WriteIndented=true, RAZMAK posle svake dvotačke)
-// oblik: {"station": "...", "printerName": "...", "paperWidthMm": N}) —
-// pa je tekstualna provera bezbedna u praksi — najgori mogući ishod
-// pogrešnog tumačenja je da se Setup otvori KAD NIJE STROGO neophodno
-// (bezopasno, korisnik samo vidi već popunjen ekran), NIKAD obrnuto u
-// stvarnom (ne veštački oštećenom) fajlu.
+// Printing V2 update — profesionalni instalacioni audit (Deo A/B/C),
+// TAČNA, deterministička definicija "dovoljno kompletne konfiguracije da
+// se Setup NE otvara ponovo automatski", ogledalo (u Pascal Script-u, koji
+// nema JSON parser) AgentConfig.ToJson()-a u Printing.cs. Routes više NIJE
+// nešto što SetupForm.OnSave bira/piše direktno — server je autoritativan
+// (AgentRunner.ApplyServerRoutes/PersistConfig su SADA jedino mesto koje
+// piše ovaj fajl), ali OBLIK koji taj kod piše ostaje isti kontrolisan,
+// UVLAČEN (WriteIndented=true, RAZMAK posle svake dvotačke) JSON —
+// {"routes": [{"type": "...", "printerName": "...", "paperWidthMm": N}]}.
+// AgentConfig.Validate() garantuje da SVAKA ruta u tom nizu ima NEPRAZAN
+// printerName pre nego što je ikad upisana (prazna/nepodešena ruta se
+// NIKAD ne uključuje — vidi workstation-service.ts getAgentRoutes, koje
+// izostavlja svaku rutu bez izabranog štampača), pa je dovoljna JEDNA
+// provera: da li BILO KOJI "printerName" sa stvarnom vrednošću postoji
+// bilo gde u fajlu. Namerno tekstualna (Pos-bazirana) provera umesto
+// pravog JSON parsiranja: Inno Pascal Script nema ugrađen JSON parser, pa
+// je tekstualna provera bezbedna u praksi — najgori mogući ishod pogrešnog
+// tumačenja je da se Setup otvori KAD NIJE STROGO neophodno (bezopasno,
+// korisnik samo vidi već popunjen ekran), NIKAD obrnuto u stvarnom (ne
+// veštački oštećenom) fajlu.
+//
+// "Upareno, ali nijedna ruta štampe još podešena" (prazan routes[] niz,
+// npr. sveže upareno pre nego što je Admin dodao ijednu rutu) je NAMERNO
+// i dalje Setup-OBAVEZNO — restoran mora videti taj status umesto da
+// ekran tiho zauvek nestane; Setup sad objašnjava da se rute podešavaju u
+// Admin panelu i zatvara se čim je pairing/heartbeat potvrđen, bez obzira
+// na broj ruta (vidi SetupForm.OnSave) — Setup se ponovo otvara na svakoj
+// narednoj nadogradnji dok bar jedna ruta stvarno ne postoji, što je
+// bezopasno (samo dodatan prikaz istog ekrana), ne blokira rad servisa.
 //
 // HasStoredCredential() ogledalo (CredentialStore.cs): TAČNO isti uslov
 // (samo postojanje fajla, DPAPI dešifrovanje se ovde ne proverava - to
@@ -257,8 +271,8 @@ begin
     Exit;
   end;
 
-  // Deo C — upareno, ali fajl sa stanicom/štampačem/papirom uopšte ne
-  // postoji -> nepotpuna konfiguracija, Setup je OBAVEZAN.
+  // Deo C — upareno, ali fajl sa rutama uopšte ne postoji -> nijedna ruta
+  // nije preuzeta sa servera, Setup je OBAVEZAN.
   if not FileExists(ConfigPath) then
   begin
     Result := True;
@@ -273,24 +287,12 @@ begin
     Exit;
   end;
 
-  // Deo C nastavak — fajl postoji ali izgleda oštećen/nepotpun (bilo koje
-  // od obaveznih polja nedostaje ili je prazno) -> Setup je OBAVEZAN.
-  // Deo B — sve prisutno i izgleda ispravno -> Setup se NE otvara ponovo
-  // (nadogradnja preko već podešene instalacije nastavlja automatski).
-  //
-  // KRITIČNO (otkriveno sopstvenim self-testom, ne pretpostavkom): stvaran
-  // fajl piše SetupForm.OnSave sa JsonSerializerOptions.WriteIndented=true,
-  // koje ubacuje RAZMAK POSLE SVAKE DVOTAČKE ("station": "KITCHEN", ne
-  // "station":"KITCHEN") — provera BEZ razmaka nikad ne bi pogodila stvaran
-  // fajl, što bi značilo da NeedsSetupAfterInstall UVEK vraća True (Setup
-  // bi se ponovo otvarao na SVAKOJ nadogradnji, čak i potpuno podešenoj) —
-  // vidi SelfTests.cs za test koji ovo sada čuva usaglašenim.
-  Result :=
-    (Pos('"station": "KITCHEN"', ConfigContent) = 0) and (Pos('"station": "BAR"', ConfigContent) = 0);
-  if not Result then
-    Result := (Pos('"printerName": ""', ConfigContent) > 0) or (Pos('"printerName": null', ConfigContent) > 0) or (Pos('"printerName"', ConfigContent) = 0);
-  if not Result then
-    Result := (Pos('"paperWidthMm": 58', ConfigContent) = 0) and (Pos('"paperWidthMm": 80', ConfigContent) = 0);
+  // Deo C nastavak — fajl postoji ali nijedna ruta u njemu nema stvaran
+  // štampač -> Setup OBAVEZAN. Deo B — bar jedan "printerName" sa
+  // vrednošću postoji -> Setup se NE otvara ponovo (nadogradnja preko već
+  // podešene instalacije nastavlja automatski). Vidi SelfTests.cs za test
+  // koji ovo čuva usaglašenim sa AgentConfig.ToJson()-om.
+  Result := (Pos('"printerName": "', ConfigContent) = 0);
 end;
 
 // Professional installer audit finding (upgrade reliability) — the

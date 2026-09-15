@@ -35,8 +35,13 @@ beforeEach(async () => {
 });
 
 async function pairWorkstation(): Promise<{ workstationId: string; wsCtx: WorkstationAuthContext }> {
-  const pairing = await workstations.createPairing(ctx, { locationId, station: "KITCHEN" });
+  // Printing V2 — pairing no longer carries a station; requestTestPrint now
+  // targets a specific WorkstationPrintRoute (a workstation can have
+  // several different printers), and refuses a route with no printer
+  // chosen yet — so every test below needs a real configured route first.
+  const pairing = await workstations.createPairing(ctx, { locationId });
   const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+  await workstations.upsertPrintRoute(ctx, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
   return {
     workstationId: registered.workstationId,
     wsCtx: { workstationId: registered.workstationId, restaurantId: registered.restaurantId, locationId: registered.locationId, station: registered.station },
@@ -44,12 +49,13 @@ async function pairWorkstation(): Promise<{ workstationId: string; wsCtx: Workst
 }
 
 describe("workstation test print — request/ack lifecycle", () => {
-  it("requestTestPrint sets PENDING status without creating any PrintJob or touching Order data", async () => {
+  it("requestTestPrint sets PENDING status (with the requested route type) without creating any PrintJob or touching Order data", async () => {
     const { workstationId } = await pairWorkstation();
     const before = await prisma.printJob.count();
 
-    const updated = await workstations.requestTestPrint(ctx, workstationId);
+    const updated = await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
     expect(updated.testPrintStatus).toBe("PENDING");
+    expect(updated.testPrintRouteType).toBe("KITCHEN");
     expect(updated.testPrintRequestedAt).toBeInstanceOf(Date);
     expect(updated.testPrintCompletedAt).toBeNull();
 
@@ -58,15 +64,22 @@ describe("workstation test print — request/ack lifecycle", () => {
     expect(await prisma.printJob.count()).toBe(before);
   });
 
-  it("heartbeat reports testPrintRequested=true only while PENDING, and false once acknowledged", async () => {
+  it("rejects a test print request for a route with no printer configured yet", async () => {
+    const { workstationId } = await pairWorkstation();
+    await expect(workstations.requestTestPrint(ctx, workstationId, "BAR")).rejects.toThrow();
+  });
+
+  it("heartbeat reports testPrintRequested=true (with the route type) only while PENDING, and false once acknowledged", async () => {
     const { workstationId, wsCtx } = await pairWorkstation();
 
     const beforeRequest = await workstations.recordHeartbeat(wsCtx, {});
     expect(beforeRequest.testPrintRequested).toBe(false);
+    expect(beforeRequest.testPrintRoute).toBeNull();
 
-    await workstations.requestTestPrint(ctx, workstationId);
+    await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
     const afterRequest = await workstations.recordHeartbeat(wsCtx, {});
     expect(afterRequest.testPrintRequested).toBe(true);
+    expect(afterRequest.testPrintRoute).toBe("KITCHEN");
 
     await workstations.recordTestPrintResult(wsCtx, { status: "SUCCEEDED" });
     const afterAck = await workstations.recordHeartbeat(wsCtx, {});
@@ -75,7 +88,7 @@ describe("workstation test print — request/ack lifecycle", () => {
 
   it("recordTestPrintResult(SUCCEEDED) clears any prior error and stamps completion time", async () => {
     const { workstationId, wsCtx } = await pairWorkstation();
-    await workstations.requestTestPrint(ctx, workstationId);
+    await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
 
     await workstations.recordTestPrintResult(wsCtx, { status: "SUCCEEDED" });
     const row = await prisma.workstation.findUniqueOrThrow({ where: { id: workstationId } });
@@ -86,7 +99,7 @@ describe("workstation test print — request/ack lifecycle", () => {
 
   it("recordTestPrintResult(FAILED) stores the agent-reported error for Admin display", async () => {
     const { workstationId, wsCtx } = await pairWorkstation();
-    await workstations.requestTestPrint(ctx, workstationId);
+    await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
 
     await workstations.recordTestPrintResult(wsCtx, { status: "FAILED", errorMessage: "Konfigurisan štampač nije dostupan." });
     const row = await prisma.workstation.findUniqueOrThrow({ where: { id: workstationId } });
@@ -97,19 +110,19 @@ describe("workstation test print — request/ack lifecycle", () => {
   it("rejects a test print request for a revoked workstation", async () => {
     const { workstationId } = await pairWorkstation();
     await workstations.revokeWorkstation(ctx, workstationId);
-    await expect(workstations.requestTestPrint(ctx, workstationId)).rejects.toThrow();
+    await expect(workstations.requestTestPrint(ctx, workstationId, "KITCHEN")).rejects.toThrow();
   });
 
   it("rejects a test print request for a workstation in another restaurant (tenant isolation)", async () => {
     const { workstationId } = await pairWorkstation();
     const otherCtx: AuthContext = { ...ctx, restaurantId: randomUUID(), locationIds: [] };
-    await expect(workstations.requestTestPrint(otherCtx, workstationId)).rejects.toThrow();
+    await expect(workstations.requestTestPrint(otherCtx, workstationId, "KITCHEN")).rejects.toThrow();
   });
 
   it("a second requestTestPrint while one is still PENDING simply resets the same PENDING state (no duplicate accumulation)", async () => {
     const { workstationId } = await pairWorkstation();
-    await workstations.requestTestPrint(ctx, workstationId);
-    const second = await workstations.requestTestPrint(ctx, workstationId);
+    await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
+    const second = await workstations.requestTestPrint(ctx, workstationId, "KITCHEN");
     expect(second.testPrintStatus).toBe("PENDING");
   });
 });
@@ -120,7 +133,7 @@ describe("agent download info — no binary in the database", () => {
     const info = workstations.getAgentDownloadInfo(ctx);
     expect(info.available).toBe(false);
     expect(info.url).toBeNull();
-    expect(info.version).toBe("1.0.0-pilot.1");
+    expect(info.version).toBe("1.0.0-pilot.2");
   });
 
   it("reports the configured URL when PRINT_AGENT_INSTALLER_URL is set, without ever touching the database", () => {

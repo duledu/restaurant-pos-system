@@ -6,29 +6,51 @@
  * integration). Jedina nova stvar ovde je KAKO se do tih funkcija dolazi
  * kad pozivalac nije zaposleni nego autentifikovana radna stanica.
  *
+ * Printing V2 — jedan Workstation sad može imati VIŠE nezavisnih
+ * WorkstationPrintRoute (KITCHEN/BAR/RECEIPT), pa "koju stanicu ovaj agent
+ * poslužuje" više NIJE `wsCtx.station` (DEPRECATED, nullable — vidi
+ * packages/auth/workstation-auth.ts) nego jedna sveža upit protiv te
+ * tabele, urađena na početku svake od tri funkcije ispod. `PrintJob.type`
+ * (ne `.station`, koje je null za RECEIPT) je zajednički ključ preko koga se
+ * KITCHEN/BAR/RECEIPT poslovi uniformno filtriraju — jedan agent sa sve tri
+ * omogućene rute vidi/kandiduje poslove sva tri tipa kroz IDENTIČAN upit.
+ *
  * `workstationAsPrintClaimant` gradi AuthContext-oblik iz
- * WorkstationAuthContext-a: `restaurantId`/`locationIds`/`roles` se
- * postavljaju TAČNO iz autentifikovanog identiteta radne stanice (nikad iz
- * bilo čega što agent tvrdi u telu zahteva), pa postojeće provere
- * (scopeToRestaurant, requireLocationAccess, assertStationAccess) VEĆ
- * ispravno ograničavaju agenta na sopstveni restoran/lokaciju/stanicu —
- * bez ijedne nove provere. `claimedBy` postaje `workstation:<id>`, jasno
- * razlučivo od pravog employeeId-a (uvek UUID bez prefiksa) u audit
- * tragu/DB redu.
+ * WorkstationAuthContext-a + trenutnih tipova ruta: `restaurantId`/
+ * `locationIds`/`roles` se postavljaju TAČNO iz autentifikovanog identiteta
+ * radne stanice i njenih AKTIVNIH ruta (nikad iz bilo čega što agent tvrdi u
+ * telu zahteva), pa postojeće provere (scopeToRestaurant, requireLocationAccess,
+ * assertStationAccess) VEĆ ispravno ograničavaju agenta na sopstveni
+ * restoran/lokaciju/rute — bez ijedne nove provere. `claimedBy` postaje
+ * `workstation:<id>`, jasno razlučivo od pravog employeeId-a (uvek UUID bez
+ * prefiksa) u audit tragu/DB redu.
  */
 import { prisma } from "@rcs/db";
 import type { AuthContext, WorkstationAuthContext, WorkstationStationValue } from "@rcs/auth";
 import { beginPrintAttempt, startPrintSubmission, confirmPrintResult, STALE_PRINT_LEASE_MS } from "./print-service";
 import { activeWorkstationFor, AGENT_ACTIVE_WINDOW_MS } from "./print-policy";
 
-function workstationAsPrintClaimant(wsCtx: WorkstationAuthContext): AuthContext {
+export type PrintRouteTypeValue = "KITCHEN" | "BAR" | "RECEIPT";
+
+/** Sveži spisak tipova ruta ovog Workstation-a koje su trenutno omogućene —
+ * NAMERNO upitano po pozivu (ne keširano na wsCtx), jer se Admin može
+ * promeniti između dva poll ciklusa i agent MORA odmah videti novo stanje. */
+async function activeRouteTypes(workstationId: string): Promise<PrintRouteTypeValue[]> {
+  const routes = await prisma.workstationPrintRoute.findMany({
+    where: { workstationId, isEnabled: true },
+    select: { type: true },
+  });
+  return routes.map((r) => r.type) as PrintRouteTypeValue[];
+}
+
+function workstationAsPrintClaimant(wsCtx: WorkstationAuthContext, routeTypes: PrintRouteTypeValue[]): AuthContext {
   const claimantId = `workstation:${wsCtx.workstationId}`;
   return {
     userId: claimantId,
     employeeId: claimantId,
     restaurantId: wsCtx.restaurantId,
     locationIds: [wsCtx.locationId],
-    roles: [wsCtx.station],
+    roles: routeTypes,
     permissions: new Set(["orders.print", "production.manage"]),
   };
 }
@@ -45,26 +67,34 @@ export interface AgentTicketPayload {
 
 /**
  * Nalazi i ATOMSKI kandiduje SLEDEĆI čekajući automatski tiket za TAČNO
- * restoran/lokaciju/stanicu autentifikovane radne stanice, pa ga odmah
- * kandiduje preko beginPrintAttempt (nepromenjeno). Vraća `null` ako nema
- * ništa ILI ako je izgubljena trka za kandidata (druga radna stanica ILI
- * KDS/QZ browser put ga je uzeo u međuvremenu) — oba slučaja su normalna,
- * ne greška; pozivalac (agent) samo pokušava ponovo na sledećem poll-u.
+ * restoran/lokaciju autentifikovane radne stanice, ograničen na tipove NJENIH
+ * trenutno omogućenih ruta (KITCHEN/BAR/RECEIPT — može biti jedna, dve ili
+ * sve tri), pa ga odmah kandiduje preko beginPrintAttempt (nepromenjeno).
+ * Vraća `null` ako nema ništa, ako agent nema nijednu omogućenu rutu, ILI
+ * ako je izgubljena trka za kandidata (druga radna stanica ILI KDS/QZ
+ * browser put ga je uzeo u međuvremenu) — svi slučajevi su normalni, ne
+ * greška; pozivalac (agent) samo pokušava ponovo na sledećem poll-u. I dalje
+ * vraća NAJVIŠE JEDAN posao po pozivu (bez promene HTTP oblika prema
+ * agentu) — čak i kad agent poslužuje tri rute, i dalje postoji tačno jedna
+ * poll->print->report petlja, pa je fizičko izvršenje i dalje strogo
+ * serijsko bez ikakve nove konkurentnosti.
  *
  * Sopstveni "stale recovery" prolaz (isti prag/logika kao
  * listPendingStationPrintJobs) je OBAVEZAN ovde — agent može biti JEDINI
- * potrošač ove stanice (KDS tab može biti zatvoren), pa niko drugi možda
+ * potrošač ovih ruta (KDS tab može biti zatvoren), pa niko drugi možda
  * nikad ne pokrene taj prolaz za redove van trenutnog kandidata.
  */
 export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<AgentTicketPayload | null> {
-  const { restaurantId, locationId, station } = wsCtx;
+  const { restaurantId, locationId } = wsCtx;
+  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
+  if (routeTypes.length === 0) return null;
   const staleThreshold = new Date(Date.now() - STALE_PRINT_LEASE_MS);
 
   await prisma.printJob.updateMany({
     where: {
       restaurantId,
       locationId,
-      station,
+      type: { in: routeTypes },
       status: "PRINTING",
       attemptId: { not: null },
       submissionStartedAt: null,
@@ -73,7 +103,7 @@ export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<Agent
     data: { status: "PENDING", attemptId: null, claimedBy: null, claimedAt: null },
   });
   await prisma.printJob.updateMany({
-    where: { restaurantId, locationId, station, status: "PRINTING", submissionStartedAt: { lt: staleThreshold } },
+    where: { restaurantId, locationId, type: { in: routeTypes }, status: "PRINTING", submissionStartedAt: { lt: staleThreshold } },
     data: { status: "SUBMISSION_UNKNOWN", failureReason: "Potvrda štampe nedostaje; proverite štampač pre novog otiska." },
   });
 
@@ -81,22 +111,27 @@ export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<Agent
   // agent poll-a u ovoj fazi (zahtev specifikacije "Do NOT over-expand
   // scope"). status:"PENDING" nikad uključuje SUPPRESSED (drugačija
   // vrednost enuma) — poll endpoint stoga strukturno nikad ne vraća
-  // suzbijene automatske redove.
+  // suzbijene automatske redove. `type` (ne `station`, koje je null za
+  // RECEIPT) je filter — jedini zajednički ključ preko sva tri tipa rute.
   const candidate = await prisma.printJob.findFirst({
-    where: { restaurantId, locationId, station, status: "PENDING", isAutomatic: true },
+    where: { restaurantId, locationId, type: { in: routeTypes }, status: "PENDING", isAutomatic: true },
     orderBy: { createdAt: "asc" },
     select: { id: true, orderId: true },
   });
   if (!candidate) return null;
 
-  const claimantCtx = workstationAsPrintClaimant(wsCtx);
+  const claimantCtx = workstationAsPrintClaimant(wsCtx, routeTypes);
   const claimed = await beginPrintAttempt(claimantCtx, candidate.orderId, candidate.id);
-  if (!claimed || !claimed.attemptId || !claimed.station) return null;
+  if (!claimed || !claimed.attemptId) return null;
 
   return {
     jobId: claimed.id,
     attemptId: claimed.attemptId,
-    station: claimed.station,
+    // `station` je null za RECEIPT (nikad vezan za jednu kuhinja/šank
+    // stanicu) — agentu se u tom slučaju šalje `type` ("RECEIPT") pod istim
+    // JSON poljem, agent ionako gleda ovo polje samo da pronađe SVOJU
+    // odgovarajuću lokalnu rutu po tipu, ne da uslovljava produkciono stanje.
+    station: (claimed.station ?? claimed.type) as WorkstationStationValue,
     documentType: claimed.type,
     isReprint: claimed.isReprint,
     attemptCount: claimed.attemptCount,
@@ -106,21 +141,29 @@ export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<Agent
 
 /** "I am about to begin the external side effect" — mora prethoditi
  * PrintDocument.Print pozivu na agentu. Ponovo koristi
- * startPrintSubmission nepromenjeno. */
+ * startPrintSubmission nepromenjeno. Job se traži samo po
+ * {id, restaurantId, locationId} (ne više po tačnoj `station` jednakosti —
+ * ta kolona je null za RECEIPT); `job.type` mora biti jedan od TRENUTNO
+ * omogućenih tipova ruta ovog agenta — odbrana u dubinu protiv zbunjenog
+ * ili kompromitovanog agenta koji tvrdi tuđi posao za stvaran fizički
+ * efekat (assertStationAccess unutar startPrintSubmission dodatno proverava
+ * `roles` za KITCHEN/BAR poslove). */
 export async function beginSubmission(wsCtx: WorkstationAuthContext, jobId: string, attemptId: string) {
+  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
   const job = await prisma.printJob.findFirst({
-    where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId, station: wsCtx.station },
-    select: { orderId: true },
+    where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId },
+    select: { orderId: true, type: true },
   });
-  if (!job) throw new Error("Print job nije pronađen");
-  return startPrintSubmission(workstationAsPrintClaimant(wsCtx), job.orderId, jobId, attemptId);
+  if (!job || !routeTypes.includes(job.type as PrintRouteTypeValue)) throw new Error("Print job nije pronađen");
+  return startPrintSubmission(workstationAsPrintClaimant(wsCtx, routeTypes), job.orderId, jobId, attemptId);
 }
 
 export type AgentResultOutcome = "SUBMITTED_TO_SPOOLER" | "FAILED_BEFORE_SUBMISSION" | "SUBMISSION_UNKNOWN";
 
 /** Ponovo koristi confirmPrintResult nepromenjeno — isto polje
  * `resultOutcome` prihvata i TRANSPORT_COMPLETED (browser put), ovde se
- * agentu namerno nudi samo agent-relevantan podskup ishoda. */
+ * agentu namerno nudi samo agent-relevantan podskup ishoda. Ista
+ * {id, restaurantId, locationId} + aktivne rute provera kao beginSubmission. */
 export async function submitResult(
   wsCtx: WorkstationAuthContext,
   jobId: string,
@@ -128,12 +171,13 @@ export async function submitResult(
   outcome: AgentResultOutcome,
   errorMessage?: string
 ) {
+  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
   const job = await prisma.printJob.findFirst({
-    where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId, station: wsCtx.station },
-    select: { orderId: true },
+    where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId },
+    select: { orderId: true, type: true },
   });
-  if (!job) throw new Error("Print job nije pronađen");
-  const result = await confirmPrintResult(workstationAsPrintClaimant(wsCtx), job.orderId, jobId, { attemptId, outcome, errorMessage });
+  if (!job || !routeTypes.includes(job.type as PrintRouteTypeValue)) throw new Error("Print job nije pronađen");
+  const result = await confirmPrintResult(workstationAsPrintClaimant(wsCtx, routeTypes), job.orderId, jobId, { attemptId, outcome, errorMessage });
   // Admin status ("poslednja predaja na štampu") — odvojeno od PrintJob
   // hardening-a iznad, isključivo informativno (isti princip kao
   // Device.lastSeenAt), namerno best-effort (greška ovde ne sme oboriti
@@ -164,9 +208,9 @@ export async function submitResult(
 export async function isAgentActiveForStation(
   restaurantId: string,
   locationId: string,
-  station: WorkstationStationValue
+  type: PrintRouteTypeValue
 ): Promise<boolean> {
-  return Boolean(await activeWorkstationFor(prisma, restaurantId, locationId, station));
+  return Boolean(await activeWorkstationFor(prisma, restaurantId, locationId, type));
 }
 
 // Hardening audit (Part 13) — Admin's own "Automatska štampa: Spremna"
@@ -206,25 +250,40 @@ export interface StationPrinterStatus {
  * localStorage (getQzSettings) — to je po-računaru, ne server-strano
  * stanje, i ne sme biti "normalan" indikator spremnosti dok TableCore
  * Print Agent postoji kao stvaran put.
+ *
+ * Printing V2 — widened from Workstation.station (KITCHEN|BAR only) to any
+ * WorkstationPrintRoute type (KITCHEN|BAR|RECEIPT): eligibility now comes
+ * from an enabled route row joined to its parent workstation, not a scalar
+ * column, which is what finally lets RECEIPT get a real readiness state too
+ * (previously RECEIPT had no Agent path at all). KDS's two call sites
+ * (apps/web/app/api/production/{kitchen,bar}/print-jobs/route.ts) and
+ * KdsClient.tsx need ZERO changes — they only ever passed KITCHEN/BAR and
+ * still do; this signature change is additive.
  */
 export async function stationPrinterStatus(
   restaurantId: string,
   locationId: string,
-  station: WorkstationStationValue
+  type: PrintRouteTypeValue
 ): Promise<StationPrinterStatus> {
-  const workstation = await prisma.workstation.findFirst({
-    where: { restaurantId, locationId, station, isEnabled: true, revokedAt: null },
-    select: { lastSeenAt: true, configuredPrinterName: true, printerAvailable: true },
-    orderBy: { lastSeenAt: "desc" },
+  const route = await prisma.workstationPrintRoute.findFirst({
+    where: {
+      restaurantId,
+      locationId,
+      type,
+      isEnabled: true,
+      workstation: { isEnabled: true, revokedAt: null },
+    },
+    select: { printerName: true, printerAvailable: true, workstation: { select: { lastSeenAt: true } } },
+    orderBy: { workstation: { lastSeenAt: "desc" } },
   });
-  if (!workstation) return { hasWorkstation: false, isOnline: false, state: "NOT_CONFIGURED" };
-  const isOnline = Boolean(workstation.lastSeenAt && workstation.lastSeenAt.getTime() > Date.now() - AGENT_ACTIVE_WINDOW_MS);
+  if (!route) return { hasWorkstation: false, isOnline: false, state: "NOT_CONFIGURED" };
+  const isOnline = Boolean(route.workstation.lastSeenAt && route.workstation.lastSeenAt.getTime() > Date.now() - AGENT_ACTIVE_WINDOW_MS);
   if (!isOnline) return { hasWorkstation: true, isOnline: false, state: "AGENT_OFFLINE" };
   // printerAvailable === true is required, not just "not false" — null
   // means the agent has not reported yet (fresh pairing, printer choice
   // not yet confirmed against the live Windows printer list), which is
   // exactly as un-ready as a confirmed-missing printer for this purpose.
-  if (!workstation.configuredPrinterName || workstation.printerAvailable !== true) {
+  if (!route.printerName || route.printerAvailable !== true) {
     return { hasWorkstation: true, isOnline: true, state: "PRINTER_UNAVAILABLE" };
   }
   return { hasWorkstation: true, isOnline: true, state: "READY" };

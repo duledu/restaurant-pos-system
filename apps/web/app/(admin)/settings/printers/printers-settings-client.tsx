@@ -210,9 +210,9 @@ export function PrintersSettingsClient() {
             </summary>
             <div className="space-y-4 border-t border-line p-4">
               <p className="text-xs text-inkSoft">
-                Ovo je rezervni/ručni put za slučaj da TableCore Print Agent nije uparen za neku stanicu, i jedini trenutni
-                put za štampu računa (Računi/POS preko Print Agent-a još nije dostupno). Za normalan rad kuhinje i šanka
-                koristi TableCore Print Agent iznad.
+                Ovo je rezervni/ručni put preko browsera (ili QZ Tray) za slučaj da TableCore Print Agent nije podešen
+                za neku rutu (Kuhinja/Šank/Račun). Za normalan, tihi/automatski rad koristi TableCore Print Agent
+                iznad — tamo se sada podešava i štampa računa, ne samo kuhinja/šank.
               </p>
               {STATIONS.map(({ value: station, label }) => {
                 const cfg = configFor(station);

@@ -306,15 +306,23 @@ describe("automatic print dispatch: station queue listing", () => {
   });
 });
 
+// Printing V2 — pairing with the (now optional/deprecated) `station`
+// shortcut still pre-provisions ONE matching WorkstationPrintRoute row (see
+// registerAgentFromPairing), unconfigured (no printer) by default. This
+// helper simulates a heartbeat that already reported a configured,
+// available printer with its own paper width on THAT route — exactly what
+// AgentRunner.cs's SendHeartbeat sends every ~25s while the Windows Print
+// Agent runs, now per-route rather than as scalar Workstation columns.
 async function pairActiveWorkstation(fixture: Fixture, station: "KITCHEN" | "BAR", ownerCtx: AuthContext) {
   const pairing = await workstations.createPairing(ownerCtx, { locationId: fixture.locationId, station });
   const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
-  // Simulates a heartbeat that already reported a configured, available
-  // printer with its own paper width — exactly what AgentRunner.cs's
-  // SendHeartbeat sends every ~25s while the Windows Print Agent runs.
   await prisma.workstation.update({
     where: { id: registered.workstationId },
-    data: { lastSeenAt: new Date(), configuredPrinterName: "POS-58", printerAvailable: true, paperWidthMm: 58 },
+    data: { lastSeenAt: new Date() },
+  });
+  await prisma.workstationPrintRoute.update({
+    where: { workstationId_type: { workstationId: registered.workstationId, type: station } },
+    data: { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 },
   });
   return registered;
 }
@@ -569,8 +577,8 @@ describe("stationPrinterStatus — one authoritative discriminated readiness sta
     const fixture = await createFixture();
     const owner = context(fixture, ["OWNER"], "owner-1");
     const registered = await pairActiveWorkstation(fixture, "KITCHEN", owner);
-    await prisma.workstation.update({
-      where: { id: registered.workstationId },
+    await prisma.workstationPrintRoute.update({
+      where: { workstationId_type: { workstationId: registered.workstationId, type: "KITCHEN" } },
       data: { printerAvailable: false },
     });
     const status = await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN");

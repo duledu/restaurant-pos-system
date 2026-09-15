@@ -10,50 +10,84 @@ internal static class SelfTests
         int count = 0;
         void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }
         bool Reject(Action action) { try { action(); return false; } catch (ArgumentException) { return true; } }
-        Check(AgentConfig.Parse("{\"station\":\"KITCHEN\",\"printerName\":\"POS-58 (1)\",\"paperWidthMm\":58}").Station == "KITCHEN", "Kitchen config parses");
-        Check(AgentConfig.Parse("{\"station\":\"BAR\",\"printerName\":\"POS\",\"paperWidthMm\":80}").Station == "BAR", "Bar config parses");
+        Check(AgentConfig.Parse("{\"routes\":[{\"type\":\"KITCHEN\",\"printerName\":\"POS-58 (1)\",\"paperWidthMm\":58}]}").Routes[0].Type == "KITCHEN", "Kitchen route config parses");
+        Check(AgentConfig.Parse("{\"routes\":[{\"type\":\"BAR\",\"printerName\":\"POS\",\"paperWidthMm\":80}]}").Routes[0].Type == "BAR", "Bar route config parses");
+        Check(AgentConfig.Parse("""{"routes":[{"type":"KITCHEN","printerName":"POS-58","paperWidthMm":58},{"type":"BAR","printerName":"POS-58","paperWidthMm":58},{"type":"RECEIPT","printerName":"POS-58","paperWidthMm":58}]}""").Routes.Length == 3,
+            "one agent can have three routes (KITCHEN+BAR+RECEIPT) sharing the same physical printer");
         Check(Reject(() => AgentConfig.Parse("{}")), "missing config fields rejected");
-        Check(Reject(() => new AgentConfig("KITCHEN", " ", 58).Validate()), "blank printer rejected");
+        Check(Reject(() => new AgentConfig([]).Validate()), "empty routes list rejected");
+        Check(Reject(() => new PrintRoute("KITCHEN", " ", 58).Validate()), "blank printer rejected");
+        Check(Reject(() => new AgentConfig([new PrintRoute("KITCHEN", "POS-58", 58), new PrintRoute("KITCHEN", "POS-80", 80)]).Validate()),
+            "duplicate route type (two KITCHEN routes on one agent) rejected — ambiguous which printer would win");
         bool malformed = false;
         try { AgentConfig.Parse("{"); } catch (System.Text.Json.JsonException) { malformed = true; }
         Check(malformed, "malformed config JSON rejected");
 
-        // Professional installer audit (state-aware Setup launch) — the
-        // installer's NeedsSetupAfterInstall (TableCorePrintAgent.iss,
-        // Pascal Script has no JSON parser) decides "is this installation
-        // already fully configured" by text-searching agent.config.json for
-        // the EXACT substrings a real SetupForm.OnSave write would produce.
-        // This test is the contract that keeps that mirror honest: if
-        // SetupForm's serialization shape ever changes (property renamed,
+        // Printing V2 upgrade path — a machine paired before this version
+        // wrote the OLD flat {station,printerName,paperWidthMm} shape, which
+        // no longer parses as {routes:[...]}. ParseWithLegacyFallback must
+        // convert it in memory (AgentRunner then persists it back in the
+        // new shape) so the real physical Kuhinja_new_test machine upgrades
+        // with NO re-pairing, no reset, no reinstall.
+        {
+            var (migrated, wasLegacy) = AgentConfig.ParseWithLegacyFallback("{\"station\":\"KITCHEN\",\"printerName\":\"POS-58\",\"paperWidthMm\":58}");
+            Check(wasLegacy && migrated.Routes.Length == 1 && migrated.Routes[0].Type == "KITCHEN" && migrated.Routes[0].PrinterName == "POS-58" && migrated.Routes[0].PaperWidthMm == 58,
+                "old flat station/printerName/paperWidthMm config upgrades in-memory to a one-route AgentConfig");
+            var (current, wasLegacyForNewShape) = AgentConfig.ParseWithLegacyFallback("{\"routes\":[{\"type\":\"BAR\",\"printerName\":\"POS\",\"paperWidthMm\":80}]}");
+            Check(!wasLegacyForNewShape && current.Routes[0].Type == "BAR", "an already-new-shape config is not (mis)treated as legacy");
+            Check(Reject(() => { AgentConfig.ParseWithLegacyFallback("{\"station\":\"KITCHEN\"}"); }),
+                "a legacy-shaped object missing printerName/paperWidthMm still fails (no silent partial migration)");
+        }
+
+        // Professional installer audit (state-aware Setup launch), updated
+        // for Printing V2 — the installer's NeedsSetupAfterInstall
+        // (TableCorePrintAgent.iss, Pascal Script has no JSON parser)
+        // decides "is this installation already fully configured" by
+        // text-searching agent.config.json for the EXACT substrings a real
+        // config write would produce. Routes are no longer written by
+        // SetupForm.OnSave directly (AgentRunner.ApplyServerRoutes/
+        // PersistConfig now own every write, via AgentConfig.ToJson()) —
+        // this test is the contract that keeps the installer's mirror
+        // honest against THAT shape: if it ever changes (property renamed,
         // casing changed, an unexpected space inserted), THIS test fails
         // here — loudly, in the same codebase — instead of the installer
         // silently misjudging "configured" on a real machine with no test
-        // coverage at all on that side.
+        // coverage at all on that side. A route only ever appears in this
+        // file with a real (non-empty) printerName (AgentConfig.Validate()
+        // enforces this before any write), so the installer's check can be
+        // as simple as "does a printerName field appear at all".
         {
-            var configJson = System.Text.Json.JsonSerializer.Serialize(
-                new { station = "KITCHEN", printerName = "POS-58", paperWidthMm = 58 },
-                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true });
-            // WriteIndented=true (matching SetupForm.OnSave's actual options)
-            // inserts a SPACE after each colon — this test caught the
-            // installer's original Pascal-side patterns assuming no space,
-            // which would have made NeedsSetupAfterInstall ALWAYS return
-            // True (Setup reopening on every upgrade, even fully configured
-            // ones) because the real file never matches a colon-with-no-space
-            // pattern. Both sides now agree on "colon, one space, value".
-            Check(configJson.Contains("\"station\": \"KITCHEN\"", StringComparison.Ordinal),
-                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall station check");
+            var configJson = new AgentConfig([new PrintRoute("KITCHEN", "POS-58", 58)]).ToJson();
+            // WriteIndented=true inserts a SPACE after each colon — this
+            // test caught the installer's original Pascal-side patterns
+            // assuming no space, which would have made NeedsSetupAfterInstall
+            // ALWAYS return True (Setup reopening on every upgrade, even
+            // fully configured ones) because the real file never matches a
+            // colon-with-no-space pattern. Both sides now agree on "colon,
+            // one space, value".
+            Check(configJson.Contains("\"routes\"", StringComparison.Ordinal),
+                "AgentConfig.ToJson() still matches the installer's NeedsSetupAfterInstall routes-array check");
+            Check(configJson.Contains("\"type\": \"KITCHEN\"", StringComparison.Ordinal),
+                "AgentConfig.ToJson() still matches the installer's NeedsSetupAfterInstall route-type check");
             Check(configJson.Contains("\"printerName\": \"POS-58\"", StringComparison.Ordinal) && !configJson.Contains("\"printerName\": \"\"", StringComparison.Ordinal),
-                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall printer check");
+                "AgentConfig.ToJson() still matches the installer's NeedsSetupAfterInstall printer check");
             Check(configJson.Contains("\"paperWidthMm\": 58", StringComparison.Ordinal),
-                "SetupForm's config JSON shape still matches the installer's NeedsSetupAfterInstall paper-width check");
+                "AgentConfig.ToJson() still matches the installer's NeedsSetupAfterInstall paper-width check");
+            var emptyRoutesJson = System.Text.Json.JsonSerializer.Serialize(new { routes = Array.Empty<object>() },
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true });
+            Check(!emptyRoutesJson.Contains("\"printerName\": \"", StringComparison.Ordinal),
+                "an empty routes array (no routes configured yet) never contains a printerName field — installer correctly still requires Setup");
         }
         var example = Ticket.Example("KITCHEN", new DateTime(2026, 9, 9, 12, 45, 0));
         Check(example.Lines.Last().Text == "12:45", "test ticket uses supplied local time");
         var encoded = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(example);
         var decoded = System.Text.Json.JsonSerializer.Deserialize<Ticket>(encoded)!;
         Check(decoded.Lines.Any(l => l.Text == "č ć ž š đ") && decoded.Lines.Any(l => l.Text == "Č Ć Ž Š Đ"), "Serbian lower and uppercase survive UTF-8 JSON");
-        Check(Reject(() => new AgentConfig("RECEIPT", "POS", 58).Validate()), "receipt excluded from POC");
-        Check(Reject(() => new AgentConfig("BAR", "POS", 210).Validate()), "A4 config rejected");
+        // Printing V2 — RECEIPT is now a first-class supported route type
+        // (inverted from the earlier "receipt excluded from POC" behavior).
+        Check(!Reject(() => new PrintRoute("RECEIPT", "POS", 58).Validate()), "RECEIPT is now a fully supported route type");
+        Check(Reject(() => new PrintRoute("FISCAL", "POS", 58).Validate()), "an unknown route type is still rejected");
+        Check(Reject(() => new PrintRoute("BAR", "POS", 210).Validate()), "A4 paper width rejected");
         Check(Reject(() => new Ticket([new("bad\nline")]).Validate()), "control characters rejected");
         Check(Reject(() => new Ticket([new("text", float.NaN)]).Validate()), "nonfinite font rejected");
         using var small = new TicketRaster(Ticket.Example("KITCHEN"), 58);

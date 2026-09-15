@@ -154,9 +154,13 @@ if (!args.Contains("--serve") && !args.Contains("--probe-printer"))
 var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 var configPath = Path.GetFullPath("agent.local.json");
 var config = AgentConfig.Parse(File.ReadAllText(configPath));
+// Faza 1 nasleđe/dev-only alat — namerno NIKAD multi-route svestan (samo
+// --serve/--probe-printer, nikad produkcioni servis put); prva podešena
+// ruta je "ta" štampač/širina za ovaj POC dijagnostički server.
+var route = config.Routes.FirstOrDefault() ?? throw new ArgumentException("agent.local.json nema nijednu podešenu rutu (routes[]).");
 if (args.Contains("--probe-printer"))
 {
-    var result = WindowsPrinter.Print(config, Ticket.Example(config.Station), "preflight", dryRun: true);
+    var result = WindowsPrinter.Print(route, Ticket.Example(route.Type), "preflight", dryRun: true);
     Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
     Environment.ExitCode = result.Status == "PREFLIGHT_ONLY" ? 0 : 1;
     return;
@@ -187,9 +191,9 @@ app.Use(async (context, next) => {
     context.Response.Headers.CacheControl = "no-store";
     await next(context);
 });
-app.MapGet("/health", () => Results.Ok(new { status = "ready", station = config.Station, paperWidthMm = config.PaperWidthMm,
-    printerName = config.PrinterName, mode = "SILENT", durable = false, spoolerChecked = false }));
-app.MapGet("/printers", () => Results.Ok(new { printers = WindowsPrinter.Enumerate(), selectedPrinter = config.PrinterName }));
+app.MapGet("/health", () => Results.Ok(new { status = "ready", station = route.Type, paperWidthMm = route.PaperWidthMm,
+    printerName = route.PrinterName, mode = "SILENT", durable = false, spoolerChecked = false }));
+app.MapGet("/printers", () => Results.Ok(new { printers = WindowsPrinter.Enumerate(), selectedPrinter = route.PrinterName }));
 app.MapGet("/jobs/{id}", (string id) => Guid.TryParseExact(id, "D", out var key) && records.TryGetValue(key.ToString("D"), out var job) ? Results.Ok(job) : Results.NotFound());
 
 async Task<IResult> Submit(HttpContext context, bool test)
@@ -206,14 +210,14 @@ async Task<IResult> Submit(HttpContext context, bool test)
         if (headerId.Length > 0 && (!Guid.TryParseExact(headerId, "D", out var parsedHeader) || parsedHeader != parsedId))
             return Results.BadRequest(new { error = "jobId and X-Request-Id must agree." });
         id = parsedId.ToString("D");
-        ticket = test ? Ticket.Example(config.Station) : new Ticket(request.Lines!);
+        ticket = test ? Ticket.Example(route.Type) : new Ticket(request.Lines!);
         ticket.Validate();
     }
     catch (Exception ex) when (ex is JsonException or ArgumentException or BadHttpRequestException)
     { return Results.BadRequest(new { error = "Invalid ticket JSON or line limits." }); }
     // Test requests have a stable identity even when a repeat arrives in a later minute.
     var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-        test ? "test-ticket-v2:" + config.Station : JsonSerializer.Serialize(ticket))));
+        test ? "test-ticket-v2:" + route.Type : JsonSerializer.Serialize(ticket))));
     if (!await gate.WaitAsync(0)) return Results.StatusCode(429);
     try
     {
@@ -222,9 +226,9 @@ async Task<IResult> Submit(HttpContext context, bool test)
         // Fail closed when full: never evict a duplicate-prevention record during this process lifetime.
         if (records.Count >= 1000) return Results.Problem("POC request ledger full. Reconcile output before restarting.", statusCode: 503);
         records[id] = new(id, fingerprint, new("ACCEPTED", "Validated in memory only; not submitted yet."));
-        app.Logger.LogInformation("Request {RequestId} ACCEPTED for {Station}", id, config.Station);
+        app.Logger.LogInformation("Request {RequestId} ACCEPTED for {Station}", id, route.Type);
         // Serial submission; client disconnect must not cancel or trigger another submission.
-        var outcome = await Task.Run(() => WindowsPrinter.Print(config, ticket, id));
+        var outcome = await Task.Run(() => WindowsPrinter.Print(route, ticket, id));
         var result = new JobRecord(id, fingerprint, outcome);
         records[id] = result;
         app.Logger.LogInformation("Request {RequestId} {Status}: {Error}", id, outcome.Status, outcome.Error);
@@ -234,7 +238,7 @@ async Task<IResult> Submit(HttpContext context, bool test)
 }
 app.MapPost("/test-print", (Func<HttpContext, Task<IResult>>)(context => Submit(context, true)));
 app.MapPost("/print", (Func<HttpContext, Task<IResult>>)(context => Submit(context, false)));
-app.Logger.LogInformation("TableCore POC: {Station}, {Printer}, {Width} mm; loopback port 17831", config.Station, config.PrinterName, config.PaperWidthMm);
+app.Logger.LogInformation("TableCore POC: {Station}, {Printer}, {Width} mm; loopback port 17831", route.Type, route.PrinterName, route.PaperWidthMm);
 await app.RunAsync();
 
 public sealed record PrintRequest(string? JobId, TicketLine[]? Lines);

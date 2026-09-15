@@ -28,11 +28,15 @@ import {
   workstationHeartbeatSchema,
   agentTestPrintResultSchema,
   updateWorkstationSchema,
+  upsertPrintRouteSchema,
+  printRouteTypeSchema,
   type CreateWorkstationPairingInput,
   type ConsumeWorkstationPairingInput,
   type WorkstationHeartbeatInput,
   type AgentTestPrintResultInput,
   type UpdateWorkstationInput,
+  type UpsertPrintRouteInput,
+  type PrintRouteType,
 } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
 import { lockPrintLocation } from "../printing/print-policy";
@@ -65,6 +69,21 @@ const WORKSTATION_PUBLIC_SELECT = {
   configuredPrinterName: true,
   printerAvailable: true,
   paperWidthMm: true,
+  // Printing V2 — pun spisak Windows štampača te mašine (za Admin dropdown)
+  // i po-ruti podešavanja (rute štampe, ne više jedna stanica po računaru).
+  availablePrinters: true,
+  printersReportedAt: true,
+  printRoutes: {
+    select: {
+      id: true,
+      type: true,
+      printerName: true,
+      paperWidthMm: true,
+      printerAvailable: true,
+      isEnabled: true,
+      updatedAt: true,
+    },
+  },
   agentVersion: true,
   osDescription: true,
   isEnabled: true,
@@ -72,6 +91,7 @@ const WORKSTATION_PUBLIC_SELECT = {
   lastSuccessfulCommunicationAt: true,
   lastPrintAt: true,
   testPrintRequestedAt: true,
+  testPrintRouteType: true,
   testPrintStatus: true,
   testPrintCompletedAt: true,
   testPrintError: true,
@@ -105,7 +125,10 @@ export interface CreatedPairing {
   pairingId: string;
   code: string;
   expiresAt: Date;
-  station: "KITCHEN" | "BAR";
+  // Printing V2 — null je NORMALAN, očekivan slučaj (novi Admin tok
+  // uparivanja ne bira stanicu unapred); vidi napomenu na
+  // createWorkstationPairingSchema.
+  station: "KITCHEN" | "BAR" | null;
   locationId: string;
   name: string | null;
 }
@@ -277,18 +300,123 @@ export async function updateWorkstation(ctx: AuthContext, workstationId: string,
   return updated;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Printing V2 — ADMIN, rute štampe (KITCHEN/BAR/RECEIPT po računaru)
+// ─────────────────────────────────────────────────────────────────────────
+
+const PRINT_ROUTE_SELECT = {
+  id: true,
+  workstationId: true,
+  type: true,
+  printerName: true,
+  paperWidthMm: true,
+  printerAvailable: true,
+  isEnabled: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+async function loadOwnedWorkstation(ctx: AuthContext, workstationId: string) {
+  const workstation = await prisma.workstation.findFirst({
+    where: { id: workstationId, ...scopeToRestaurant(ctx) },
+    select: { id: true, restaurantId: true, locationId: true, revokedAt: true },
+  });
+  if (!workstation) throw new Error("Radna stanica nije pronađena");
+  return workstation;
+}
+
+export async function listPrintRoutes(ctx: AuthContext, workstationId: string) {
+  requirePermission(ctx, WORKSTATIONS_MANAGE);
+  await loadOwnedWorkstation(ctx, workstationId);
+  return prisma.workstationPrintRoute.findMany({
+    where: { workstationId },
+    select: PRINT_ROUTE_SELECT,
+    orderBy: { type: "asc" },
+  });
+}
+
+/**
+ * Kreira ILI menja TAČNO JEDNU rutu štampe (KITCHEN/BAR/RECEIPT) na već
+ * uparenom računaru — nikad ne zahteva novo uparivanje. Isti fizički
+ * štampač sme da se ponovi u više ruta istog računara (nema unique po
+ * printerName) — jedino ograničenje je jedna ruta po (workstationId, type),
+ * primenjeno preko upsert-a. `requireLocationAccess` preko lokacije SAME
+ * radne stanice (ne iz tela zahteva) — Admin ne može da tvrdi lokaciju za
+ * tuđi računar.
+ */
+export async function upsertPrintRoute(
+  ctx: AuthContext,
+  workstationId: string,
+  type: PrintRouteType,
+  input: UpsertPrintRouteInput
+) {
+  requirePermission(ctx, WORKSTATIONS_MANAGE);
+  const routeType = printRouteTypeSchema.parse(type);
+  const data = upsertPrintRouteSchema.parse(input);
+  const workstation = await loadOwnedWorkstation(ctx, workstationId);
+  requireLocationAccess(ctx, workstation.locationId);
+  if (workstation.revokedAt) throw new Error("Radna stanica je opozvana — potrebno je novo uparivanje");
+
+  const previous = await prisma.workstationPrintRoute.findUnique({
+    where: { workstationId_type: { workstationId, type: routeType } },
+    select: PRINT_ROUTE_SELECT,
+  });
+
+  const route = await prisma.workstationPrintRoute.upsert({
+    where: { workstationId_type: { workstationId, type: routeType } },
+    create: {
+      restaurantId: workstation.restaurantId,
+      locationId: workstation.locationId,
+      workstationId,
+      type: routeType,
+      printerName: data.printerName ?? null,
+      paperWidthMm: data.paperWidthMm ?? null,
+      isEnabled: data.isEnabled ?? true,
+    },
+    update: {
+      ...(data.printerName !== undefined ? { printerName: data.printerName, printerAvailable: null } : {}),
+      ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
+      ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
+    },
+    select: PRINT_ROUTE_SELECT,
+  });
+
+  await recordAuditEntry(ctx, {
+    entityType: "WorkstationPrintRoute",
+    entityId: route.id,
+    action: "workstation.route_updated",
+    previousValue: previous
+      ? { printerName: previous.printerName, paperWidthMm: previous.paperWidthMm, isEnabled: previous.isEnabled }
+      : null,
+    newValue: { workstationId, type: routeType, printerName: route.printerName, paperWidthMm: route.paperWidthMm, isEnabled: route.isEnabled },
+    locationId: workstation.locationId,
+  });
+
+  return route;
+}
+
 /**
  * Faza 2C — Admin "Test Print" dugme. Namerno NE kreira PrintJob/Order
  * (test štampa ne sme dotaći accounting/izveštaje) — samo postavlja
- * zastavicu na Workstation red koju agent vidi kroz SLEDEĆI heartbeat
- * (recordHeartbeat ispod vraća testPrintRequested) i lokalno štampa preko
- * WindowsPrinter.Print, van AgentRunner/AgentDatabase puta za prave tikete.
- * Idempotentno na uzastopne klikove dok je prethodni zahtev još PENDING —
- * jednostavno ponovo postavlja isto stanje (agent štampa najviše jednom po
- * heartbeat ciklusu u kom primeti zastavicu, ne akumulira duple zahteve).
+ * zastavicu na Workstation red koju agent vidi kroz SLEDEĆI heartbeat/poll
+ * (recordHeartbeat/isTestPrintPending ispod vraćaju testPrintRequested +
+ * testPrintRoute) i lokalno štampa preko WindowsPrinter.Print, van
+ * AgentRunner/AgentDatabase puta za prave tikete. Idempotentno na uzastopne
+ * klikove dok je prethodni zahtev još PENDING — jednostavno ponovo
+ * postavlja isto stanje (agent štampa najviše jednom po heartbeat/poll
+ * ciklusu u kom primeti zastavicu, ne akumulira duple zahteve).
+ *
+ * Printing V2 — mora se navesti KOJU rutu (KITCHEN/BAR/RECEIPT) testirati,
+ * jer jedan agent sad može imati više različitih štampača; agent lokalno
+ * bira odgovarajući štampač/širinu iz SVOJE Routes liste po ovom tipu
+ * (server ovde ne šalje printerName — samo tip, isti princip kao pravi
+ * poslovi: agent je jedini koji sme fizički da bira štampač). Ruta mora već
+ * biti podešena (imati printerName) — testiranje neupisane rute nema šta
+ * da testira.
  */
-export async function requestTestPrint(ctx: AuthContext, workstationId: string) {
+export async function requestTestPrint(ctx: AuthContext, workstationId: string, routeType: PrintRouteType) {
   requirePermission(ctx, WORKSTATIONS_MANAGE);
+  const type = printRouteTypeSchema.parse(routeType);
 
   const workstation = await prisma.workstation.findFirst({
     where: { id: workstationId, ...scopeToRestaurant(ctx) },
@@ -298,6 +426,13 @@ export async function requestTestPrint(ctx: AuthContext, workstationId: string) 
   if (workstation.revokedAt || !workstation.isEnabled) {
     throw new Error("Radna stanica je opozvana ili onemogućena — test štampa nije moguća");
   }
+  const route = await prisma.workstationPrintRoute.findUnique({
+    where: { workstationId_type: { workstationId, type } },
+    select: { printerName: true },
+  });
+  if (!route?.printerName) {
+    throw new Error("Ova ruta nema izabran štampač — podesi štampač pre testa");
+  }
 
   const now = new Date();
   const updated = await prisma.workstation.update({
@@ -305,6 +440,7 @@ export async function requestTestPrint(ctx: AuthContext, workstationId: string) 
     data: {
       testPrintRequestedAt: now,
       testPrintRequestedBy: ctx.employeeId,
+      testPrintRouteType: type,
       testPrintStatus: "PENDING",
       testPrintCompletedAt: null,
       testPrintError: null,
@@ -355,10 +491,13 @@ export function getAgentDownloadInfo(ctx: AuthContext) {
   return {
     available: Boolean(url),
     url,
-    // Interna pilot oznaka — MORA se poklapati sa AgentVersion.Current u
-    // apps/print-agent/AgentRunner.cs i MyAppVersion u installer/
-    // TableCorePrintAgent.iss. NE javno stabilno izdanje.
-    version: "1.0.0-pilot.1",
+    // Interna pilot oznaka — MORA se poklapati sa verzijom OBJAVLJENOG
+    // GitHub Release instalera koji ovaj URL stvarno servira (ne nužno sa
+    // najnovijim AgentVersion.Current u kodu — vidi Printing V2 napomenu:
+    // pilot.3 je izgrađen lokalno za fizički QA i namerno NIJE objavljen
+    // ovde dok fizički test ne prođe). Ažuriraj TEK kad se GitHub Release
+    // asset stvarno zameni.
+    version: "1.0.0-pilot.2",
     supportedOS: "Windows 10 64-bit, Windows 11 64-bit (Windows 11 physical hardware acceptance pending)",
   };
 }
@@ -374,7 +513,10 @@ export interface RegisteredWorkstation {
   credential: string;
   restaurantId: string;
   locationId: string;
-  station: "KITCHEN" | "BAR";
+  // Printing V2 — DEPRECATED, null for every new pairing created without
+  // the legacy optional `station` shortcut. Never used to decide print
+  // eligibility in new code; see WorkstationPrintRoute.
+  station: "KITCHEN" | "BAR" | null;
   name: string;
 }
 
@@ -419,7 +561,7 @@ export async function registerAgentFromPairing(input: ConsumeWorkstationPairingI
         restaurantId: pairing.restaurantId,
         locationId: pairing.locationId,
         station: pairing.station,
-        name: pairing.name?.trim() || `Radna stanica — ${pairing.station}`,
+        name: pairing.name?.trim() || (pairing.station ? `Radna stanica — ${pairing.station}` : "Novi računar"),
         credentialHash,
         credentialVersion: WORKSTATION_CREDENTIAL_VERSION,
         agentVersion: parsed.agentVersion,
@@ -427,6 +569,25 @@ export async function registerAgentFromPairing(input: ConsumeWorkstationPairingI
         pairedAt: now,
       },
     });
+
+    // Printing V2 backward-compat shortcut — a pairing created with the
+    // (now optional/deprecated) `station` field pre-provisions ONE matching
+    // WorkstationPrintRoute immediately, unconfigured (no printer yet), so
+    // callers that still pair with a station keep working against the new
+    // route-based dispatch/status/claim logic with no other change needed.
+    // The normal Admin flow omits `station` entirely and configures routes
+    // afterward via upsertPrintRoute.
+    if (pairing.station) {
+      await tx.workstationPrintRoute.create({
+        data: {
+          restaurantId: pairing.restaurantId,
+          locationId: pairing.locationId,
+          workstationId: workstation.id,
+          type: pairing.station,
+          isEnabled: true,
+        },
+      });
+    }
 
     await tx.workstationPairing.update({ where: { id: pairing.id }, data: { workstationId: workstation.id } });
 
@@ -463,6 +624,11 @@ export interface HeartbeatResult {
   // postojeći poll, bez novog endpoint-a) i, ako je true, lokalno štampa
   // testni tiket pa prijavljuje ishod preko recordTestPrintResult iznad.
   testPrintRequested: boolean;
+  // Printing V2 — koju rutu da agent testira (bira odgovarajući štampač iz
+  // SVOJE lokalne Routes liste po ovom tipu); null kad testPrintRequested
+  // je false, ili (odbrambeno) ako je testPrintStatus PENDING bez ikad
+  // postavljenog tipa (stariji red pre ove izmene).
+  testPrintRoute: PrintRouteType | null;
 }
 
 /**
@@ -478,9 +644,15 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
   const capabilityData: Prisma.WorkstationUpdateInput = {};
   if (parsed.agentVersion !== undefined) capabilityData.agentVersion = parsed.agentVersion;
   if (parsed.osDescription !== undefined) capabilityData.osDescription = parsed.osDescription;
+  // DEPRECATED single-printer fields — kept for older agent builds only.
   if (parsed.configuredPrinterName !== undefined) capabilityData.configuredPrinterName = parsed.configuredPrinterName;
   if (parsed.paperWidthMm !== undefined) capabilityData.paperWidthMm = parsed.paperWidthMm;
   if (parsed.printerAvailable !== undefined) capabilityData.printerAvailable = parsed.printerAvailable;
+  // Printing V2 — pun spisak štampača te mašine (Admin dropdown izvor).
+  if (parsed.availablePrinters !== undefined) {
+    capabilityData.availablePrinters = parsed.availablePrinters;
+    capabilityData.printersReportedAt = now;
+  }
 
   if (Object.keys(capabilityData).length > 0) {
     await prisma.workstation.updateMany({
@@ -497,11 +669,28 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
     });
   }
 
+  // Printing V2 — per-route printer availability (a single Workstation-level
+  // boolean no longer suffices once one Agent can have several printers).
+  // Best-effort, one small update per reported route; never blocks the
+  // heartbeat's own success on a route that doesn't exist (e.g. Admin
+  // removed it between polls).
+  if (parsed.routes?.length) {
+    for (const route of parsed.routes) {
+      await prisma.workstationPrintRoute
+        .updateMany({
+          where: { workstationId: wsCtx.workstationId, type: route.type },
+          data: { printerAvailable: route.printerAvailable },
+        })
+        .catch(() => {});
+    }
+  }
+
   const current = await prisma.workstation.findUnique({
     where: { id: wsCtx.workstationId },
-    select: { testPrintStatus: true },
+    select: { testPrintStatus: true, testPrintRouteType: true },
   });
-  return { testPrintRequested: current?.testPrintStatus === "PENDING" };
+  const pending = current?.testPrintStatus === "PENDING";
+  return { testPrintRequested: pending, testPrintRoute: pending ? (current?.testPrintRouteType ?? null) : null };
 }
 
 /**
@@ -515,10 +704,36 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
  * pretpostavljaju nepromenjenim. Pozivalac (poll rute) kombinuje oba
  * rezultata u jedan JSON odgovor.
  */
-export async function isTestPrintPending(wsCtx: WorkstationAuthContext): Promise<boolean> {
+export async function isTestPrintPending(wsCtx: WorkstationAuthContext): Promise<{ pending: boolean; route: PrintRouteType | null }> {
   const current = await prisma.workstation.findUnique({
     where: { id: wsCtx.workstationId },
-    select: { testPrintStatus: true },
+    select: { testPrintStatus: true, testPrintRouteType: true },
   });
-  return current?.testPrintStatus === "PENDING";
+  const pending = current?.testPrintStatus === "PENDING";
+  return { pending, route: pending ? (current?.testPrintRouteType ?? null) : null };
+}
+
+export interface AgentRoute {
+  type: PrintRouteType;
+  printerName: string;
+  paperWidthMm: number;
+}
+
+/**
+ * Printing V2 — server-authoritative rute za OVU autentifikovanu radnu
+ * stanicu, piggyback-ovano na postojeći poll/heartbeat ciklus (bez novog
+ * endpoint-a). Vraća SAMO potpuno podešene, omogućene rute (printerName I
+ * paperWidthMm obavezno postavljeni) — agent lokalno čuva TAČNO ovaj spisak
+ * (agent.config.json), nikad polu-podešenu rutu bez štampača (Setup više ne
+ * bira rute, samo ih prikazuje/testira). Kad Admin promeni/ukloni/onemogući
+ * rutu, sledeći poll/heartbeat automatski nosi novo stanje — nema potrebe
+ * za novim uparivanjem niti ručnim restartom agenta.
+ */
+export async function getAgentRoutes(wsCtx: WorkstationAuthContext): Promise<AgentRoute[]> {
+  const routes = await prisma.workstationPrintRoute.findMany({
+    where: { workstationId: wsCtx.workstationId, isEnabled: true, printerName: { not: null }, paperWidthMm: { not: null } },
+    select: { type: true, printerName: true, paperWidthMm: true },
+    orderBy: { type: "asc" },
+  });
+  return routes.map((r) => ({ type: r.type as PrintRouteType, printerName: r.printerName!, paperWidthMm: r.paperWidthMm! }));
 }

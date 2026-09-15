@@ -17,9 +17,10 @@ import { withWorkstationAuth } from "../../../../lib/api-helpers";
  * dodatan, brži put do ISTOG servera-strane stanja, ne zamena.
  */
 export const POST = withWorkstationAuth(async (wsCtx) => {
-  const [job, testPrintRequested] = await Promise.all([
+  const [job, testPrint, routes] = await Promise.all([
     agentPrinting.pollAndClaim(wsCtx),
     workstations.isTestPrintPending(wsCtx),
+    workstations.getAgentRoutes(wsCtx),
   ]);
-  return NextResponse.json({ job, testPrintRequested });
+  return NextResponse.json({ job, testPrintRequested: testPrint.pending, testPrintRoute: testPrint.route, routes });
 });

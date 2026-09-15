@@ -12,6 +12,6 @@ import { withWorkstationAuth } from "../../../../lib/api-helpers";
 export const POST = withWorkstationAuth(async (wsCtx, request) => {
   const body = await request.json().catch(() => ({}));
   const input = workstationHeartbeatSchema.parse(body);
-  const result = await workstations.recordHeartbeat(wsCtx, input);
-  return NextResponse.json({ ok: true, testPrintRequested: result.testPrintRequested });
+  const [result, routes] = await Promise.all([workstations.recordHeartbeat(wsCtx, input), workstations.getAgentRoutes(wsCtx)]);
+  return NextResponse.json({ ok: true, testPrintRequested: result.testPrintRequested, testPrintRoute: result.testPrintRoute, routes });
 });
