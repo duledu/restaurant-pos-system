@@ -606,3 +606,92 @@ describe("stationPrinterStatus — one authoritative discriminated readiness sta
     expect(status.state).toBe("NOT_CONFIGURED");
   });
 });
+
+describe("hasRecentPrintFailure — 'Poslednja stampa nije uspela' reflects CURRENT operational health, not lifetime PrintJob history (PREPROD physical QA follow-up)", () => {
+  it("an unresolved recent failure (this shift, nothing since) produces a warning", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: kitchenJob.id }, data: { status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" } });
+
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(true);
+  });
+
+  it("a later successful print for the same station clears the warning (a success always supersedes an earlier failure in the same shift)", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+
+    const failedOrder = await submitMixedOrder(fixture, waiter);
+    const failedJobs = await printing.listPrintJobs(waiter, failedOrder.id);
+    const failedKitchenJob = failedJobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: failedKitchenJob.id }, data: { status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION", createdAt: new Date(Date.now() - 60_000) } });
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(true);
+
+    // Printer recovers — a later order's KITCHEN ticket prints successfully.
+    const recoveredOrder = await submitMixedOrder(fixture, waiter);
+    const recoveredJobs = await printing.listPrintJobs(waiter, recoveredOrder.id);
+    const recoveredKitchenJob = recoveredJobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: recoveredKitchenJob.id }, data: { status: "PRINTED", printedAt: new Date() } });
+
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(false);
+  });
+
+  it("a failure from a PREVIOUS (now-closed) shift does not create a permanent warning in the new shift — no F5-proof stale banner across shift boundaries", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: kitchenJob.id }, data: { status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" } });
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(true);
+
+    // Shift ends (this failure is now history, not current health) and a
+    // brand-new shift opens — PrintJob history is untouched (still FAILED,
+    // still visible in Admin/audit), only which shift counts as "current" changes.
+    await prisma.shift.updateMany({ where: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, status: "OPEN" }, data: { status: "CLOSED", closedBy: "manager-1", closedAt: new Date() } });
+    await prisma.shift.create({ data: { restaurantId: fixture.restaurantId, locationId: fixture.locationId, openedBy: "manager-1" } });
+
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(false);
+    // History itself is untouched — the old FAILED row still exists exactly as before.
+    const historicalRow = await prisma.printJob.findUniqueOrThrow({ where: { id: kitchenJob.id } });
+    expect(historicalRow.status).toBe("FAILED");
+  });
+
+  it("a current SUBMISSION_UNKNOWN (Agent/printer failure) still produces a warning — the fix must not hide genuine current failures", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    await pairActiveWorkstation(fixture, "KITCHEN", owner);
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: kitchenJob.id }, data: { status: "SUBMISSION_UNKNOWN", failureReason: "Potvrda stampe nedostaje." } });
+
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(true);
+  });
+
+  it("a station that has not printed anything yet this shift reports no failure (never warns from silence/no activity)", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(false);
+  });
+
+  it("does not cross-contaminate between stations — a KITCHEN failure never sets the BAR warning", async () => {
+    const fixture = await createFixture();
+    const manager = context(fixture, ["MANAGER"], "manager-1");
+    const waiter = context(fixture, ["WAITER"], "waiter-1");
+    const submitted = await submitMixedOrder(fixture, waiter);
+    const jobs = await printing.listPrintJobs(waiter, submitted.id);
+    const kitchenJob = jobs.find((j) => j.type === "KITCHEN")!;
+    await prisma.printJob.update({ where: { id: kitchenJob.id }, data: { status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" } });
+
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "KITCHEN")).toBe(true);
+    expect(await printing.hasRecentPrintFailure(manager, fixture.locationId, "BAR")).toBe(false);
+  });
+});

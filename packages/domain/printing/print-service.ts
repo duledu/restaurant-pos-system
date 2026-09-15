@@ -581,6 +581,50 @@ export async function listPendingStationPrintJobs(ctx: AuthContext, locationId: 
   return { jobs, autoPrintEligible: policy.isEnabled && policy.autoPrint };
 }
 
+/**
+ * PREPROD physical QA follow-up — "Poslednja štampa nije uspela" bio je
+ * ranije izveden (u kitchen/bar print-jobs rutama) iz `result.jobs.some(...)`
+ * iznad — ISTE neograničene liste (bez starosne granice, bez provere da li
+ * je porudžbina i dalje relevantna). Jednom neuspeo PrintJob je ostajao
+ * FAILED zauvek (ovaj red se nikad ne menja osim eksplicitnim "Pokušaj
+ * ponovo"), pa je crveno upozorenje moglo da traje danima posle stvarnog
+ * oporavka štampača/agenta, čak i sa nula aktivnih porudžbina — potpuno
+ * suprotno onome što bedž treba da predstavlja (TRENUTNO operativno
+ * zdravlje, ne doživotna istorija štampe). Nijedan PrintJob red se ovde ne
+ * briše/prepisuje — Admin/audit istorija ostaje netaknuta, ovo menja SAMO
+ * šta ulazi u KDS upozorenje.
+ *
+ * Novo pravilo: bedž prati ISHOD POSLEDNJEG završenog (PRINTED/FAILED/
+ * SUBMISSION_UNKNOWN) pokušaja štampe ZA OVU STANICU, ali SAMO unutar
+ * TEKUĆE OTVORENE SMENE (isti obrazac kao listCompletedStationOrders —
+ * "Gotove" je već svesno smenski-obuhvaćena). Kasniji uspeh UVEK poništava
+ * raniji neuspeh (ista smena); nova smena UVEK počinje čisto (nijedan
+ * neuspeh iz prethodne smene se ne prenosi) — bez proizvoljnog vremenskog
+ * praga, koristeći VEĆ postojeći Shift domenski koncept.
+ */
+export async function hasRecentPrintFailure(ctx: AuthContext, locationId: string, station: "KITCHEN" | "BAR"): Promise<boolean> {
+  requirePermission(ctx, PRODUCTION_MANAGE);
+  requireLocationAccess(ctx, locationId);
+  assertStationAccess(ctx, station);
+
+  const activeShift = await prisma.shift.findFirst({
+    where: { ...scopeToRestaurant(ctx), locationId, status: "OPEN" },
+    select: { id: true },
+  });
+  if (!activeShift) return false;
+
+  const latestTerminal = await prisma.printJob.findFirst({
+    where: {
+      ...scopeToRestaurant(ctx), locationId, station,
+      status: { in: ["PRINTED", "FAILED", "SUBMISSION_UNKNOWN"] },
+      order: { shiftId: activeShift.id },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { status: true },
+  });
+  return latestTerminal !== null && latestTerminal.status !== "PRINTED";
+}
+
 /** Explicit station print/reprint. Auto-order policy is intentionally not consulted. */
 export async function requestStationPrint(ctx: AuthContext, orderId: string, station: Station, idempotencyKey: string, originalJobId?: string) {
   requirePrintAccess(ctx);

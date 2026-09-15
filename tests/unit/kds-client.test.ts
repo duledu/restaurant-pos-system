@@ -72,7 +72,7 @@ afterEach(async () => {
 
 async function mount() {
   await act(async () => {
-    root.render(React.createElement(KdsClient, { station: "KITCHEN", title: "Kuhinja" }));
+    root.render(React.createElement(KdsClient, { station: "KITCHEN", title: "Kuhinja", environmentLabel: "TEST" }));
   });
 }
 /** Drains every pending microtask hop (fire-and-forget advance()->load()
@@ -279,5 +279,31 @@ describe("KdsClient — Aktivne/Gotove", () => {
     // the order must disappear from Aktivne right away (optimistic),
     // matching the server-side PENDING_PRODUCTION_STATUSES filter.
     expect(host.textContent).not.toContain("Sto 5");
+  });
+});
+
+describe("KdsClient — 'Poslednja stampa nije uspela' recovers on its own, without a manual page refresh", () => {
+  it("clears the warning on the next background poll once the server reports the printer is healthy again — no click, no reload", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let hasRecentFailure = true;
+    custom = (url) => {
+      if (url === "/api/production/kitchen/print-jobs?locationId=l1") {
+        return response({ jobs: [], autoPrintEligible: false, agentActiveForStation: true, printerStatus: { hasWorkstation: true, isOnline: true, state: "READY" }, hasRecentFailure });
+      }
+      return undefined;
+    };
+    await mount();
+    expect(host.textContent).toContain("Poslednja štampa nije uspela");
+
+    // Nothing in the DOM triggers this — it's purely server-side recovery
+    // (hasRecentPrintFailure now sees a later success) surfacing on the
+    // KDS screen's own unchanged 4s background poll.
+    hasRecentFailure = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    expect(host.textContent).not.toContain("Poslednja štampa nije uspela");
+    expect(host.textContent).toContain("Štampač spreman");
   });
 });

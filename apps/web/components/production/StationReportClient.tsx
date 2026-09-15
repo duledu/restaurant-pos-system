@@ -80,7 +80,7 @@ function formatMinutes(minutes: number | null): string {
  * PRIHVATI/SPREMNO atribucijom, plus A4 štampu (print-report.css — potpuno
  * odvojena od 58/80mm termalne arhitekture, vidi print-thermal.css).
  */
-export function StationReportClient({ station, title }: { station: "KITCHEN" | "BAR"; title: string }) {
+export function StationReportClient({ station, title, environmentLabel }: { station: "KITCHEN" | "BAR"; title: string; environmentLabel: string }) {
   const [locationId, setLocationId] = useState<string | null>(null);
   const [preset, setPreset] = useState<Preset>("today");
   const [customFrom, setCustomFrom] = useState("");
@@ -133,7 +133,7 @@ export function StationReportClient({ station, title }: { station: "KITCHEN" | "
         <div className="flex items-center gap-3">
           <AppLogo variant="mark" theme="dark" size="sm" />
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[.2em] text-cream-300/70">TableCore · produkcija</p>
+            <p className="text-[10px] font-bold uppercase tracking-[.2em] text-cream-300/70">TableCore · {environmentLabel}</p>
             <h1 className="text-2xl font-bold tracking-tight text-cream-100">{title}</h1>
           </div>
         </div>

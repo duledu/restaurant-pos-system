@@ -135,7 +135,7 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("sr-RS", { hour: "2-digit", minute: "2-digit" });
 }
 
-export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; title: string }) {
+export function KdsClient({ station, title, environmentLabel }: { station: "KITCHEN" | "BAR"; title: string; environmentLabel: string }) {
   const [locationId, setLocationId] = useState<string | null>(null);
   const [tab, setTab] = useState<"active" | "completed">("active");
   const [orders, setOrders] = useState<StationOrder[]>([]);
@@ -541,7 +541,7 @@ export function KdsClient({ station, title }: { station: "KITCHEN" | "BAR"; titl
         <div className="flex min-w-0 items-center gap-2.5">
           <AppLogo variant="mark" theme="dark" size="sm" />
           <div className="min-w-0">
-            <p className={`truncate text-[10px] font-bold uppercase tracking-[.2em] ${accentClass}`}>TableCore · produkcija</p>
+            <p className={`truncate text-[10px] font-bold uppercase tracking-[.2em] ${accentClass}`}>TableCore · {environmentLabel}</p>
             <h1 className="truncate text-xl font-bold tracking-tight text-cream-100 sm:text-2xl">{title}</h1>
           </div>
         </div>

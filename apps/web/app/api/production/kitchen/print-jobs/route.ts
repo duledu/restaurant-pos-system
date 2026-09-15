@@ -9,13 +9,17 @@ export const GET = withApiAuth(async (ctx, request) => {
   // printerStatus je JEDINI server-autoritativan izvor za KDS prikaz
   // spremnosti štampača (nikad QZ/browser localStorage) — agentActiveForStation
   // se izvodi iz istog rezultata (isOnline), ne posebnim upitom.
-  const [result, printerStatus] = await Promise.all([
+  //
+  // PREPROD physical QA follow-up — hasRecentFailure VIŠE NIJE izveden iz
+  // result.jobs (ta lista nema starosnu/smensku granicu — vidi
+  // hasRecentPrintFailure u print-service.ts za pun razlog i staro
+  // ponašanje). Poseban, ciljan upit umesto "besplatnog" izvođenja iz već
+  // dobijenih podataka je NAMERNA cena — stara jeftina putanja je bila
+  // upravo pogrešna semantika koju ovo ispravlja.
+  const [result, printerStatus, hasRecentFailure] = await Promise.all([
     printing.listPendingStationPrintJobs(ctx, locationId, "KITCHEN"),
     agentPrinting.stationPrinterStatus(ctx.restaurantId, locationId, "KITCHEN"),
+    printing.hasRecentPrintFailure(ctx, locationId, "KITCHEN"),
   ]);
-  // Part 13 hardening — "poslednja štampa nije uspela" je po-poslu signal
-  // (već dobijen u result.jobs), sklopljen ovde bez dodatnog upita, nikad
-  // duplirajući stationPrinterStatus-ovu sopstvenu, stanicu-nivoa definiciju.
-  const hasRecentFailure = result.jobs.some((j) => j.status === "FAILED" || j.status === "SUBMISSION_UNKNOWN");
   return NextResponse.json({ ...result, agentActiveForStation: printerStatus.isOnline, printerStatus, hasRecentFailure });
 });
