@@ -43,6 +43,15 @@ beforeEach(() => {
   clearClientCache();
   vi.stubGlobal("React", React);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  // requestAnimationFrame's real ~16ms-per-frame timing has no place in a
+  // unit test — resolving it via a microtask keeps the double-rAF paint
+  // proof (see kds-perf.ts) fast and deterministic without changing what
+  // it proves (still two genuinely separate scheduler turns, just not
+  // real wall-clock frames).
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+    queueMicrotask(() => cb(performance.now()));
+    return 0;
+  });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -52,7 +61,7 @@ beforeEach(() => {
     const result = custom(url, options);
     if (result) return result;
     const path = url.split("?")[0];
-    if (path === "/api/pos/me") return response({ restaurantId: "r1", employeeId: "e1", locationIds: ["l1"] });
+    if (path === "/api/pos/me") return response({ restaurantId: "r1", employeeId: "e1", firstName: "Marko", lastName: "Petrović", roles: ["KITCHEN"], locationIds: ["l1"] });
     if (path === "/api/production/kitchen") return response({ orders: [order()] });
     if (path === "/api/production/kitchen/completed") return response({ orders: [] });
     if (path === "/api/production/kitchen/print-jobs") return response(emptyPrintJobs);
@@ -305,5 +314,98 @@ describe("KdsClient — 'Poslednja stampa nije uspela' recovers on its own, with
 
     expect(host.textContent).not.toContain("Poslednja štampa nije uspela");
     expect(host.textContent).toContain("Štampač spreman");
+  });
+});
+
+describe("KdsClient — background polling cannot overlap itself", () => {
+  it("skips an interval tick while the previous poll is still in flight, instead of piling up concurrent requests", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let activeCalls = 0;
+    const slowPoll = deferred<Response>();
+    custom = (url) => {
+      if (url === "/api/production/kitchen?locationId=l1") {
+        activeCalls += 1;
+        return activeCalls === 1 ? slowPoll.promise : response({ orders: [order()] });
+      }
+      return undefined;
+    };
+    await mount();
+    expect(activeCalls).toBe(1); // the initial mount load, still pending
+
+    // The interval fires while that first load is still unresolved — the
+    // loadInFlightRef guard must skip this tick entirely, not issue a
+    // second overlapping request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(activeCalls).toBe(1);
+
+    await act(async () => {
+      slowPoll.resolve(response({ orders: [order()] }));
+    });
+    await flush();
+
+    // Now that the first load has completed, the NEXT tick is free to run.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(activeCalls).toBe(2);
+  });
+});
+
+describe("KdsClient — logged-in employee identity (Part I/J)", () => {
+  it("renders the authenticated employee's display name", async () => {
+    custom = (url) =>
+      url === "/api/pos/me" ? response({ restaurantId: "r1", employeeId: "e1", firstName: "Ana", lastName: "Anić", roles: ["KITCHEN"], locationIds: ["l1"] }) : undefined;
+    await mount();
+    expect(host.textContent).toContain("Ana Anić");
+  });
+
+  it("renders the role/station context alongside the name", async () => {
+    custom = (url) =>
+      url === "/api/pos/me" ? response({ restaurantId: "r1", employeeId: "e1", firstName: "Marko", lastName: "Petrović", roles: ["KITCHEN"], locationIds: ["l1"] }) : undefined;
+    await mount();
+    expect(host.textContent).toContain("KUHINJA");
+  });
+
+  it("a manager's OWNER/ADMIN/MANAGER role displays as a single, non-technical MENADŽER label", async () => {
+    custom = (url) =>
+      url === "/api/pos/me" ? response({ restaurantId: "r1", employeeId: "e1", firstName: "Iva", lastName: "Ivić", roles: ["MANAGER"], locationIds: ["l1"] }) : undefined;
+    await mount();
+    expect(host.textContent).toContain("Iva Ivić");
+    expect(host.textContent).toContain("MENADŽER");
+  });
+
+  it("reflects whichever employee the current authenticated session belongs to — a different session shows a different name", async () => {
+    custom = (url) =>
+      url === "/api/pos/me" ? response({ restaurantId: "r1", employeeId: "e2", firstName: "Petar", lastName: "Perić", roles: ["BAR"], locationIds: ["l1"] }) : undefined;
+    await mount();
+    expect(host.textContent).toContain("Petar Perić");
+    expect(host.textContent).not.toContain("Marko");
+  });
+
+  it("never renders sensitive session fields (employee id, PIN, tokens, email) even though they exist elsewhere in the session payload", async () => {
+    custom = (url) =>
+      url === "/api/pos/me"
+        ? response({
+            restaurantId: "r1",
+            employeeId: "e1-super-secret-id",
+            firstName: "Marko",
+            lastName: "Petrović",
+            roles: ["KITCHEN"],
+            locationIds: ["l1"],
+            // Fields a real /api/pos/me response does not currently send —
+            // asserted absent regardless, so this stays a real regression
+            // guard even if the route ever changes.
+            email: "marko@example.com",
+            pin: "1234",
+            token: "should-never-render",
+          })
+        : undefined;
+    await mount();
+    expect(host.textContent).not.toContain("e1-super-secret-id");
+    expect(host.textContent).not.toContain("marko@example.com");
+    expect(host.textContent).not.toContain("1234");
+    expect(host.textContent).not.toContain("should-never-render");
   });
 });

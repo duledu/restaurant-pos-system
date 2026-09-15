@@ -242,26 +242,53 @@ export async function advanceItemStatus(
   const nextStatus = NEXT_STATUS[expectedStatus];
   if (!nextStatus) throw new Error(`Stavka u statusu ${expectedStatus} se ne može dalje pomeriti`);
 
+  // Kitchen performance pass #2 — koliko stanica ova stavka UOPŠTE ima
+  // (item.stationStates.length, VEĆ pročitano gore) je strukturno fiksno
+  // za životni vek stavke (određeno preparationStation-om menija u
+  // trenutku porudžbine, nikad menjano posle) — bezbedno je odlučiti OVDE,
+  // van transakcije, da li je re-čitanje ispod uopšte potrebno.
+  const isSingleStationItem = item.stationStates.length === 1;
+
   const updated = await prisma.$transaction(async (tx) => {
     const advanced = await tx.orderItemStation.updateMany({
       where: { orderItemId: itemId, station, status: expectedStatus },
       data: { status: nextStatus as OrderItemStatus },
     });
     if (advanced.count !== 1) throw new StaleItemStatusError();
-    const states = await tx.orderItemStation.findMany({
-      where: { orderItemId: itemId },
-      select: { status: true },
-    });
-    const aggregateStatus = aggregateStationStatus(states.map((entry) => entry.status));
-    await tx.orderItem.update({ where: { id: itemId }, data: { status: aggregateStatus } });
-    await tx.orderEvent.create({
-      data: {
-        orderId,
-        type: "order_item.status_changed",
-        createdBy: ctx.employeeId,
-        payload: { itemId, from: expectedStatus, to: nextStatus, station, aggregateStatus },
-      },
-    });
+    // Kitchen performance pass #2 (Part E) — za OGROMNU većinu stavki
+    // (čisto kuhinjska ili čisto šank stavka, jedna stanica) agregatni
+    // status je TRIVIJALNO jednak upravo upisanom nextStatus-u — nema
+    // druge stanice čiji bi trenutni status trebalo pomiriti, pa je
+    // ponovno čitanje SVIH stanica ove stavke suvišan round-trip. Samo
+    // KITCHEN_AND_BAR stavke (dve stanice) stvarno zahtevaju svež upvid u
+    // DRUGU stanicu da bi se agregat ispravno izračunao — taj put ostaje
+    // NEPROMENJEN.
+    const aggregateStatus = isSingleStationItem
+      ? nextStatus
+      : aggregateStationStatus(
+          (
+            await tx.orderItemStation.findMany({
+              where: { orderItemId: itemId },
+              select: { status: true },
+            })
+          ).map((entry) => entry.status)
+        );
+    // Kitchen performance pass #2 (Part E) — ova dva upisa ne zavise jedan
+    // od drugog (različite tabele, nijedan ne čita rezultat onog drugog),
+    // pa se šalju paralelno umesto sekvencijalno — smanjuje stvaran
+    // wall-clock unutar transakcije bez menjanja ATOMSKOG ponašanja
+    // (i dalje ista transakcija, i dalje sve-ili-ništa).
+    await Promise.all([
+      tx.orderItem.update({ where: { id: itemId }, data: { status: aggregateStatus as OrderItemStatus } }),
+      tx.orderEvent.create({
+        data: {
+          orderId,
+          type: "order_item.status_changed",
+          createdBy: ctx.employeeId,
+          payload: { itemId, from: expectedStatus, to: nextStatus, station, aggregateStatus },
+        },
+      }),
+    ]);
     // Performance audit — izbegnuto ponovno čitanje istog reda
     // (findUniqueOrThrow): updateMany iznad je VEĆ atomski potvrdio TAČNO
     // ovaj prelaz (count===1 garantuje da je upravo OVAJ red promenjen u

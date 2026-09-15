@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, memo } from "react";
 import Link from "next/link";
 import { LogoutButton } from "../ui/LogoutButton";
 import { AppLogo } from "../branding/AppLogo";
@@ -20,6 +20,7 @@ import { defaultPrintTransport, type PrintTransport } from "../../lib/print-tran
 import { resolveAutoPrintTransport } from "../../lib/qz-auto-transport";
 import { getQzSettings } from "../../lib/qz-settings";
 import { ticketWaitBasis } from "../../lib/kds-wait-time";
+import { nextPaint, reportKdsTapTiming, type KdsTapTiming } from "../../lib/kds-perf";
 
 interface StationItemModifier {
   id: string;
@@ -135,6 +136,165 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("sr-RS", { hour: "2-digit", minute: "2-digit" });
 }
 
+// PREPROD physical QA follow-up (Part I) — poznat, već autentifikovan
+// identitet zaposlenog (isti /api/pos/me poziv koji KDS VEĆ radi za
+// locationIds — nikad drugi/dupliran izvor identiteta), preveden u kratke
+// oznake za prikaz. Menadžerske uloge se prikazuju kao "MENADŽER" bez
+// obzira na tačnu (OWNER/ADMIN/MANAGER) ulogu — KDS ekran ne treba da
+// razlikuje te tri, samo da pokaže ZAŠTO ta osoba ima pristup.
+const ROLE_LABEL: Record<string, string> = {
+  KITCHEN: "KUHINJA",
+  BAR: "ŠANK",
+  WAITER: "KONOBAR",
+  OWNER: "MENADŽER",
+  ADMIN: "MENADŽER",
+  MANAGER: "MENADŽER",
+};
+interface EmployeeIdentity {
+  firstName: string | null;
+  lastName: string | null;
+  roles: string[];
+}
+function employeeRoleDisplay(roles: string[]): string {
+  const labels = Array.from(new Set(roles.map((r) => ROLE_LABEL[r] ?? r)));
+  return labels.join(" / ");
+}
+
+interface ItemRowProps {
+  item: StationItem;
+  onAdvance: (itemId: string, expectedStatus: StationItem["status"]) => Promise<void>;
+}
+/**
+ * PREPROD physical QA follow-up (Part D) — izdvojeno i memoizovano da
+ * TAP na JEDNU stavku nikad ne ponovo renderuje CEO tablu (svaku
+ * porudžbinu, svaku drugu stavku). "Zauzeto dok čeka odgovor" je SADA
+ * lokalno stanje OVE komponente (ref za sinhronu zaštitu od duplog tapa
+ * PRE ijednog re-rendera, isto obrazloženje kao ranije na nivou table —
+ * useState samo za disabled izgled dugmeta) — React garantuje da lokalni
+ * setState jedne komponente NIKAD ne ponovo renderuje roditelja ili
+ * susedne komponente, za razliku od ranijeg deljenog Set-a na vrhu table
+ * (svaki tap je menjao TAJ Set, što je ponovo renderovalo SVAKU stavku na
+ * ekranu). Sama promena STATUSA (item.status) i dalje dolazi odozgo kao
+ * prop — KdsClient.applyItemStatus već čuva referencu nepromenjenih
+ * stavki/porudžbina (`: it` / `return o`), pa memo ispod ispravno
+ * preskače re-render za stavke koje se nisu promenile.
+ */
+const ItemRow = memo(function ItemRow({ item, onAdvance }: ItemRowProps) {
+  const [isBusy, setIsBusy] = useState(false);
+  const inFlightRef = useRef(false);
+
+  async function handleClick() {
+    // Sinhrona zaštita od duplog tapa PRE ijednog await-a/re-rendera —
+    // isti obrazac kao ranije, sada po-stavci umesto deljen.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setIsBusy(true);
+    try {
+      await onAdvance(item.id, item.status);
+    } finally {
+      inFlightRef.current = false;
+      setIsBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-base font-semibold leading-snug text-cream-100">
+            {item.quantity}× {item.name}
+          </div>
+          <ModifierList modifiers={item.modifiers} tone="active" />
+          {item.note && <div className="mt-0.5 text-xs italic text-cream-300/70">{item.note}</div>}
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[item.status] ?? "bg-graphite text-cream-100"}`}>
+          {STATUS_LABEL[item.status] ?? item.status}
+        </span>
+      </div>
+      {STATUS_ACTION_LABEL[item.status] && (
+        <button
+          onClick={handleClick}
+          disabled={isBusy}
+          className="mt-3 min-h-11 w-full rounded-md bg-gold py-2 text-sm font-bold text-white transition-colors hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
+        >
+          {STATUS_ACTION_LABEL[item.status]}
+        </button>
+      )}
+    </div>
+  );
+});
+
+interface OrderCardProps {
+  order: StationOrder;
+  waitMin: number;
+  isLate: boolean;
+  failedJob: PrintJob | undefined;
+  printBusy: boolean;
+  retryBusy: boolean;
+  onPrintTicket: (orderId: string) => void;
+  onRetryPrint: (orderId: string, jobId: string) => void;
+  onAdvance: (orderId: string, itemId: string, expectedStatus: StationItem["status"]) => Promise<void>;
+}
+/**
+ * PREPROD physical QA follow-up (Part D) — isti razlog kao ItemRow iznad,
+ * jedan nivo više: memoizovano da promena JEDNE porudžbine (ili globalnog
+ * stanja poput printBusyId za DRUGU porudžbinu) ne ponovo renderuje SVE
+ * ostale kartice. `onAdvance` je zatvorena vrednost specifična za OVU
+ * porudžbinu (orderId već vezan) — i dalje stabilna preko roditeljevog
+ * useCallback-a, pa memo ispod ispravno radi.
+ */
+const OrderCard = memo(function OrderCard({ order, waitMin, isLate, failedJob, printBusy, retryBusy, onPrintTicket, onRetryPrint, onAdvance }: OrderCardProps) {
+  const handleAdvance = useCallback(
+    (itemId: string, expectedStatus: StationItem["status"]) => onAdvance(order.orderId, itemId, expectedStatus),
+    [order.orderId, onAdvance]
+  );
+  return (
+    <div className={`overflow-hidden rounded-lg border bg-graphite-700 shadow-[0_12px_28px_rgba(0,0,0,.22)] ${isLate ? "border-warn" : "border-graphite-700"}`}>
+      <div className="flex items-center justify-between gap-2 border-b border-white/10 bg-black/10 px-4 py-3">
+        <div className="min-w-0">
+          <div className="truncate text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
+          <div className="truncate text-xs font-medium text-cream-300/70">Konobar · {order.waiterName}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className={`rounded-md px-2.5 py-1 text-xs font-bold tabular-nums ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/80"}`}>
+            {waitMin} min
+          </span>
+          <button
+            type="button"
+            onClick={() => onPrintTicket(order.orderId)}
+            disabled={printBusy}
+            title="Štampaj tiket"
+            aria-label="Štampaj tiket"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-graphite-800 text-cream-300/80 hover:bg-graphite-900 disabled:opacity-40"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z" /></svg>
+          </button>
+        </div>
+      </div>
+
+      {failedJob && (
+        <div className="flex items-center justify-between gap-2 border-b border-danger/20 bg-danger-soft px-4 py-2">
+          <span className="text-xs font-semibold text-danger">{failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Ishod štampe nije poznat — proverite papir pre novog otiska" : "Štampa nije uspela pre slanja"}</span>
+          <button
+            type="button"
+            onClick={() => onRetryPrint(order.orderId, failedJob.id)}
+            disabled={retryBusy}
+            className="min-h-8 shrink-0 rounded-md bg-danger px-3 py-1 text-xs font-bold text-white disabled:opacity-40"
+          >
+            {retryBusy ? "…" : failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Provereno — novi otisak" : "Pokušaj ponovo"}
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2 p-3">
+        {order.items.map((item) => (
+          <ItemRow key={item.id} item={item} onAdvance={handleAdvance} />
+        ))}
+      </div>
+    </div>
+  );
+});
+
 export function KdsClient({ station, title, environmentLabel }: { station: "KITCHEN" | "BAR"; title: string; environmentLabel: string }) {
   const [locationId, setLocationId] = useState<string | null>(null);
   const [tab, setTab] = useState<"active" | "completed">("active");
@@ -145,15 +305,18 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
   const knownOrderIds = useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [printBusyId, setPrintBusyId] = useState<string | null>(null);
-  // Performance/400 audit — prethodno posmatran 400 na /advance ("Status
-  // stavke je već promenjen") uglavnom dolazi od DUPLOG tapa na ISTU
-  // stavku pre nego što je prvi zahtev stigao (spor tok bez vizuelne
-  // potvrde je ovo ohrabrivao). Ref (ne state) — mora biti sinhrono
-  // dostupan ODMAH na klik, pre bilo kog re-rendera, da zaista spreči
-  // drugi zahtev, ne samo vizuelno onemogući dugme koje bi (retko) moglo
-  // stići kliku pre re-renderа.
-  const advanceInFlightRef = useRef<Set<string>>(new Set());
-  const [advanceBusyIds, setAdvanceBusyIds] = useState<Set<string>>(new Set());
+  // PREPROD physical QA follow-up (Part D) — "zauzeto dok se čeka odgovor"
+  // je SADA lokalno stanje unutar ItemRow (vidi definiciju iznad), ne
+  // deljen Set ovde — deljen Set je značio da SVAKI tap ponovo renderuje
+  // SVAKU stavku na ekranu (React.memo ispod ne bi mogao da to spreči jer
+  // bi Set-ova referenca menjala IDENTITET tog prop-a za svaku karticu).
+  // Duplog-tapa zaštita je istim razlogom sada po-stavci (ItemRow-ov
+  // sopstveni ref), ne ovde.
+  // PREPROD physical QA follow-up (Part I) — poznat identitet ulogovanog
+  // zaposlenog, popunjen TAČNO iz istog /api/pos/me poziva koji load()
+  // već radi za locationId (nikad drugi/dupliran izvor, nikad dodatan
+  // upit) — vidi load() ispod.
+  const [employee, setEmployee] = useState<EmployeeIdentity | null>(null);
   const [pendingPrint, setPendingPrint] = useState<{ orderId: string; job: PrintJob; transport?: PrintTransport } | null>(null);
   const [failedPrintJobs, setFailedPrintJobs] = useState<PrintJob[]>([]);
   const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
@@ -281,6 +444,9 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
         const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
         loc = me.locationIds[0];
         setLocationId(loc);
+        // Part I — isti poziv, nijedan dodatan upit; ne prepisuje se posle
+        // (identitet se ne menja bez potpune nove prijave/novog mount-a).
+        setEmployee({ firstName: me.firstName ?? null, lastName: me.lastName ?? null, roles: me.roles ?? [] });
       }
       const [activeRes, completedRes, pendingPrintRes] = await Promise.all([
         apiFetch(`${baseEndpoint}?locationId=${loc}`),
@@ -294,22 +460,57 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
       knownOrderIds.current = new Set(freshOrders.map((o) => o.orderId));
 
       setOrders((prevOrders) => {
-        const prevStatusById = new Map<string, StationItem["status"]>();
-        for (const o of prevOrders) for (const it of o.items) prevStatusById.set(it.id, it.status);
+        const prevItemById = new Map<string, StationItem>();
+        const prevOrderById = new Map<string, StationOrder>();
+        for (const o of prevOrders) {
+          prevOrderById.set(o.orderId, o);
+          for (const it of o.items) prevItemById.set(it.id, it);
+        }
         return freshOrders
-          .map((o) => ({
-            ...o,
-            items: o.items.map((it) => {
+          .map((o) => {
+            let itemsIdentical = true;
+            const items = o.items.map((it) => {
               const knownAsOf = itemKnownAsOfSeq.current.get(it.id) ?? 0;
-              if (knownAsOf > pollSeq && prevStatusById.has(it.id)) {
-                // A newer local write already exists for this item than
-                // this poll request — keep the fresher local status.
-                return { ...it, status: prevStatusById.get(it.id)! };
+              const prevItem = prevItemById.get(it.id);
+              const resolvedStatus =
+                knownAsOf > pollSeq && prevItem
+                  ? prevItem.status // a newer local write already exists for this item than this poll request — keep the fresher local status.
+                  : it.status;
+              if (!(knownAsOf > pollSeq)) itemKnownAsOfSeq.current.set(it.id, pollSeq);
+              // PREPROD physical QA follow-up (Part D) — reference-stability
+              // for memoized ItemRow/OrderCard: reuse the EXACT previous
+              // item object when nothing rendered actually differs, so a
+              // 4s background poll doesn't force every order card/item row
+              // to reconcile when only ONE thing on the board changed.
+              // Modifiers are set once when an item is added to an order
+              // and never mutated afterward in this domain — comparing
+              // their length is a safe, cheap proxy for "unchanged" here.
+              if (
+                prevItem &&
+                prevItem.status === resolvedStatus &&
+                prevItem.quantity === it.quantity &&
+                prevItem.name === it.name &&
+                prevItem.note === it.note &&
+                prevItem.submittedAt === it.submittedAt &&
+                prevItem.modifiers.length === it.modifiers.length
+              ) {
+                return prevItem;
               }
-              itemKnownAsOfSeq.current.set(it.id, pollSeq);
-              return it;
-            }),
-          }))
+              itemsIdentical = false;
+              return resolvedStatus === it.status ? it : { ...it, status: resolvedStatus };
+            });
+            const prevOrder = prevOrderById.get(o.orderId);
+            if (
+              itemsIdentical &&
+              prevOrder &&
+              prevOrder.tableLabel === o.tableLabel &&
+              prevOrder.waiterName === o.waiterName &&
+              prevOrder.submittedAt === o.submittedAt
+            ) {
+              return prevOrder;
+            }
+            return { ...o, items };
+          })
           // Same rule as applyItemStatus below — an item can be locally
           // fresher (already terminal) than what this specific poll's own
           // order-list membership assumed; re-apply the identical
@@ -387,73 +588,103 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
     );
   }
 
-  async function advance(orderId: string, itemId: string, expectedStatus: StationItem["status"]) {
-    // Sinhrona zaštita od duplog tapa PRE ijednog await-a/re-rendera —
-    // isti uzrok kao prethodno posmatran 400 ("Status stavke je već
-    // promenjen") na ovoj ruti.
-    if (advanceInFlightRef.current.has(itemId)) return;
-    advanceInFlightRef.current.add(itemId);
-    setAdvanceBusyIds((prev) => new Set(prev).add(itemId));
+  // PREPROD physical QA follow-up (Part D/G) — useCallback sa stabilnim
+  // zavisnostima (station je prop, load je sam useCallback) tako da
+  // memoizovani OrderCard/ItemRow ispod dobijaju STABILNU referencu ove
+  // funkcije preko generacija — bez ovoga bi React.memo bio beskoristan
+  // (nova zatvorena funkcija na svaki render KdsClient-a bi izgledala kao
+  // "promenjen prop" za svaku karticu). Zaštita od duplog tapa i "zauzeto"
+  // izgled dugmeta su SADA u ItemRow (ne ovde) — ova funkcija radi SAMO
+  // stvarnu tranziciju (optimistic + API + pomirenje), ne UI stanje dugmeta.
+  const advanceItem = useCallback(
+    async (orderId: string, itemId: string, expectedStatus: StationItem["status"]) => {
+      // Part B/C/H — PREPROD-only dijagnostika (nikad Production, nikad
+      // mrežni poziv, samo console.info): dokazuje da li optimističko
+      // stanje STVARNO biva ISCRTANO pre/nezavisno od mrežnog puta, umesto
+      // da se to samo pretpostavi. dupli requestAnimationFrame je
+      // standardna, setTimeout-slobodna tehnika — prvi rAF puca TEK PRE
+      // sledećeg iscrtavanja (dakle za frejm koji već sadrži naš commit),
+      // drugi puca u SLEDEĆEM frejmu, što je moguće SAMO ako je prvi
+      // stvarno prikazan. Ne utiče ni na šta kad je isključeno (samo ne
+      // poziva se ispod).
+      const perf = environmentLabel !== "PRODUKCIJA";
+      const t: (Partial<KdsTapTiming> & { tapAt: number }) | null = perf ? { tapAt: performance.now() } : null;
 
-    const optimisticNext = NEXT_STATUS_CLIENT[expectedStatus];
-    // Svaki lokalni upis (optimistički ili potvrđen) dobija SVEŽ redni broj
-    // na ISTOJ vremenskoj liniji kao load()'s pollSeq iznad — ovo je ono
-    // što sprečava da bilo koji poll GET koji je već bio "u letu" PRE ovog
-    // tapa ikad prepiše rezultat ovog tapa, bez obzira kad se taj GET
-    // stvarno vrati (dokazan uzrok fizičkog QA "Status stavke je već
-    // promenjen" izveštaja — vidi napomenu na load() iznad).
-    if (optimisticNext) {
-      itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
-      applyItemStatus(orderId, itemId, optimisticNext);
-    }
-    setError(null);
-    try {
-      const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
-        method: "POST",
-        body: JSON.stringify({ station, expectedStatus }),
-      });
-      // Pomiri sa STVARNIM stanjem sa servera (nikad samo veruj nagađanju
-      // iznad) — bez punog reload-a, samo ova jedna stavka.
-      const confirmedStatus = result?.item?.status as StationItem["status"] | undefined;
-      if (confirmedStatus && confirmedStatus !== optimisticNext) {
+      const optimisticNext = NEXT_STATUS_CLIENT[expectedStatus];
+      // Svaki lokalni upis (optimistički ili potvrđen) dobija SVEŽ redni broj
+      // na ISTOJ vremenskoj liniji kao load()'s pollSeq iznad — ovo je ono
+      // što sprečava da bilo koji poll GET koji je već bio "u letu" PRE ovog
+      // tapa ikad prepiše rezultat ovog tapa, bez obzira kad se taj GET
+      // stvarno vrati (dokazan uzrok fizičkog QA "Status stavke je već
+      // promenjen" izveštaja — vidi napomenu na load() iznad).
+      if (optimisticNext) {
         itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
-        applyItemStatus(orderId, itemId, confirmedStatus);
+        applyItemStatus(orderId, itemId, optimisticNext);
       }
-    } catch (e) {
-      const apiError = e instanceof Error ? (e as ApiError) : undefined;
-      // Naše optimističko nagađanje je SADA dokazano pogrešno u oba
-      // slučaja ispod — nikad ga više ne tretiraj kao poznato-svež (sledeći
-      // load() sme slobodno da ga prepiše autoritativnim stanjem).
-      itemKnownAsOfSeq.current.delete(itemId);
-      if (apiError?.status === 409) {
-        // Zahtev #6 (fizički QA nalaz) — "Status stavke je već promenjen"
-        // je OČEKIVANA, bezopasna trka (drugi tap/uređaj/poll je već
-        // pomerio TAČNO ovu stavku), NIKAD razlog da se osoblju kaže da
-        // ručno osveži ekran. Tiho zatraži svež, autoritativan prikaz —
-        // koji god je stvarni pobednik trke, ekran ga odmah preuzima.
-        load();
-      } else {
-        // Stvaran neuspeh (mreža/dozvole/itd.) — ISTO zatraži svež prikaz
-        // (nikad vrati ceo `orders` snapshot iz trenutka klika, što bi
-        // moglo da regresira i DRUGE stavke promenjene u međuvremenu), ali
-        // ovde JOŠ UVEK prijavi grešku — ovo zahteva ljudsku pažnju.
-        // NAMERNO await-ovano (za razliku od 409 grane iznad): load()'s
-        // sopstveni uspešan put zove setError(null) na kraju — poziv bez
-        // čekanja bi tu poruku obrisao pre nego što je iko vidi.
-        await load();
-        setError(apiError?.message ?? "Greška");
+      if (t) t.optimisticStateAt = performance.now();
+      setError(null);
+      // PREPROD physical QA follow-up — the paint-proof measurement below
+      // must NEVER gate the actual request: awaiting nextPaint() here
+      // before calling apiFetch would literally delay the real network
+      // call by two animation frames whenever diagnostics are on, which is
+      // exactly the "network work must happen after visual confirmation,
+      // never block it" rule turned backwards. Kick it off but don't await
+      // it yet — fetch starts immediately, in parallel.
+      const paintProof = t ? nextPaint().then((ts) => { t.optimisticPaintAt = ts; }) : null;
+      if (t) t.apiStartAt = performance.now();
+      try {
+        const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
+          method: "POST",
+          body: JSON.stringify({ station, expectedStatus }),
+        });
+        if (t) t.apiEndAt = performance.now();
+        // Pomiri sa STVARNIM stanjem sa servera (nikad samo veruj nagađanju
+        // iznad) — bez punog reload-a, samo ova jedna stavka.
+        const confirmedStatus = result?.item?.status as StationItem["status"] | undefined;
+        if (confirmedStatus && confirmedStatus !== optimisticNext) {
+          itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
+          applyItemStatus(orderId, itemId, confirmedStatus);
+        }
+        if (t) {
+          await paintProof; // near-instant in practice — the API round-trip above almost always outlasts two animation frames.
+          t.reconcileStateAt = performance.now();
+          t.reconcilePaintAt = await nextPaint();
+          reportKdsTapTiming(`${station}/${itemId.slice(0, 8)}`, t as KdsTapTiming);
+        }
+      } catch (e) {
+        const apiError = e instanceof Error ? (e as ApiError) : undefined;
+        // Naše optimističko nagađanje je SADA dokazano pogrešno u oba
+        // slučaja ispod — nikad ga više ne tretiraj kao poznato-svež (sledeći
+        // load() sme slobodno da ga prepiše autoritativnim stanjem).
+        itemKnownAsOfSeq.current.delete(itemId);
+        if (apiError?.status === 409) {
+          // Zahtev #6 (fizički QA nalaz) — "Status stavke je već promenjen"
+          // je OČEKIVANA, bezopasna trka (drugi tap/uređaj/poll je već
+          // pomerio TAČNO ovu stavku), NIKAD razlog da se osoblju kaže da
+          // ručno osveži ekran. Tiho zatraži svež, autoritativan prikaz —
+          // koji god je stvarni pobednik trke, ekran ga odmah preuzima.
+          load();
+        } else {
+          // Stvaran neuspeh (mreža/dozvole/itd.) — ISTO zatraži svež prikaz
+          // (nikad vrati ceo `orders` snapshot iz trenutka klika, što bi
+          // moglo da regresira i DRUGE stavke promenjene u međuvremenu), ali
+          // ovde JOŠ UVEK prijavi grešku — ovo zahteva ljudsku pažnju.
+          // NAMERNO await-ovano (za razliku od 409 grane iznad): load()'s
+          // sopstveni uspešan put zove setError(null) na kraju — poziv bez
+          // čekanja bi tu poruku obrisao pre nego što je iko vidi.
+          await load();
+          setError(apiError?.message ?? "Greška");
+        }
       }
-    } finally {
-      advanceInFlightRef.current.delete(itemId);
-      setAdvanceBusyIds((prev) => {
-        const next = new Set(prev);
-        next.delete(itemId);
-        return next;
-      });
-    }
-  }
+    },
+    [station, load, environmentLabel]
+  );
 
-  async function handlePrintTicket(orderId: string) {
+  // PREPROD physical QA follow-up (Part D) — useCallback da OrderCard-ovi
+  // ostanu memoizovani preko generacija umesto da svaki render KdsClient-a
+  // (npr. zbog advanceItem-a za DRUGU porudžbinu) izgleda kao "promenjen
+  // prop" za SVAKU karticu na ekranu.
+  const handlePrintTicket = useCallback(async (orderId: string) => {
     // A deliberate manual request gets its own audited row and still uses claim/start.
     if (printInFlightRef.current) return;
     printInFlightRef.current = true;
@@ -471,9 +702,9 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
     } finally {
       setPrintBusyId(null);
     }
-  }
+  }, [station]);
 
-  async function handleRetryPrint(orderId: string, jobId: string) {
+  const handleRetryPrint = useCallback(async (orderId: string, jobId: string) => {
     if (printInFlightRef.current) return;
     printInFlightRef.current = true;
     setRetryBusyId(jobId);
@@ -508,7 +739,7 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
     } finally {
       setRetryBusyId(null);
     }
-  }
+  }, [station, failedPrintJobs, printerStatus.isOnline]);
 
   useEffect(() => {
     if (!pendingPrint) return;
@@ -545,7 +776,22 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
             <h1 className="truncate text-xl font-bold tracking-tight text-cream-100 sm:text-2xl">{title}</h1>
           </div>
         </div>
-        <LogoutButton theme="dark" />
+        {/* PREPROD physical QA follow-up (Part I/J) — koje osoblje je
+            ulogovano mora UVEK biti vidljivo, ali diskretno (mala,
+            prigušena linija, ne veći/upadljiviji od naslova stanice iznad
+            nje), i uvek uz dugme za odjavu koje TAČNO tu sesiju odjavljuje
+            (isti /api/pos/me izvor identiteta kao LogoutButton-ova
+            /api/auth/logout sesija — nikad drugi/dupliran izvor). Skraćuje
+            se, ne guši layout na telefonu. */}
+        <div className="flex shrink-0 flex-col items-end gap-0.5">
+          {employee && (employee.firstName || employee.lastName) && (
+            <p className="max-w-[40vw] truncate text-[11px] font-semibold text-cream-300/70 sm:max-w-none">
+              {[employee.firstName, employee.lastName].filter(Boolean).join(" ")}
+              {employee.roles.length > 0 && <span className="text-cream-300/50"> · {employeeRoleDisplay(employee.roles)}</span>}
+            </p>
+          )}
+          <LogoutButton theme="dark" />
+        </div>
       </div>
 
       {/* Aktivne/Gotove — primarni operativni kontroli (specifikacija:
@@ -669,80 +915,18 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
               const isLate = waitMin >= 12;
               const failedJob = failedPrintJobs.find((j) => j.orderId === order.orderId);
               return (
-                <div
+                <OrderCard
                   key={order.orderId}
-                  className={`overflow-hidden rounded-lg border bg-graphite-700 shadow-[0_12px_28px_rgba(0,0,0,.22)] ${
-                    isLate ? "border-warn" : "border-graphite-700"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2 border-b border-white/10 bg-black/10 px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-xl font-bold tracking-tight text-cream-100">{order.tableLabel}</div>
-                      <div className="truncate text-xs font-medium text-cream-300/70">Konobar · {order.waiterName}</div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className={`rounded-md px-2.5 py-1 text-xs font-bold tabular-nums ${isLate ? "bg-warn text-white" : "bg-graphite-800 text-cream-300/80"}`}>
-                        {waitMin} min
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handlePrintTicket(order.orderId)}
-                        disabled={printBusyId === order.orderId}
-                        title="Štampaj tiket"
-                        aria-label="Štampaj tiket"
-                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-graphite-800 text-cream-300/80 hover:bg-graphite-900 disabled:opacity-40"
-                      >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z" /></svg>
-                      </button>
-                    </div>
-                  </div>
-
-                  {failedJob && (
-                    <div className="flex items-center justify-between gap-2 border-b border-danger/20 bg-danger-soft px-4 py-2">
-                      <span className="text-xs font-semibold text-danger">{failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Ishod štampe nije poznat — proverite papir pre novog otiska" : "Štampa nije uspela pre slanja"}</span>
-                      <button
-                        type="button"
-                        onClick={() => handleRetryPrint(order.orderId, failedJob.id)}
-                        disabled={retryBusyId === failedJob.id}
-                        className="min-h-8 shrink-0 rounded-md bg-danger px-3 py-1 text-xs font-bold text-white disabled:opacity-40"
-                      >
-                        {retryBusyId === failedJob.id ? "…" : failedJob.resultOutcome !== "FAILED_BEFORE_SUBMISSION" ? "Provereno — novi otisak" : "Pokušaj ponovo"}
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="space-y-2 p-3">
-                    {order.items.map((item) => (
-                      <div key={item.id} className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-base font-semibold leading-snug text-cream-100">
-                              {item.quantity}× {item.name}
-                            </div>
-                            <ModifierList modifiers={item.modifiers} tone="active" />
-                            {item.note && (
-                              <div className="mt-0.5 text-xs italic text-cream-300/70">
-                                {item.note}
-                              </div>
-                            )}
-                          </div>
-                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[item.status] ?? "bg-graphite text-cream-100"}`}>
-                            {STATUS_LABEL[item.status] ?? item.status}
-                          </span>
-                        </div>
-                        {STATUS_ACTION_LABEL[item.status] && (
-                          <button
-                            onClick={() => advance(order.orderId, item.id, item.status)}
-                            disabled={advanceBusyIds.has(item.id)}
-                            className="mt-3 min-h-11 w-full rounded-md bg-gold py-2 text-sm font-bold text-white transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
-                          >
-                            {STATUS_ACTION_LABEL[item.status]}
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                  order={order}
+                  waitMin={waitMin}
+                  isLate={isLate}
+                  failedJob={failedJob}
+                  printBusy={printBusyId === order.orderId}
+                  retryBusy={retryBusyId === failedJob?.id}
+                  onPrintTicket={handlePrintTicket}
+                  onRetryPrint={handleRetryPrint}
+                  onAdvance={advanceItem}
+                />
               );
             })}
           </div>
