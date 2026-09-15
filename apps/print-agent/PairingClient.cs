@@ -122,12 +122,20 @@ public static class PairingClient
     /// telu) od stvarnog odbijanja koda od strane naše /api/agent/register
     /// rute. Ne loguje/prikazuje ništa iz tela odgovora sem ove kategorije.
     /// </summary>
+    /// <summary>
+    /// Professional error UX audit — the restaurant-facing message must
+    /// NEVER name Vercel/deployment-protection/bypass terminology (a
+    /// restaurant manager has no way to act on that). The technical
+    /// category still goes to the sanitized log for whoever supports this
+    /// installer, via the caller (PairForSetup does not log directly — this
+    /// method stays pure/testable, see SelfTests.cs).
+    /// </summary>
     private static string DescribeFailure(int statusCode, string body)
     {
         if (statusCode == 401 && body.Contains("vercel_auth_enabled", StringComparison.OrdinalIgnoreCase))
         {
-            return "PREPROD server je zaštićen Vercel autentifikacijom (bypass zaglavlje nije podešeno na ovom instaleru) — " +
-                   "ovo NIJE pogrešan kod za uparivanje. Kontaktiraj administratora.";
+            AgentLog.Warn("Uparivanje odbijeno na nivou platforme pre TableCore aplikacije (edge zastita) — instaler nema ispravno podeseno propusno zaglavlje za ovaj server.");
+            return "Server trenutno nije dostupan za ovaj instaler — ovo NIJE pogrešan kod za uparivanje. Kontaktirajte administratora.";
         }
         return $"Server je odbio kod uparivanja ({statusCode}).";
     }

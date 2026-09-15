@@ -157,6 +157,28 @@ Filename: "{sys}\sc.exe"; Parameters: "stop {#MyServiceName}"; Flags: runhidden 
 Filename: "{sys}\sc.exe"; Parameters: "delete {#MyServiceName}"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteService"
 
 [Code]
+// Professional installer audit finding (upgrade reliability) — the
+// [Run] section below stops/deletes/recreates the service, but [Run]
+// executes AFTER [Files] has already copied the new exe. A self-contained
+// .NET exe locks its own file WHILE its process is running, so upgrading
+// over an already-running installation could hit a sharing violation
+// (or silently leave the OLD exe's bytes in place) at the exact moment
+// [Files] tries to overwrite it — this had never been physically
+// exercised (only fresh installs were tested). Stopping the service
+// HERE, at ssInstall (fires immediately before [Files] copying begins),
+// releases that file lock in time. IgnoreErrors-equivalent behavior
+// (fresh install, no prior service) via ResultCode check — a missing
+// service is not a failure.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssInstall then
+  begin
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
+
 // Faza 2C, sekcija 21 — deliberatna odluka: PODRAZUMEVANO ČUVAJ kredencijal/
 // stanje (ProgramData\TableCore\PrintAgent) pri deinstalaciji, jer slučajan
 // gubitak kredencijala tera na ponovno uparivanje. Postavljanje/skidanje

@@ -236,6 +236,51 @@ internal static class SelfTests
                 "ConfigureHttpClientDefaults is a no-op for a production endpoint — never adds the bypass header");
         }
 
+        // Print Agent professional audit finding (physical QA: pairing
+        // succeeded through the bypass, the immediate post-Save heartbeat
+        // did not) — PairingClient and DeliveryClient each own a SEPARATE
+        // static HttpClient; SetupForm.cs's constructor called ONLY
+        // PairingClient.ConfigureBypassHeader, so DeliveryClient.Heartbeat
+        // (used by Setup's post-Save verification) went out with no bypass
+        // header at all. Fixed by routing every caller through ONE
+        // authoritative AgentEndpoint.ConfigureAgentHttpClients. This test
+        // proves BOTH real static clients actually receive the header from
+        // that single call — reflection is used deliberately: the bug was
+        // exactly "two independent private static HttpClient instances",
+        // so the test must observe both real instances, not a substitute.
+        {
+            var pairingHttp = (HttpClient)typeof(PairingClient)
+                .GetField("Http", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .GetValue(null)!;
+            var deliveryHttp = (HttpClient)typeof(DeliveryClient)
+                .GetField("Http", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .GetValue(null)!;
+            AgentEndpoint.ConfigureAgentHttpClients(testWithBypass);
+            Check(pairingHttp.DefaultRequestHeaders.TryGetValues(AgentEndpoint.BypassHeaderName, out var pv) && pv.Single() == "secret123",
+                "ConfigureAgentHttpClients configures PairingClient's real static HttpClient");
+            Check(deliveryHttp.DefaultRequestHeaders.TryGetValues(AgentEndpoint.BypassHeaderName, out var dv) && dv.Single() == "secret123",
+                "ConfigureAgentHttpClients configures DeliveryClient's real static HttpClient (the one SetupForm previously missed)");
+            // Cleanup — self-tests must not leave global static HttpClient
+            // state mutated for whatever runs next in this process.
+            pairingHttp.DefaultRequestHeaders.Remove(AgentEndpoint.BypassHeaderName);
+            deliveryHttp.DefaultRequestHeaders.Remove(AgentEndpoint.BypassHeaderName);
+        }
+
+        // Professional error-UX audit — a restaurant manager must never see
+        // "Vercel"/deployment-protection terminology; the platform-level
+        // rejection (edge, before the TableCore application) must read as a
+        // generic "server unavailable, contact administrator", distinct
+        // from a genuinely wrong pairing code.
+        {
+            var describeFailure = typeof(PairingClient).GetMethod("DescribeFailure", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+            var vercelBlockedBody = "{\"error\":{\"code\":\"401\",\"message\":\"Protected deployment\"},\"protection\":{\"vercel_auth_enabled\":true}}";
+            var vercelMessage = (string)describeFailure.Invoke(null, [401, vercelBlockedBody])!;
+            Check(!vercelMessage.Contains("Vercel", StringComparison.OrdinalIgnoreCase) && !vercelMessage.Contains("bypass", StringComparison.OrdinalIgnoreCase),
+                "a platform-level (Vercel edge) pairing rejection never exposes Vercel/bypass terminology to the restaurant user");
+            var wrongCodeMessage = (string)describeFailure.Invoke(null, [401, "{\"error\":\"Kod za uparivanje nije prihvacen\"}"])!;
+            Check(wrongCodeMessage != vercelMessage, "a genuinely wrong pairing code still reads as a distinct message from the platform-level rejection");
+        }
+
         // Regresija (dokazana empirijski praznim exit code 1, bez ijednog
         // prozora, dana pre ovog fixa) — SetupArgumentDispatch.IsInteractiveSetupArgs
         // je izdvojena kopija Program.cs top-level provere koja odlučuje da

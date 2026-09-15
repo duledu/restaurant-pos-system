@@ -72,8 +72,7 @@ if (args.Contains("--pair") || args.Contains("--heartbeat") || args.Contains("--
         return;
     }
     Console.WriteLine($"Aktivan server: {endpoint.DescribeForLog()}");
-    PairingClient.ConfigureBypassHeader(endpoint);
-    DeliveryClient.ConfigureBypassHeader(endpoint);
+    AgentEndpoint.ConfigureAgentHttpClients(endpoint);
 
     if (args.Contains("--pair"))
     {

@@ -135,6 +135,27 @@ public sealed record AgentEndpoint(AgentRuntimeMode Mode, string BaseUrl, string
         client.DefaultRequestHeaders.Add(BypassHeaderName, BypassHeader);
     }
 
+    /// <summary>
+    /// Professional audit finding (physical QA: pairing succeeded, the
+    /// immediate post-Save heartbeat did not) — PairingClient and
+    /// DeliveryClient each own a SEPARATE static HttpClient, so configuring
+    /// the bypass header requires TWO calls. Program.cs and AgentService.cs
+    /// both already called both; SetupForm.cs's constructor called only
+    /// PairingClient's, which is exactly why pairing (PairingClient) worked
+    /// physically while the immediate Save-time heartbeat (DeliveryClient)
+    /// did not — the request left with no bypass header, Vercel's edge
+    /// rejected it, and Setup reported a false "proverite internet
+    /// konekciju". This is now the ONE authoritative entry point every
+    /// caller uses instead of remembering to call both separately — the
+    /// exact class of bug (two independent configuration points for one
+    /// concept) cannot recur once every call site goes through here.
+    /// </summary>
+    public static void ConfigureAgentHttpClients(AgentEndpoint endpoint)
+    {
+        PairingClient.ConfigureBypassHeader(endpoint);
+        DeliveryClient.ConfigureBypassHeader(endpoint);
+    }
+
     private static Uri ParseAbsoluteHttpUri(string value)
     {
         var trimmed = value.Trim();

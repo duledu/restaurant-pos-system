@@ -93,7 +93,15 @@ public sealed class SetupForm : Form
         try
         {
             _endpoint = AgentEndpoint.Resolve(args);
-            PairingClient.ConfigureBypassHeader(_endpoint);
+            // Professional audit fix — this used to call only
+            // PairingClient.ConfigureBypassHeader, which is exactly why
+            // pairing (PairingClient's own HttpClient) worked physically
+            // while the immediate Save-time heartbeat (DeliveryClient's
+            // SEPARATE HttpClient) did not: it went out with no bypass
+            // header, Vercel's edge rejected it, and Setup wrongly reported
+            // "proverite internet konekciju". See AgentEndpoint.
+            // ConfigureAgentHttpClients for the full explanation.
+            AgentEndpoint.ConfigureAgentHttpClients(_endpoint);
         }
         catch (AgentEndpointConfigurationException ex)
         {
@@ -351,8 +359,12 @@ public sealed class SetupForm : Form
                 // servis će i dalje preuzeti novu konfiguraciju na sledećem
                 // poll ciklusu, ali "Agent/service accepted" JOŠ NIJE
                 // dokazano, pa prozor NE sme da se zatvori niti da tvrdi
-                // uspeh.
-                _saveFeedbackLabel.Text = "Sačuvano lokalno, ali server trenutno nije potvrdio (proverite internet konekciju) — pokušajte ponovo pre zatvaranja.";
+                // uspeh. Professional error UX audit — "proverite internet
+                // konekciju" tvrdio je UZROK koji nikad nije bio dokazan
+                // (stvaran slučaj koji je ovo otkrio bio je nedostajuće
+                // propusno zaglavlje, ne mreža) — poruka sada ostaje
+                // kategorična bez nagađanja uzroka.
+                _saveFeedbackLabel.Text = "Sačuvano lokalno, ali server trenutno nije potvrdio povezivanje. Pokušajte ponovo za par trenutaka pre zatvaranja.";
                 _saveFeedbackLabel.ForeColor = Color.Firebrick;
                 _saveButton.Enabled = true;
                 _saveButton.Text = previousSaveText;
