@@ -230,13 +230,24 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
 });
 
 describe("WorkstationsPanel — Admin -> Agent pairing handoff (tablecore-print:// URI)", () => {
+  // Mirrors the REAL server: a created pairing shows up in pendingPairings
+  // (by id) until it's consumed/cancelled/expired — needed so the
+  // auto-dismiss-on-resolve behavior (see `load()`) can be genuinely
+  // exercised rather than trivially true against an always-empty list.
   function mockFetchWithPairingCreation() {
+    let pending: { id: string; name: string | null; locationId: string; location: { id: string; name: string }; expiresAt: string; createdAt: string }[] = [];
     fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
       const path = String(input).split("?")[0];
-      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [] });
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: pending });
       if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
       if (path === "/api/admin/workstations/pairings" && options?.method === "POST") {
-        return response({ pairing: { code: "ABCD-EFGH-JKMN", expiresAt: new Date(Date.now() + 10 * 60000).toISOString() } }, true);
+        const expiresAt = new Date(Date.now() + 10 * 60000).toISOString();
+        pending = [...pending, { id: "pairing-1", name: null, locationId: "l1", location: { id: "l1", name: "Glavna" }, expiresAt, createdAt: new Date().toISOString() }];
+        return response({ pairing: { pairingId: "pairing-1", code: "ABCD-EFGH-JKMN", expiresAt } }, true);
+      }
+      if (path === "/api/admin/workstations/pairings/pairing-1" && options?.method === "DELETE") {
+        pending = pending.filter((p) => p.id !== "pairing-1");
+        return response({ id: "pairing-1", status: "CANCELLED" });
       }
       throw new Error(`Unexpected request ${input}`);
     });
@@ -287,5 +298,65 @@ describe("WorkstationsPanel — Admin -> Agent pairing handoff (tablecore-print:
     });
     expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Otvori TableCore Print Agent")).toBe(true);
     expect([...host.querySelectorAll("button")].some((b) => b.textContent?.includes("Kopiraj kod"))).toBe(true);
+  });
+
+  it("'Otkaži' on the code panel actually cancels the pairing server-side, not just hides the code", async () => {
+    workstationsResponse = [];
+    mockFetchWithPairingCreation();
+    await mount();
+    await act(async () => {
+      const addButton = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Dodaj Print Agent računar"));
+      addButton!.click();
+    });
+    await act(async () => {
+      const generateButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Generiši kod za uparivanje");
+      generateButton!.click();
+    });
+    expect(host.textContent).toContain("ABCD-EFGH-JKMN");
+
+    const deleteCalls: string[] = [];
+    const priorImpl = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      if (String(input).endsWith("/pairings/pairing-1") && options?.method === "DELETE") deleteCalls.push(String(input));
+      return priorImpl(input, options);
+    });
+    await act(async () => {
+      const cancelButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Otkaži");
+      cancelButton!.click();
+    });
+    expect(deleteCalls).toHaveLength(1);
+    expect(host.textContent).not.toContain("ABCD-EFGH-JKMN");
+  });
+
+  it("the code panel auto-resolves (disappears) once the pairing is no longer pending — no manual dismissal or page refresh needed", async () => {
+    workstationsResponse = [];
+    mockFetchWithPairingCreation();
+    await mount();
+    await act(async () => {
+      const addButton = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Dodaj Print Agent računar"));
+      addButton!.click();
+    });
+    await act(async () => {
+      const generateButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Generiši kod za uparivanje");
+      generateButton!.click();
+    });
+    expect(host.textContent).toContain("ABCD-EFGH-JKMN");
+
+    // Simulate the Agent successfully consuming the code server-side (a
+    // real pairing being CONSUMED removes it from pendingPairings) and the
+    // newly connected computer appearing — both from the SAME next poll,
+    // no button click involved.
+    workstationsResponse = [workstation({ name: "komp_test", lastSeenAt: new Date().toISOString() })];
+    fetchMock.mockImplementation(async (input: string) => {
+      const path = String(input).split("?")[0];
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [] });
+      if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
+      throw new Error(`Unexpected request ${input}`);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(host.textContent).not.toContain("ABCD-EFGH-JKMN");
+    expect(host.textContent).toContain("komp_test");
   });
 });

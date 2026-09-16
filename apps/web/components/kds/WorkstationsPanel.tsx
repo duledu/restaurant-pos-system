@@ -143,7 +143,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [justCreatedCode, setJustCreatedCode] = useState<{ code: string; expiresAt: string } | null>(null);
+  const [justCreatedCode, setJustCreatedCode] = useState<{ pairingId: string; code: string; expiresAt: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [downloadInfo, setDownloadInfo] = useState<AgentDownloadInfo | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -174,7 +174,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     try {
       const res = await apiFetch("/api/admin/workstations");
       setWorkstationList(res.workstations ?? []);
-      setPendingPairings(res.pendingPairings ?? []);
+      const pending: PendingPairing[] = res.pendingPairings ?? [];
+      setPendingPairings(pending);
+      // Printing V2 — auto-resolve the "just created" code panel the
+      // instant its pairing is no longer PENDING (consumed by a
+      // successful Agent pairing, cancelled, or naturally expired) — no
+      // page refresh or manual dismissal needed; the newly connected
+      // computer already appears in workstationList from this SAME poll.
+      setJustCreatedCode((prev) => (prev && !pending.some((p) => p.id === prev.pairingId) ? null : prev));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju radnih stanica");
     } finally {
@@ -221,7 +228,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         method: "POST",
         body: JSON.stringify({ locationId, name: newName.trim() || undefined }),
       });
-      setJustCreatedCode({ code: res.pairing.code, expiresAt: res.pairing.expiresAt });
+      setJustCreatedCode({ pairingId: res.pairing.pairingId, code: res.pairing.code, expiresAt: res.pairing.expiresAt });
       setNewName("");
       setShowAddForm(false);
       await load();
@@ -229,6 +236,25 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       setError(e instanceof Error ? e.message : "Greška pri kreiranju uparivanja");
     } finally {
       setCreating(false);
+    }
+  }
+
+  // Printing V2 Admin UX — the code-reveal panel's dismiss action is a REAL
+  // cancel (DELETE the pairing session server-side), not just hiding the
+  // code from view — otherwise a "cancelled" pairing would silently stay
+  // consumable for its full 10-minute window after the Admin thought they
+  // dismissed it.
+  async function cancelJustCreatedCode() {
+    if (!justCreatedCode) return;
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/workstations/pairings/${justCreatedCode.pairingId}`, { method: "DELETE" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri otkazivanju");
+    } finally {
+      setJustCreatedCode(null);
+      setCodeCopied(false);
+      await load();
     }
   }
 
@@ -676,13 +702,10 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           </p>
           <button
             type="button"
-            onClick={() => {
-              setJustCreatedCode(null);
-              setCodeCopied(false);
-            }}
-            className="mt-2 text-xs font-semibold text-inkSoft underline"
+            onClick={cancelJustCreatedCode}
+            className="mt-2 text-xs font-semibold text-danger underline"
           >
-            Zatvori
+            Otkaži
           </button>
         </div>
       )}
