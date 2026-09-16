@@ -885,4 +885,31 @@ describe("Tekuća porudžbina does not duplicate submitted rows (physical-device
     const panelEl = host.querySelector<HTMLElement>(".fixed.bottom-0")!;
     expect(panelEl.textContent!).not.toContain("Coffee"); // gone from the draft panel — only in "Poslato / U pripremi" now
   });
+
+  // REGRESSION — real PREPROD QA (Task #3) found that the desktop split-view
+  // panel never got a real internal scroll boundary: --waiter-header-h was
+  // never actually set on a real order. Root cause: OrderClient has an EARLY
+  // RETURN with its own JSX tree while `order` is still null (this exact
+  // render sequence — order starts null, THEN a fetch resolves it — is
+  // reproduced naturally here since fetchMock's order lookup is async), so
+  // the ref'd header/root divs the CSS-variable effect depends on don't
+  // exist on the FIRST commit. With an empty effect dependency array the
+  // effect ran once (both refs null, no-op) and never again once the real
+  // divs mounted on the second commit. This is a component-render-order
+  // regression a pure geometry/computed-style check (jsdom has no real
+  // layout engine) could never catch on its own — it specifically requires
+  // rendering through the real loading -> loaded transition, which this
+  // test does. It does NOT substitute for real-browser physical scrolling
+  // proof (see the task's own real Chrome DevTools Protocol verification).
+  it("sets --waiter-header-h on the root element once the order finishes loading (not stuck from the pre-order render)", async () => {
+    await render(h(OrderClient, { tableId: "5" }));
+    const rootEl = host.querySelector<HTMLElement>('[style*="waiter-header-h"]');
+    expect(rootEl).toBeTruthy();
+    // jsdom has no real layout engine (offsetHeight is always 0 there), so
+    // this can only prove the effect ACTUALLY RAN and set a value — not a
+    // realistic pixel measurement. The real pixel value is proven in a real
+    // browser only (see this task's own CDP-based verification).
+    const value = rootEl!.style.getPropertyValue("--waiter-header-h");
+    expect(value.endsWith("px")).toBe(true);
+  });
 });

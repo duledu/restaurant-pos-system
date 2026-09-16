@@ -389,6 +389,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // brittle guessed pixel value.
   const rootRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
+  const hasOrder = Boolean(order);
   useLayoutEffect(() => {
     const headerEl = headerRef.current;
     const rootEl = rootRef.current;
@@ -402,7 +403,24 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     const observer = new ResizeObserver(sync);
     observer.observe(headerEl);
     return () => observer.disconnect();
-  }, []);
+    // REAL PREPROD QA REGRESSION (Task #3 re-fix): this component has an
+    // EARLY RETURN (`if (!order) return (...)`) with its OWN, DIFFERENT
+    // JSX tree while the order is still loading — neither ref'd div below
+    // exists yet at that point, so on the very first commit (order still
+    // null) this effect ran with both refs null and no-opped. With an
+    // empty dependency array it NEVER ran again once `order` populated and
+    // React swapped in the main return's actual ref'd header/root divs, so
+    // --waiter-header-h was NEVER set on any real order (confirmed via a
+    // real headless-browser render: the CSS variable was empty and
+    // `calc(100dvh - var(--waiter-header-h))` was therefore invalid CSS,
+    // silently leaving the desktop row's height unconstrained — the exact
+    // cause of the panel/menu never getting a real internal scroll
+    // boundary that "34f476a" claimed to fix but a jsdom/geometry check
+    // could never have caught, since jsdom doesn't lay out real pixel
+    // heights. Depending on `Boolean(order)` makes the effect re-run
+    // exactly once more, right when the real DOM (and refs) actually
+    // mount, without re-subscribing on every subsequent order update.
+  }, [hasOrder]);
 
   const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
   const [inspectionAttempt, setInspectionAttempt] = useState(0);
