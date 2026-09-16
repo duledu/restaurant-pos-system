@@ -31,7 +31,7 @@
 ; sam po sebi da potvrdi KOJI je tačno instaler instaliran (samo SHA-256
 ; je to razlikovao). Uvećaj OVAJ broj pri SVAKOM novom fizičkom-QA
 ; kandidatu ubuduće.
-#define MyAppVersion "1.0.0-pilot.3"
+#define MyAppVersion "1.0.0-pilot.4"
 #define MyAppPublisher "TableCore"
 #define MyServiceName "TableCorePrintAgent"
 #define MyServiceAccount "NT SERVICE\TableCorePrintAgent"
@@ -163,6 +163,35 @@ Source: "..\bin\Release\net8.0-windows\win-x64\publish\TableCore.PrintAgent.exe"
 ; PowerShell-a, JSON-a ili services.msc.
 Name: "{group}\Podešavanja radne stanice"; Filename: "{app}\TableCore.PrintAgent.exe"; Parameters: "{#AgentArgs}"; Comment: "Uparivanje i podešavanje radne stanice"
 Name: "{group}\Ukloni TableCore Print Agent"; Filename: "{uninstallexe}"
+
+[Registry]
+; Printing V2 — professional Admin -> Agent pairing handoff. Admin
+; generates a pairing code, clicks "Otvori TableCore Print Agent", and the
+; BROWSER on this exact machine navigates to
+; tablecore-print://pair?code=XXXX-XXXX-XXXX. Windows resolves that custom
+; scheme through THESE registry keys (identical mechanism to vscode://,
+; slack://, zoom://) and launches this same installed exe with the URI as
+; its one argument — Program.cs/SetupArgumentDispatch recognizes it and
+; opens the ordinary interactive Setup screen with the code pre-filled
+; (never auto-submitted, never touches an already-existing pairing — see
+; SetupForm.Initialize). This does NOT start a second service/process: the
+; launch goes through the exact same WindowsServiceHelpers.IsWindowsService()
+; check as a plain double-click, which is false for a shell/browser-invoked
+; process, so it always opens the interactive UI, never AgentRunner's
+; service loop. HKCR (not HKCU) because this installer already requires
+; admin elevation (PrivilegesRequired=admin above) for service
+; registration, so a machine-wide protocol registration costs nothing
+; extra and works for every Windows account on this PC, not just the one
+; that happened to install it. `uninsdeletekey` on the root key removes
+; the ENTIRE tablecore-print tree on uninstall — no orphaned registration.
+; The PREPROD build appends {#AgentArgs} to the registered command, same
+; as the Start Menu shortcut above, so URI activation on a PREPROD-paired
+; machine keeps targeting the same test server the background service
+; already uses, instead of silently falling back to production.
+Root: HKCR; Subkey: "tablecore-print"; ValueType: string; ValueName: ""; ValueData: "URL:TableCore Print Agent Protocol"; Flags: uninsdeletekey
+Root: HKCR; Subkey: "tablecore-print"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCR; Subkey: "tablecore-print\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\TableCore.PrintAgent.exe"",0"
+Root: HKCR; Subkey: "tablecore-print\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\TableCore.PrintAgent.exe"" ""%1""{#AgentArgs}"
 
 [Run]
 ; --- Registracija servisa (samo pri instalaciji/nadogradnji) ---
@@ -307,13 +336,63 @@ end;
 // releases that file lock in time. IgnoreErrors-equivalent behavior
 // (fresh install, no prior service) via ResultCode check — a missing
 // service is not a failure.
-procedure CurStepChanged(CurStep: TSetupStep);
+//
+// Physical investigation follow-up (installed-product-version-vs-running-
+// agent-version mismatch report) — `sc.exe stop` sends the stop control
+// and returns; it does NOT reliably block until the service process has
+// actually exited and released its file handle (unlike a bare assumption
+// that ewWaitUntilTerminated on the sc.exe PROCESS is the same as waiting
+// for the SERVICE to reach STOPPED). A slow graceful shutdown (closing the
+// SQLite state file, an in-flight HTTP call) could still be in progress
+// the instant [Files] tries to overwrite the exe. IsServiceStopped/
+// StopServiceAndWait add a short, bounded (max ~5s) poll loop so [Files]
+// only proceeds once the service has actually reported STOPPED — never a
+// hard gate (falls through after the timeout either way, same fallback
+// behavior — Inno's own "file in use" retry prompt — as before this
+// change), just a real safety margin for the one upgrade scenario that had
+// never been physically exercised before a real mismatch was reported.
+function IsServiceStopped(): Boolean;
 var
   ResultCode: Integer;
+  TempFile: string;
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  // Defaults to "stopped" (never blocks the install) if we can't determine
+  // status for any reason — this is best-effort hardening, not a hard gate.
+  Result := True;
+  TempFile := ExpandConstant('{tmp}\tcpa-scquery.txt');
+  if Exec(ExpandConstant('{cmd}'), '/C "' + ExpandConstant('{sys}\sc.exe') + ' query {#MyServiceName} > "' + TempFile + '""',
+     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if LoadStringsFromFile(TempFile, Lines) then
+    begin
+      for I := 0 to GetArrayLength(Lines) - 1 do
+        if (Pos('STATE', Lines[I]) > 0) and (Pos('STOPPED', Lines[I]) = 0) then
+          Result := False;
+    end;
+  end;
+end;
+
+procedure StopServiceAndWait();
+var
+  ResultCode: Integer;
+  Attempts: Integer;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Attempts := 0;
+  while (not IsServiceStopped()) and (Attempts < 10) do
+  begin
+    Sleep(500);
+    Attempts := Attempts + 1;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
-    Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    StopServiceAndWait();
   end;
 end;
 

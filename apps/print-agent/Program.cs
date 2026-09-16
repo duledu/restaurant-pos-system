@@ -135,9 +135,20 @@ if (args.Contains("--pair") || args.Contains("--heartbeat") || args.Contains("--
 // Eksplicitna indeks-po-indeks provera (ne Array.IndexOf po vrednosti) da
 // vrednost argumenta (npr. "--mode" kao string vrednost --server-a, teorijski)
 // nikad ne bude pogrešno protumačena kao sam flag.
+// Printing V2 — professional Admin -> Agent pairing handoff. Admin's
+// "Otvori TableCore Print Agent" button navigates the browser to
+// tablecore-print://pair?code=XXXX-XXXX-XXXX (registered by the installer,
+// see [Registry] in TableCorePrintAgent.iss); Windows launches THIS exe
+// with that URI as an argument. Recognized as interactive Setup args
+// exactly like --mode/--server/--bypass-header above, and the code is
+// extracted ONLY to pre-fill the pairing textbox — the user still clicks
+// "Poveži" explicitly (never auto-submitted), and an already-paired
+// machine never has its existing pairing touched by this (the code box
+// stays disabled/unfilled once paired — see SetupForm.Initialize).
 if (SetupArgumentDispatch.IsInteractiveSetupArgs(args))
 {
-    SetupForm.RunInteractive(args);
+    var prefillPairingCode = SetupArgumentDispatch.ExtractPairingCode(args);
+    SetupForm.RunInteractive(args, prefillPairingCode);
     return;
 }
 
@@ -271,18 +282,58 @@ public static class RequestProtection
 /// </summary>
 public static class SetupArgumentDispatch
 {
+    // Printing V2 — custom URI protocol registered by the installer
+    // ([Registry] section) so Admin's "Otvori TableCore Print Agent" button
+    // can hand off a freshly generated pairing code directly to the
+    // installed Agent, same pattern as vscode:// / slack:// / zoom://.
+    public const string PairingUriScheme = "tablecore-print://";
+
     private static bool IsEndpointFlag(string arg) => arg is "--mode" or "--server" or "--bypass-header";
+    private static bool IsPairingUri(string arg) => arg.StartsWith(PairingUriScheme, StringComparison.OrdinalIgnoreCase);
 
     public static bool IsInteractiveSetupArgs(string[] args)
     {
-        var onlyEndpointArgs = true;
-        for (var i = 0; i < args.Length && onlyEndpointArgs; i++)
+        var onlyRecognized = true;
+        for (var i = 0; i < args.Length && onlyRecognized; i++)
         {
             var isFlag = IsEndpointFlag(args[i]);
             var isValueOfPrecedingFlag = i > 0 && IsEndpointFlag(args[i - 1]);
-            if (!isFlag && !isValueOfPrecedingFlag) onlyEndpointArgs = false;
+            var isUri = IsPairingUri(args[i]);
+            if (!isFlag && !isValueOfPrecedingFlag && !isUri) onlyRecognized = false;
         }
-        return onlyEndpointArgs;
+        return onlyRecognized;
+    }
+
+    /// <summary>
+    /// Extracts the `code` query parameter from a
+    /// tablecore-print://pair?code=XXXX-XXXX-XXXX argument, if present.
+    /// Deliberately tolerant — a malformed/foreign/missing code returns
+    /// null and Setup simply opens with an empty pairing box, exactly like
+    /// a plain double-click. Manual string parsing (no System.Uri query
+    /// parsing, no extra package) since a custom, unregistered-with-.NET
+    /// scheme doesn't need more than "find '?', split on '&', split on
+    /// '='" — the pairing code alphabet (Crockford Base32 + hyphens) never
+    /// needs percent-decoding, but Uri.UnescapeDataString is applied
+    /// defensively anyway in case a browser encodes the hyphens.
+    /// </summary>
+    public static string? ExtractPairingCode(string[] args)
+    {
+        foreach (var arg in args)
+        {
+            if (!IsPairingUri(arg)) continue;
+            var queryStart = arg.IndexOf('?');
+            if (queryStart < 0) return null;
+            foreach (var pair in arg[(queryStart + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = pair.Split('=', 2);
+                if (kv.Length == 2 && string.Equals(kv[0], "code", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { return Uri.UnescapeDataString(kv[1]); } catch (FormatException) { return null; }
+                }
+            }
+            return null;
+        }
+        return null;
     }
 
     /// <summary>
@@ -290,15 +341,24 @@ public static class SetupArgumentDispatch
     /// "--bypass-header" sa "***" PRE spajanja u jedan red, tako da čak i
     /// neočekivana kombinacija (npr. --bypass-header UZ neku DRUGU
     /// nepoznatu opciju) ne može da isprinta tajni token u "Nepoznata
-    /// opcija" poruku.
+    /// opcija" poruku. Isto tako, jednokratan kod za uparivanje unutar
+    /// tablecore-print:// URI-ja se NIKAD ne ispisuje u punom obliku, čak ni
+    /// u odbrambenoj "Nepoznata opcija" grani.
     /// </summary>
     public static string Redact(string[] args)
     {
         var redacted = new string[args.Length];
         for (var i = 0; i < args.Length; i++)
         {
-            redacted[i] = i > 0 && args[i - 1] == "--bypass-header" ? "***" : args[i];
+            if (i > 0 && args[i - 1] == "--bypass-header") { redacted[i] = "***"; continue; }
+            redacted[i] = IsPairingUri(args[i]) ? RedactPairingUri(args[i]) : args[i];
         }
         return string.Join(' ', redacted);
+    }
+
+    private static string RedactPairingUri(string uri)
+    {
+        var queryStart = uri.IndexOf('?');
+        return queryStart < 0 ? uri : uri[..queryStart] + "?code=***";
     }
 }

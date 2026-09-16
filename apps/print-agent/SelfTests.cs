@@ -389,6 +389,33 @@ internal static class SelfTests
         Check(!redacted.Contains("secret123", StringComparison.Ordinal) && redacted.Contains("***", StringComparison.Ordinal),
             "Redact() never lets a --bypass-header value reach an error/log line, even in the fail-closed 'Nepoznata opcija' branch");
 
+        // Printing V2 — professional Admin -> Agent pairing handoff via a
+        // custom tablecore-print:// URI (installer-registered, see
+        // TableCorePrintAgent.iss [Registry]). A lone URI argument must be
+        // recognized as interactive Setup args (opens the ordinary Setup
+        // screen, never the "Nepoznata opcija" error path), the pairing
+        // code must be extracted for pre-fill ONLY (never auto-submitted —
+        // that's SetupForm's job, not this dispatch layer), and the code
+        // must never leak into a log/redaction line.
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(["tablecore-print://pair?code=ABCD-EFGH-JKMN"]),
+            "a lone tablecore-print:// pairing URI is recognized as interactive Setup args");
+        Check(SetupArgumentDispatch.IsInteractiveSetupArgs(
+                ["tablecore-print://pair?code=ABCD-EFGH-JKMN", "--mode", "test", "--server", "http://127.0.0.1:3101"]),
+            "a pairing URI alongside PREPROD endpoint args (baked into the registered protocol command) is still recognized");
+        Check(!SetupArgumentDispatch.IsInteractiveSetupArgs(["tablecore-print://pair?code=ABCD-EFGH-JKMN", "--unknown"]),
+            "a pairing URI alongside a genuinely unknown flag still fails closed (no validation weakened)");
+        Check(SetupArgumentDispatch.ExtractPairingCode(["tablecore-print://pair?code=ABCD-EFGH-JKMN"]) == "ABCD-EFGH-JKMN",
+            "ExtractPairingCode reads the code query parameter from a pairing URI");
+        Check(SetupArgumentDispatch.ExtractPairingCode(["tablecore-print://pair?other=1&code=WXYZ-2345-6789"]) == "WXYZ-2345-6789",
+            "ExtractPairingCode finds code even when it isn't the first query parameter");
+        Check(SetupArgumentDispatch.ExtractPairingCode([]) is null, "ExtractPairingCode returns null with no args (plain double-click, unchanged behavior)");
+        Check(SetupArgumentDispatch.ExtractPairingCode(["--mode", "test"]) is null, "ExtractPairingCode returns null when no pairing URI is present");
+        Check(SetupArgumentDispatch.ExtractPairingCode(["tablecore-print://pair?nocode=1"]) is null, "ExtractPairingCode returns null (never throws) for a URI missing the code parameter");
+        Check(SetupArgumentDispatch.ExtractPairingCode(["not-a-uri-at-all"]) is null, "ExtractPairingCode returns null (never throws) for a foreign/malformed argument");
+        var uriRedacted = SetupArgumentDispatch.Redact(["tablecore-print://pair?code=ABCD-EFGH-JKMN", "--unknown"]);
+        Check(!uriRedacted.Contains("ABCD-EFGH-JKMN", StringComparison.Ordinal) && uriRedacted.Contains("code=***", StringComparison.Ordinal),
+            "Redact() never lets a pairing code from a tablecore-print:// URI reach an error/log line either");
+
         // Faza 2C — Ticket.TestPrint (Admin "Test Print" dugme, autentifikovan
         // put preko AgentRunner.HandleTestPrintRequest). Mora biti jasno
         // obeleženo i uključiti sva tražena polja, i mora proći postojeću

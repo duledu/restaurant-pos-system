@@ -294,6 +294,21 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     setJustCreatedCode(null);
   }
 
+  // Printing V2 — professional Admin -> Agent pairing handoff. Only works
+  // when the browser tab is open ON the exact Windows computer being
+  // paired (the custom scheme is registered by the installer on THAT
+  // machine, apps/print-agent/installer/TableCorePrintAgent.iss
+  // [Registry]) — same mechanism as vscode:// / slack:// / zoom://.
+  // window.location.href (not window.open) is the standard technique:
+  // browsers intercept the custom-scheme navigation and prompt "Open
+  // TableCore Print Agent?" without actually navigating this Admin page
+  // away or leaving a stray blank tab. If the Agent isn't installed or the
+  // browser can't resolve the scheme, nothing visibly breaks here — the
+  // "Kopiraj kod" fallback right next to it always still works.
+  function openPrintAgent(code: string) {
+    window.location.href = `tablecore-print://pair?code=${encodeURIComponent(code)}`;
+  }
+
   async function copyPairingCode(code: string) {
     try {
       if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
@@ -636,6 +651,13 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             <p className="font-mono text-2xl font-bold tracking-wider text-ink">{justCreatedCode.code}</p>
             <button
               type="button"
+              onClick={() => openPrintAgent(justCreatedCode.code)}
+              className="min-h-9 rounded-md bg-graphite px-3 text-xs font-semibold text-cream-100 hover:bg-graphite/90"
+            >
+              Otvori TableCore Print Agent
+            </button>
+            <button
+              type="button"
               onClick={() => copyPairingCode(justCreatedCode.code)}
               className="min-h-9 rounded-md border border-gold/50 bg-cream-100 px-3 text-xs font-semibold text-ink hover:bg-gold-soft"
             >
@@ -643,8 +665,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             </button>
           </div>
           <p className="mt-1 text-xs text-inkSoft">
-            Ističe za {remainingMinutes(justCreatedCode.expiresAt)} min — prikazuje se samo ovde, jednom. Sačuvaj ovaj ekran otvoren dok ne
-            upariš agenta. Rute štampe (Kuhinja/Šank/Račun) podešavaš posle uparivanja, ispod.
+            Ističe za {remainingMinutes(justCreatedCode.expiresAt)} min — prikazuje se samo ovde, jednom. Rute štampe
+            (Kuhinja/Šank/Račun) podešavaš posle uparivanja, ispod.
+          </p>
+          <p className="mt-1 text-xs text-inkSoft">
+            <strong>Otvori TableCore Print Agent</strong> radi samo na RAČUNARU koji uparuješ (i samo ako je agent već
+            instaliran) — kod se automatski upiše, ti samo klikneš „Poveži“. Ako dugme ne radi (browser ne prepoznaje
+            program), koristi <strong>Kopiraj kod</strong> i ručno otvori „Podešavanja radne stanice“ iz Start menija
+            pa nalepi kod.
           </p>
           <button
             type="button"

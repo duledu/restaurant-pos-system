@@ -228,3 +228,64 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     expect(pairingForm.querySelector("select")).toBeNull();
   });
 });
+
+describe("WorkstationsPanel — Admin -> Agent pairing handoff (tablecore-print:// URI)", () => {
+  function mockFetchWithPairingCreation() {
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      const path = String(input).split("?")[0];
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [] });
+      if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
+      if (path === "/api/admin/workstations/pairings" && options?.method === "POST") {
+        return response({ pairing: { code: "ABCD-EFGH-JKMN", expiresAt: new Date(Date.now() + 10 * 60000).toISOString() } }, true);
+      }
+      throw new Error(`Unexpected request ${input}`);
+    });
+  }
+
+  it("'Otvori TableCore Print Agent' navigates to a tablecore-print://pair URI carrying the exact freshly-created code", async () => {
+    workstationsResponse = [];
+    mockFetchWithPairingCreation();
+    await mount();
+    await act(async () => {
+      const addButton = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Dodaj Print Agent računar"));
+      addButton!.click();
+    });
+    await act(async () => {
+      const generateButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Generiši kod za uparivanje");
+      generateButton!.click();
+    });
+    const openButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Otvori TableCore Print Agent");
+    expect(openButton).toBeTruthy();
+
+    // jsdom does not implement custom-scheme navigation — assert the exact
+    // URI the component WOULD navigate to, via a location.href setter spy,
+    // rather than actually driving window.location (unsupported in jsdom
+    // for non-http(s) schemes and irrelevant to what we're proving here).
+    let assignedHref: string | null = null;
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, set href(v: string) { assignedHref = v; }, get href() { return assignedHref ?? ""; } },
+      writable: true,
+    });
+    await act(async () => {
+      openButton!.click();
+    });
+    expect(assignedHref).toMatch(/^tablecore-print:\/\/pair\?code=/);
+    expect(decodeURIComponent(assignedHref!.split("code=")[1])).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+  });
+
+  it("the manual 'Kopiraj kod' fallback remains available right next to the one-click button", async () => {
+    workstationsResponse = [];
+    mockFetchWithPairingCreation();
+    await mount();
+    await act(async () => {
+      const addButton = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Dodaj Print Agent računar"));
+      addButton!.click();
+    });
+    await act(async () => {
+      const generateButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Generiši kod za uparivanje");
+      generateButton!.click();
+    });
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Otvori TableCore Print Agent")).toBe(true);
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent?.includes("Kopiraj kod"))).toBe(true);
+  });
+});

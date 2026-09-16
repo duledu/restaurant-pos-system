@@ -77,8 +77,9 @@ public sealed class SetupForm : Form
 
     private readonly AgentEndpoint _endpoint = null!;
     private readonly string? _endpointError;
+    private readonly string? _prefillPairingCode;
 
-    public SetupForm() : this([]) { }
+    public SetupForm() : this([], null) { }
 
     /// <summary>
     /// Faza 2C — bezbednosni zahtev, sekcija 8: "Setup/service configuration
@@ -91,9 +92,18 @@ public sealed class SetupForm : Form
     /// prikazuje grešku i uparivanje ostaje onemogućeno dok se ne ispravi
     /// (isto "fail closed, nikad tih pad na produkciju" pravilo kao
     /// AgentService.cs/Program.cs).
+    ///
+    /// Printing V2 — <paramref name="prefillPairingCode"/> dolazi iz
+    /// tablecore-print:// URI aktivacije (Admin "Otvori TableCore Print
+    /// Agent" dugme, vidi Program.cs/SetupArgumentDispatch). SAMO popunjava
+    /// tekst polja pre uparivanja — nikad ne pokreće OnPair() automatski
+    /// (korisnik i dalje mora eksplicitno kliknuti "Poveži"), i nikad se ne
+    /// koristi ako je mašina VEĆ uparena (vidi Initialize ispod) — otvaranje
+    /// agenta iz Admin panela nikad ne dira postojeće uparivanje.
     /// </summary>
-    public SetupForm(string[] args)
+    public SetupForm(string[] args, string? prefillPairingCode)
     {
+        _prefillPairingCode = prefillPairingCode;
         try
         {
             _endpoint = AgentEndpoint.Resolve(args);
@@ -202,6 +212,16 @@ public sealed class SetupForm : Form
         var paired = CredentialStore.HasStoredCredential();
         LoadExistingConfigIfPresent();
         RefreshStatus(paired);
+        // Printing V2 — pre-fill from a tablecore-print:// URI activation,
+        // but ONLY when not already paired. An already-paired machine keeps
+        // its pairing box disabled (see RefreshStatus) regardless of this —
+        // opening the Agent from Admin must never risk touching an existing
+        // pairing, so we don't even populate a stray code into that state.
+        if (!paired && !string.IsNullOrWhiteSpace(_prefillPairingCode))
+        {
+            _pairingCodeBox.Text = _prefillPairingCode.Trim();
+            ShowPairFeedback("Kod je automatski popunjen sa Admin panela — proveri i klikni „Poveži“.", isError: false);
+        }
         if (_endpointError is not null)
         {
             SetPairButtonEnabled(false);
@@ -426,7 +446,20 @@ public sealed class SetupForm : Form
         MessageBox.Show(this, $"{outcome.Status}: {outcome.Guarantee}" + (outcome.Error is null ? "" : $"\n\n{outcome.Error}"), "TableCore — Test Print", MessageBoxButtons.OK, icon);
     }
 
-    public static void RunInteractive(string[] args)
+    /// <summary>
+    /// Physical QA follow-up (installed-product-vs-running-agent mismatch
+    /// investigation) — "the user currently cannot open the Setup UI" is
+    /// indistinguishable, from a WinExe GUI app with no console, from "an
+    /// unhandled exception killed the process before/during Application.Run
+    /// with nothing visible". Both Application.ThreadException (UI-thread
+    /// exceptions after the message loop starts) and
+    /// AppDomain.UnhandledException (anything else, including during form
+    /// construction) are now wired to a visible MessageBox instead of a
+    /// silent crash — this doesn't change what CAN fail, only guarantees
+    /// that if it does, the restaurant user (and support) sees why instead
+    /// of nothing happening on double-click.
+    /// </summary>
+    public static void RunInteractive(string[] args, string? prefillPairingCode = null)
     {
         // Ručna inicijalizacija umesto generisanog ApplicationConfiguration.Initialize()
         // — ovaj projekat koristi Microsoft.NET.Sdk.Web (UseWindowsForms dodat ručno
@@ -435,6 +468,25 @@ public sealed class SetupForm : Form
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new SetupForm(args));
+        Application.ThreadException += (_, e) => ShowFatalError(e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => ShowFatalError(e.ExceptionObject as Exception ?? new Exception("Nepoznata greška."));
+        try
+        {
+            Application.Run(new SetupForm(args, prefillPairingCode));
+        }
+        catch (Exception ex)
+        {
+            ShowFatalError(ex);
+        }
+    }
+
+    private static void ShowFatalError(Exception ex)
+    {
+        AgentLog.Warn($"Setup UI fatal error: {ex.GetType().Name}: {ex.Message}");
+        MessageBox.Show(
+            $"TableCore Print Agent — podešavanje nije moglo da se otvori zbog neočekivane greške:\n\n{ex.Message}\n\n" +
+            "Pokušajte ponovo. Ako se greška ponavlja, kontaktirajte podršku.",
+            "TableCore Print Agent — greška",
+            MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 }
