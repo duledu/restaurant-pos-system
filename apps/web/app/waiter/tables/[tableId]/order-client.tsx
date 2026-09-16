@@ -357,6 +357,32 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const [quickFeedback, setQuickFeedback] = useState("");
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // DESKTOP SPLIT-VIEW (>=1280px/xl:): the order panel becomes a sticky
+  // right column instead of a fixed bottom overlay, and must sit BELOW the
+  // page's own sticky header rather than under it — its header content
+  // (back button + table name) doesn't change across breakpoints, but its
+  // rendered height isn't a safe constant to hardcode (font
+  // rendering/OS zoom/future copy changes), so it's measured once and
+  // exposed as a CSS variable the xl: styles below read from, instead of a
+  // brittle guessed pixel value.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const headerEl = headerRef.current;
+    const rootEl = rootRef.current;
+    if (!headerEl || !rootEl) return;
+    const sync = () => rootEl.style.setProperty("--waiter-header-h", `${headerEl.offsetHeight}px`);
+    sync();
+    // Not available in the jsdom unit-test environment — the one-time sync()
+    // above already covers those tests (they never resize the viewport);
+    // every real browser this app targets supports ResizeObserver.
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(sync);
+    observer.observe(headerEl);
+    return () => observer.disconnect();
+  }, []);
+
   const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
   const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
@@ -780,10 +806,12 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
   // ne završi vizuelno ispod fiksnog panela — mora biti VEĆI od panelovog
   // realnog max-h (min(62dvh,34rem)) plus header/footer da bi poslednji red
-  // menija ostao dostižan skrolom stranice čak i kad je panel pun.
+  // menija ostao dostižan skrolom stranice čak i kad je panel pun. Nepotrebno
+  // (i pogrešno) na desktop split-view-u (xl:) — panel tamo više nije fiksni
+  // preklop preko dna stranice, već sticky desna kolona pored menija.
   return (
-    <div className="flex min-h-screen flex-col bg-cream-200 pb-[28rem]">
-      <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
+    <div ref={rootRef} className="flex min-h-screen flex-col bg-cream-200 pb-[28rem] xl:pb-0">
+      <div ref={headerRef} className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
         <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
           ← Stolovi
         </button>
@@ -796,7 +824,13 @@ function TableOrderClient({ tableId }: { tableId: string }) {
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-5xl">
+      {/* DESKTOP SPLIT-VIEW (>=1280px/xl:) — menu (left, ~68%) and the
+          current-order panel (right, ~32%, sticky) become flex siblings in
+          one row instead of the panel overlaying the bottom of the page.
+          Below xl: this is an inert wrapper (no flex/gap/etc. applied), so
+          tablet/mobile keep the exact existing stacked/fixed-panel layout. */}
+      <div className="xl:mx-auto xl:flex xl:w-full xl:max-w-[1600px] xl:items-start xl:gap-4 xl:px-4 xl:pb-4">
+      <div className="mx-auto w-full max-w-5xl xl:mx-0 xl:min-w-0 xl:max-w-none xl:flex-[68]">
         {(error || draft.retryable) && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error ?? "Izmena nije potvrđena."}{draft.retryable && <button onClick={draft.retry} className="ml-3 min-h-11 underline">Pokušaj ponovo</button>}</div>}
 
         {/* FAZA 10: najistaknutija sekcija na ekranu kad postoji bar jedna
@@ -926,9 +960,19 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           telefonima/sa dosta stavki, ceo panel (header+lista+footer+dugme)
           je mogao da preraste vidljivi deo ekrana, gurajući poslednje
           stavke (i deo footer-a) IZNAD vrha ekrana, van domašaja skrola
-          (position:fixed se ne "skraćuje" sam od sebe uz sadržaj). */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)]">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftCount} stavki</span></div>
+          (position:fixed se ne "skraćuje" sam od sebe uz sadržaj).
+
+          DESKTOP SPLIT-VIEW (xl:): isti panel, ista unutrašnja struktura
+          (header/lista/footer/dugme), samo drugačiji SPOLJNI kontekst —
+          sticky desna kolona umesto fixed preklopa preko dna stranice.
+          `top` čita --waiter-header-h (izmerena visina sticky header-a
+          iznad, vidi useLayoutEffect) umesto nagađane vrednosti u pikselima,
+          tako da panel uvek počinje TAČNO ispod header-a bez obzira na
+          njegovu stvarnu visinu. min-w/max-w garantuju čitljivu širinu
+          (naziv/količina/cena/total) na bilo kojoj desktop rezoluciji —
+          nikad se ne skuplja ispod min-w bez obzira na flex-shrink. */}
+      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:sticky xl:inset-x-auto xl:bottom-auto xl:left-auto xl:right-auto xl:top-[var(--waiter-header-h)] xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:max-h-[calc(100dvh-var(--waiter-header-h)-1rem)] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2 xl:mx-0 xl:max-w-none"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftCount} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
@@ -975,6 +1019,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             </button>
           )}
         </div>
+      </div>
       </div>
 
       {modifierPickerItem && (
