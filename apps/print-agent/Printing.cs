@@ -204,13 +204,28 @@ public sealed class TicketRaster : IDisposable
     // at 203 DPI without wasting much vertical space on a 58 mm roll.
     private const int RuleRowHeightPx = 16;
     private const int RuleThicknessPx = 2;
+
+    /// <summary>
+    /// RECEIPT RENDERING POLISH — the printable width in pixels for a given
+    /// configured paperWidthMm, derived (never hardcoded per-receipt-type)
+    /// so both the raster itself and TicketPayload's layout-fitting
+    /// decisions (TOTAL collision protection, item price alignment) always
+    /// agree on exactly the same number. 58 mm rolls commonly have only
+    /// 48 mm printable width; 80 mm uses 72 mm — this is the ONE place
+    /// that mapping lives, so a future wider layout for 80mm only ever
+    /// requires changing the mapping here, never re-deriving it elsewhere.
+    /// </summary>
+    public static int ContentWidthPx(int widthMm)
+    {
+        if (widthMm is not (58 or 80)) throw new ArgumentException("Unsupported paper width.");
+        var contentMm = widthMm == 58 ? 48 : 72;
+        return (int)Math.Floor(contentMm / 25.4f * Dpi);
+    }
+
     public TicketRaster(Ticket ticket, int widthMm)
     {
         ticket.Validate();
-        if (widthMm is not (58 or 80)) throw new ArgumentException("Unsupported paper width.");
-        // 58 mm rolls commonly have only 48 mm printable width; 80 mm uses 72 mm.
-        var contentMm = widthMm == 58 ? 48 : 72;
-        var width = (int)Math.Floor(contentMm / 25.4f * Dpi);
+        var width = ContentWidthPx(widthMm);
         using var probe = new Bitmap(width, 1);
         probe.SetResolution(Dpi, Dpi);
         using var measure = Graphics.FromImage(probe);

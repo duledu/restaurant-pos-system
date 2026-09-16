@@ -270,10 +270,41 @@ internal static class SelfTests
             // typical real receipt (short/long/very-long names, modifiers,
             // two VAT rates); prove it still fits this same real driver at
             // 58mm, exactly like a real receipt does above.
-            var testPrintTicketForDriver = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", printerName, 58, "1.0.0-pilot.8");
+            var testPrintTicketForDriver = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", printerName, 58, "1.0.0-pilot.9");
             var testPrintDriverResult = WindowsPrinter.Print(new("RECEIPT", printerName, 58), testPrintTicketForDriver, "self-test-receipt-test-print", dryRun: true);
             Check(testPrintDriverResult.Status == "PREFLIGHT_ONLY",
                 $"[{printerName}] the realistic RECEIPT Test Print ticket (stress-test content, same renderer as a real receipt) fits this same real driver — {testPrintDriverResult.Guarantee}");
+
+            // RECEIPT REDESIGN — real-driver proof for the 11-item receipt
+            // matching the physically-printed example structure from this
+            // task (Pileća Karađorđeva / Teletina u sosu / Dimljeni
+            // svinjski vrat / etc.), including the redesigned (smaller)
+            // typography and the CRITICAL TOTAL RULE fitting logic.
+            var elevenItemJson = System.Text.Json.JsonDocument.Parse("""
+                {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+                 "receiptNumber":428,"tableLabel":"Sto 1","waiterName":"Test_11 Detlic","issuedAt":"2026-09-16T19:59:00.000Z",
+                 "items":[
+                   {"quantity":1,"name":"Pileća Karađorđeva","basePrice":"600.00","lineTotal":"600.00"},
+                   {"quantity":1,"name":"Teletina u sosu","basePrice":"1100.00","lineTotal":"1100.00"},
+                   {"quantity":1,"name":"Bavaria","basePrice":"300.00","lineTotal":"300.00"},
+                   {"quantity":2,"name":"Dimljeni svinjski vrat","basePrice":"2000.00","lineTotal":"4000.00"},
+                   {"quantity":2,"name":"Rosa 0.33","basePrice":"120.00","lineTotal":"240.00"},
+                   {"quantity":1,"name":"Rosa 0.75","basePrice":"200.00","lineTotal":"200.00"},
+                   {"quantity":1,"name":"Birra Moretti","basePrice":"200.00","lineTotal":"200.00"},
+                   {"quantity":1,"name":"Grilovano povrće","basePrice":"350.00","lineTotal":"350.00"},
+                   {"quantity":1,"name":"Šopska salata","basePrice":"330.00","lineTotal":"330.00"},
+                   {"quantity":3,"name":"Heineken 0.0","basePrice":"200.00","lineTotal":"600.00"},
+                   {"quantity":1,"name":"Espresso","basePrice":"150.00","lineTotal":"150.00"}
+                 ],
+                 "subtotal":"8070.00","taxTotal":"1614.00",
+                 "taxBreakdown":[{"taxRate":"20","taxableAmount":"8070.00","taxAmount":"1614.00"}],
+                 "discountAmount":null,"total":"9684.00","currency":"RSD",
+                 "paymentMethod":"CASH","tenderedAmount":"9684.00","changeAmount":"0.00","paperWidthMm":58}
+                """).RootElement;
+            var (elevenItemTicket, _, _) = TicketPayload.Parse(elevenItemJson);
+            var elevenItemResult = WindowsPrinter.Print(new("RECEIPT", printerName, 58), elevenItemTicket, "self-test-receipt-11-items", dryRun: true);
+            Check(elevenItemResult.Status == "PREFLIGHT_ONLY",
+                $"[{printerName}] REDESIGN PROOF: the 11-item receipt matching this task's physically-printed example (redesigned compact typography, measured TOTAL fitting) fits this same real driver — {elevenItemResult.Guarantee}");
         }
 
         // Faza 2B Korak 0 — DPAPI CredentialStore round-trip. Sačuvaj/vrati
@@ -470,7 +501,7 @@ internal static class SelfTests
         // RECEIPT RENDERING POLISH, requirement #17 — the Admin Test Print
         // for a RECEIPT route must exercise this SAME renderer (not a
         // disconnected diagnostic ticket) and must be unmistakable.
-        var testPrintTicket = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", "POS-58", 58, "1.0.0-pilot.8");
+        var testPrintTicket = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", "POS-58", 58, "1.0.0-pilot.9");
         var testPrintText = JoinedText(testPrintTicket);
         Check(testPrintText.Contains("TEST ŠTAMPE") && testPrintText.Contains("TEST USPEŠAN"), "Test Print is unmistakably marked, cannot be confused with a real customer receipt");
         Check(!testPrintText.Contains("RAČUN #"), "Test Print never renders a receipt number — it must never look like a real, sequence-consuming transaction");
@@ -480,6 +511,120 @@ internal static class SelfTests
         Check(testPrintText.Contains("Primljeno") && testPrintText.Contains("Kusur"), "Test Print stress-tests a CASH payment with change through the REAL renderer");
         testPrintTicket.Validate();
         Check(true, "TicketPayload.BuildReceiptTestPrintTicket output passes existing Ticket.Validate() unchanged");
+
+        // RECEIPT REDESIGN — CRITICAL TOTAL RULE. Physical printing showed
+        // "UKUPNO + amount + RSD" visually colliding on the real 58mm
+        // paper — the old code trusted that a large bold font + a long
+        // amount would always fit next to the "UKUPNO" label, which is
+        // exactly the assumption that broke. RenderTotalLines now MEASURES
+        // (GDI+, the same engine that sizes the page) and falls back to a
+        // verified-safe two-line arrangement when a one-line total
+        // wouldn't fit. Tested across the exact realistic amount range
+        // requested: a few-digit total through a 7-digit one.
+        static Ticket ReceiptWithTotal(string total) => TicketPayload.Parse(System.Text.Json.JsonDocument.Parse($$"""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+             "receiptNumber":1,"tableLabel":"1","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
+             "items":[{"quantity":1,"name":"Kafa","basePrice":"{{total}}","lineTotal":"{{total}}"}],
+             "subtotal":"{{total}}","taxTotal":"0.00","discountAmount":null,"total":"{{total}}","currency":"RSD",
+             "paymentMethod":"CASH","tenderedAmount":"{{total}}","changeAmount":"0.00","paperWidthMm":58}
+            """).RootElement).Ticket;
+
+        // Short-to-typical totals must use the clean one-line form — proves
+        // the fallback isn't over-conservative and only ever engages for a
+        // genuinely long amount, so the common real-world receipt keeps the
+        // strongest, cleanest TOTAL presentation.
+        foreach (var total in new[] { "9.00", "9999.00" })
+        {
+            var ticket = ReceiptWithTotal(total);
+            var totalLine = ticket.Lines.FirstOrDefault(l => l.Text == "UKUPNO");
+            Check(totalLine is not null && totalLine.RightText is not null && totalLine.RightText.Contains("RSD"),
+                $"CRITICAL TOTAL RULE: a short-to-typical total ({total}) renders UKUPNO and the amount on ONE clean row");
+        }
+        // Across the full realistic range (a few digits through a 7-digit
+        // total), whichever arrangement the MEASURED fit produces, both
+        // must be structurally safe: EITHER one combined row (label +
+        // amount both present on the same line) OR the label alone
+        // immediately followed by the amount alone, right-aligned — never
+        // any other shape, and never an exception building/rastering the
+        // ticket (which would indicate overflow/clipping).
+        foreach (var total in new[] { "9.00", "999.00", "9999.00", "99999.00", "999999.00", "9999999.00" })
+        {
+            var ticket = ReceiptWithTotal(total);
+            ticket.Validate();
+            using var raster = new TicketRaster(ticket, 58); // never throws — no overflow, no clipping, at any realistic total length
+
+            var totalLineIndex = Array.FindIndex(ticket.Lines, l => l.Text == "UKUPNO");
+            Check(totalLineIndex >= 0, $"CRITICAL TOTAL RULE ({total}): UKUPNO label is present");
+            var totalLine = ticket.Lines[totalLineIndex];
+            var oneLine = totalLine.RightText is not null && totalLine.RightText.Contains("RSD");
+            var twoLine = totalLine.RightText is null && totalLineIndex + 1 < ticket.Lines.Length
+                && ticket.Lines[totalLineIndex + 1].Text == "" && (ticket.Lines[totalLineIndex + 1].RightText?.Contains("RSD") ?? false);
+            Check(oneLine || twoLine, $"CRITICAL TOTAL RULE ({total}): renders as either one clean combined row or UKUPNO alone + the amount alone right-aligned on the next line — never any other shape, never a collision");
+        }
+
+        // RECEIPT REDESIGN — remaining explicit test matrix items: 10+
+        // items, zero change, long waiter name, long restaurant name, and
+        // an explicit proof that KITCHEN/BAR typography is untouched by
+        // this receipt-only redesign.
+        {
+            var manyItemsJson = System.Text.Json.JsonDocument.Parse("""
+                {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+                 "receiptNumber":428,"tableLabel":"Sto 1","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
+                 "items":[
+                   {"quantity":1,"name":"Pileća Karađorđeva","basePrice":"600.00","lineTotal":"600.00"},
+                   {"quantity":1,"name":"Teletina u sosu","basePrice":"1100.00","lineTotal":"1100.00"},
+                   {"quantity":1,"name":"Bavaria","basePrice":"300.00","lineTotal":"300.00"},
+                   {"quantity":2,"name":"Dimljeni svinjski vrat","basePrice":"2000.00","lineTotal":"4000.00"},
+                   {"quantity":2,"name":"Rosa 0.33","basePrice":"120.00","lineTotal":"240.00"},
+                   {"quantity":1,"name":"Rosa 0.75","basePrice":"200.00","lineTotal":"200.00"},
+                   {"quantity":1,"name":"Birra Moretti","basePrice":"200.00","lineTotal":"200.00"},
+                   {"quantity":1,"name":"Grilovano povrće","basePrice":"350.00","lineTotal":"350.00"},
+                   {"quantity":1,"name":"Šopska salata","basePrice":"330.00","lineTotal":"330.00"},
+                   {"quantity":3,"name":"Heineken 0.0","basePrice":"200.00","lineTotal":"600.00"},
+                   {"quantity":1,"name":"Espresso","basePrice":"150.00","lineTotal":"150.00"}
+                 ],
+                 "subtotal":"8070.00","taxTotal":"1614.00",
+                 "taxBreakdown":[{"taxRate":"20","taxableAmount":"8070.00","taxAmount":"1614.00"}],
+                 "discountAmount":null,"total":"9684.00","currency":"RSD",
+                 "paymentMethod":"CASH","tenderedAmount":"9684.00","changeAmount":"0.00","paperWidthMm":58}
+                """).RootElement;
+            var (manyItemsTicket, _, _) = TicketPayload.Parse(manyItemsJson);
+            var manyItemsText = string.Join("\n", manyItemsTicket.Lines.Select(l => l.RightText is null ? l.Text : $"{l.Text} {l.RightText}"));
+            Check(manyItemsText.Contains("Pileća Karađorđeva") && manyItemsText.Contains("Birra Moretti") && manyItemsText.Contains("Espresso"),
+                "10+ item receipt (matching the physically-printed example structure) renders every item");
+            Check(manyItemsText.Contains("Kusur") && manyItemsText.Contains("0,00"), "a CASH payment with EXACT change still shows Kusur: 0,00 (never omitted just because it's zero)");
+            manyItemsTicket.Validate();
+            using var manyItemsRaster = new TicketRaster(manyItemsTicket, 58);
+
+            var longNamesJson = System.Text.Json.JsonDocument.Parse("""
+                {"kind":"RECEIPT","restaurantName":"Restoran Kod Starog Hrasta i Sinova DOO Beograd Zemun","legalNote":"Radni nalog – nije fiskalni račun",
+                 "receiptNumber":429,"tableLabel":"Terasa 12","waiterName":"Aleksandra Nikolić-Radovanović","issuedAt":"2026-09-16T10:00:00.000Z",
+                 "items":[{"quantity":1,"name":"Kafa","basePrice":"180.00","lineTotal":"180.00"}],
+                 "subtotal":"180.00","taxTotal":"36.00","discountAmount":null,"total":"216.00","currency":"RSD",
+                 "paymentMethod":"CASH","tenderedAmount":"216.00","changeAmount":"0.00","paperWidthMm":58}
+                """).RootElement;
+            var (longNamesTicket, _, _) = TicketPayload.Parse(longNamesJson);
+            longNamesTicket.Validate(); // a long restaurant/waiter name must still pass line-length validation (wraps, never truncated into an invalid line)
+            using var longNamesRaster = new TicketRaster(longNamesTicket, 58); // and must never throw building the raster
+            var longNamesText = string.Join("\n", longNamesTicket.Lines.Select(l => l.Text));
+            Check(longNamesText.Contains("Konobar: Aleksandra Nikolić-Radovanović"),
+                "a long waiter name renders in full (wraps if needed, never truncated)");
+
+            // KITCHEN/BAR must be completely unaffected by the receipt
+            // typography redesign — same literal font sizes as before this
+            // task (16/14/18/10/13), never accidentally sharing
+            // SizeBody/SizeFine/SizeTotal with the receipt renderer.
+            var kitchenJson = System.Text.Json.JsonDocument.Parse("""
+                {"kind":"KITCHEN","stationLabel":"KUHINJA","tableLabel":"Sto 1","waiterName":"Ana","orderNumber":"ABC123",
+                 "submittedAt":"2026-09-16T10:00:00.000Z","isAdditional":false,"paperWidthMm":58,
+                 "items":[{"quantity":1,"name":"Pljeskavica"}]}
+                """).RootElement;
+            var (kitchenTicket, _, _) = TicketPayload.Parse(kitchenJson);
+            Check(kitchenTicket.Lines[0].Size == 16 && kitchenTicket.Lines[0].Bold, "KITCHEN header size/weight (16, bold) is byte-for-byte unchanged by the receipt redesign");
+            Check(kitchenTicket.Lines[1].Size == 14, "KITCHEN station line size (14) is unchanged");
+            Check(kitchenTicket.Lines.Any(l => l.Size == 18 && l.Text.StartsWith("STO")), "KITCHEN table line size (18) is unchanged");
+            Check(kitchenTicket.Lines.Any(l => l.Text.StartsWith("1x Pljeskavica") && l.Size == 13 && l.Bold), "KITCHEN item line size/weight (13, bold) is unchanged — the receipt's smaller/non-bold SizeBody(9) was never applied here");
+        }
 
         // Faza 2C — bezbedno rešavanje servera (AgentEndpoint). Napravljeno
         // POSLE stvarnog incidenta (vidi AgentEndpoint.cs) gde je tih pad na

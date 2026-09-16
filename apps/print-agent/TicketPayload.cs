@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Globalization;
 using System.Text.Json;
 
@@ -80,6 +81,70 @@ public static class TicketPayload
         return parsed.ToString("dd.MM.yyyy'.' HH:mm", CultureInfo.InvariantCulture);
     }
 
+    // RECEIPT RENDERING POLISH — deterministic layout-fitting engine.
+    //
+    // The physical print revealed a real defect no amount of "looks fine in
+    // theory" review caught: a two-column row (TicketLine.Row) was drawn by
+    // simply near/far-aligning both strings in the same rectangle, trusting
+    // that "both sides are short" always holds. It does NOT hold for the
+    // TOTAL row specifically — a large, BOLD font combined with a long
+    // amount ("999.999,00 RSD") can be wider than the label leaves room
+    // for, so the two strings visually collide on the real 58mm printable
+    // width. The fix is to actually MEASURE (GDI+ MeasureString, the same
+    // engine TicketRaster itself uses to size the page) before committing
+    // to a one-line layout, and fall back to a verified-safe arrangement
+    // when it wouldn't fit — never a guess, never "worked for one example".
+    private static float MeasureWidthPx(string text, float size, bool bold)
+    {
+        using var bmp = new Bitmap(1, 1);
+        bmp.SetResolution(TicketRaster.Dpi, TicketRaster.Dpi);
+        using var g = Graphics.FromImage(bmp);
+        using var font = new Font("Arial", size, bold ? FontStyle.Bold : FontStyle.Regular);
+        return g.MeasureString(text, font).Width;
+    }
+
+    // Minimum breathing room between the two columns of a same-line row —
+    // small enough to waste no meaningful width on a 58mm roll, large
+    // enough that the two strings never visually touch.
+    private const float MinRowGapPx = 6f;
+
+    /// <summary>
+    /// A label/value money row (Osnovica, PDV, Popust, Plaćanje, Primljeno,
+    /// Kusur, and an item's quantity×unit-price breakdown) — fits on one
+    /// line when MEASURED to fit, otherwise falls back to the value alone,
+    /// right-aligned, on its own line (the label having already been (or
+    /// still being) emitted separately) rather than ever overlapping.
+    /// These labels are short, fixed Serbian words, so the one-line case is
+    /// the overwhelming common path — this only ever activates for a
+    /// genuinely extreme value.
+    /// </summary>
+    private static TicketLine RenderMoneyRow(string label, string value, float size, bool bold, int contentWidthPx)
+    {
+        var fits = MeasureWidthPx(label, size, bold) + MinRowGapPx + MeasureWidthPx(value, size, bold) <= contentWidthPx;
+        return fits ? TicketLine.Row(label, value, size, bold) : TicketLine.Row("", value, size, bold);
+    }
+
+    /// <summary>
+    /// CRITICAL TOTAL RULE — the single most important line on the receipt
+    /// must NEVER collide, clip, or overlap regardless of how large the
+    /// total is. Measures "UKUPNO" against "{amount} {currency}" at the
+    /// emphasized TOTAL size/weight; if they fit side by side, renders one
+    /// clean row. If not (a genuinely long total at a large bold font),
+    /// falls back to the label on its own line and the amount right-aligned
+    /// on the next — verified against 9,00 through 9.999.999,00 in
+    /// SelfTests.cs. Never shrinks the font to force a fit — a total that
+    /// doesn't fit at the emphasized size falls back to two lines instead,
+    /// so the total is always fully legible.
+    /// </summary>
+    private static List<TicketLine> RenderTotalLines(string amountWithCurrency, int contentWidthPx)
+    {
+        const float size = SizeTotal;
+        const string label = "UKUPNO";
+        if (MeasureWidthPx(label, size, true) + MinRowGapPx + MeasureWidthPx(amountWithCurrency, size, true) <= contentWidthPx)
+            return [TicketLine.Row(label, amountWithCurrency, size, true)];
+        return [new(label, size, true), TicketLine.Row("", amountWithCurrency, size, true)];
+    }
+
     public static (Ticket Ticket, int PaperWidthMm, string Station) Parse(JsonElement content) =>
         GetString(content, "kind") == "RECEIPT" ? ParseReceipt(content) : ParseKitchenBar(content);
 
@@ -138,6 +203,19 @@ public static class TicketPayload
 
     private static readonly Dictionary<string, string> PaymentMethodLabel = new() { ["CASH"] = "GOTOVINA", ["CARD"] = "KARTICA" };
 
+    // RECEIPT RENDERING POLISH — typography scale, reduced from the first
+    // redesign after real physical printing showed the body font was still
+    // far too large for a compact 58mm thermal receipt (kitchen-ticket
+    // readability requirements — distance viewing, large quantities — do
+    // not apply to a customer receipt held at arm's length). Sized to land
+    // close to the ~32-characters-per-line industry guidance for Font A on
+    // a 58mm/48mm-printable roll: five deliberate tiers, largest first.
+    private const float SizeRestaurantName = 13;
+    private const float SizeReceiptNumber = 11;
+    private const float SizeTotal = 11; // handled by RenderTotalLines; kept here only for reference in comments
+    private const float SizeBody = 9;   // metadata, items, prices, tax rows, payment rows
+    private const float SizeFine = 8;   // legal name/address/phone/PIB, modifiers, footer/legal note
+
     /// <summary>
     /// The receipt BODY — metadata (table/waiter/date), items, financial
     /// summary and payment section. Deliberately factored out of
@@ -148,9 +226,13 @@ public static class TicketPayload
     /// header/footer (a real restaurant identity vs. an unmistakable
     /// "TEST ŠTAMPE" banner). Never calculates anything itself — every
     /// number comes straight from the already-frozen `content` payload.
+    /// `paperWidthMm` drives every collision-fitting decision below via
+    /// TicketRaster.ContentWidthPx — never a hardcoded 58mm assumption, so
+    /// an 80mm route gets a wider fitting budget for free.
     /// </summary>
-    private static List<TicketLine> BuildReceiptBodyLines(JsonElement content)
+    private static List<TicketLine> BuildReceiptBodyLines(JsonElement content, int paperWidthMm)
     {
+        var contentWidthPx = TicketRaster.ContentWidthPx(paperWidthMm);
         var tableLabel = GetString(content, "tableLabel");
         var waiterName = GetString(content, "waiterName");
         var issuedAt = GetString(content, "issuedAt");
@@ -170,9 +252,9 @@ public static class TicketPayload
         // that (per this restaurant's own seed convention) already reads
         // "Sto 1", producing the reported "STO Sto 1" duplication. Trust the
         // label as-is; never re-derive or re-prefix it.
-        if (!string.IsNullOrWhiteSpace(tableLabel)) lines.Add(new($"Sto: {tableLabel}", 11));
-        if (!string.IsNullOrWhiteSpace(waiterName)) lines.Add(new($"Konobar: {waiterName}", 11));
-        lines.Add(new(FormatDate(issuedAt), 10));
+        if (!string.IsNullOrWhiteSpace(tableLabel)) lines.Add(new($"Sto: {tableLabel}", SizeBody));
+        if (!string.IsNullOrWhiteSpace(waiterName)) lines.Add(new($"Konobar: {waiterName}", SizeBody));
+        lines.Add(new(FormatDate(issuedAt), SizeFine));
         lines.Add(TicketLine.Rule());
 
         if (content.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
@@ -187,7 +269,7 @@ public static class TicketPayload
                 // space with a price column — so a long/very long name can
                 // wrap freely (TicketRaster already word-wraps a bounded
                 // rectangle) without ever overlapping or displacing a price.
-                lines.Add(new($"{quantity} × {name}", 12));
+                lines.Add(new($"{quantity} × {name}", SizeBody));
 
                 // basePrice falls back to lineTotal for a receipt issued
                 // before basePrice existed (P3.2) — same rule as before.
@@ -196,12 +278,14 @@ public static class TicketPayload
                 var baseLineTotal = baseUnitPrice * quantity;
                 lines.Add(quantity > 1
                     // "3 × 200,00 ... 600,00" — unit price on the left,
-                    // extended total on the right, same line.
-                    ? TicketLine.Row($"{quantity} × {FormatMoney(baseUnitPrice)}", FormatMoney(baseLineTotal), 12)
+                    // extended total on the right, same line, MEASURED to
+                    // fit (an extreme unit price/quantity combination falls
+                    // back to the total alone rather than ever colliding).
+                    ? RenderMoneyRow($"{quantity} × {FormatMoney(baseUnitPrice)}", FormatMoney(baseLineTotal), SizeBody, false, contentWidthPx)
                     // Quantity 1: the unit price and the line total are the
                     // same number — showing both would just repeat it, so
                     // print the total alone, right-aligned.
-                    : TicketLine.Row("", FormatMoney(baseLineTotal), 12));
+                    : TicketLine.Row("", FormatMoney(baseLineTotal), SizeBody));
 
                 if (item.TryGetProperty("modifiers", out var mods) && mods.ValueKind == JsonValueKind.Array)
                 {
@@ -213,9 +297,9 @@ public static class TicketPayload
                         var modTotal = priceDelta * quantity;
                         lines.Add(modTotal switch
                         {
-                            > 0 => TicketLine.Row($"  + {modName}", FormatMoney(modTotal), 10),
-                            < 0 => TicketLine.Row($"  − {modName}", FormatMoney(Math.Abs(modTotal)), 10),
-                            _ => new($"  {modName}", 10),
+                            > 0 => RenderMoneyRow($"  + {modName}", FormatMoney(modTotal), SizeFine, false, contentWidthPx),
+                            < 0 => RenderMoneyRow($"  − {modName}", FormatMoney(Math.Abs(modTotal)), SizeFine, false, contentWidthPx),
+                            _ => new($"  {modName}", SizeFine),
                         });
                     }
                 }
@@ -238,31 +322,32 @@ public static class TicketPayload
             {
                 var rate = GetString(entry, "taxRate");
                 var suffix = multiRate ? $" ({rate}%)" : "";
-                lines.Add(TicketLine.Row($"Osnovica{suffix}", Money(GetString(entry, "taxableAmount")), 11));
-                lines.Add(TicketLine.Row($"PDV{suffix}", Money(GetString(entry, "taxAmount")), 11));
+                lines.Add(RenderMoneyRow($"Osnovica{suffix}", Money(GetString(entry, "taxableAmount")), SizeBody, false, contentWidthPx));
+                lines.Add(RenderMoneyRow($"PDV{suffix}", Money(GetString(entry, "taxAmount")), SizeBody, false, contentWidthPx));
             }
             if (taxBreakdown.Length == 0)
             {
                 // Defensive fallback for a malformed/missing breakdown —
                 // still shows SOMETHING authoritative (the frozen subtotal/
                 // tax totals) rather than silently rendering nothing.
-                lines.Add(TicketLine.Row("Osnovica", Money(GetString(content, "subtotal")), 11));
-                lines.Add(TicketLine.Row("PDV", Money(GetString(content, "taxTotal")), 11));
+                lines.Add(RenderMoneyRow("Osnovica", Money(GetString(content, "subtotal")), SizeBody, false, contentWidthPx));
+                lines.Add(RenderMoneyRow("PDV", Money(GetString(content, "taxTotal")), SizeBody, false, contentWidthPx));
             }
         }
         var discountAmount = GetStringOrNull(content, "discountAmount");
         if (discountAmount != null && GetDecimalOrZero(discountAmount) > 0)
-            lines.Add(TicketLine.Row("Popust", $"-{Money(discountAmount)}", 11));
+            lines.Add(RenderMoneyRow("Popust", $"-{Money(discountAmount)}", SizeBody, false, contentWidthPx));
 
         lines.Add(TicketLine.Rule());
-        lines.Add(TicketLine.Row("UKUPNO", $"{Money(GetString(content, "total"))} {currency}", 15, true));
+        // CRITICAL TOTAL RULE — never a same-line guess; see RenderTotalLines.
+        lines.AddRange(RenderTotalLines($"{Money(GetString(content, "total"))} {currency}", contentWidthPx));
         lines.Add(TicketLine.Rule());
 
-        lines.Add(TicketLine.Row("Plaćanje", PaymentMethodLabel.GetValueOrDefault(paymentMethod, paymentMethod), 11));
+        lines.Add(RenderMoneyRow("Plaćanje", PaymentMethodLabel.GetValueOrDefault(paymentMethod, paymentMethod), SizeBody, false, contentWidthPx));
         if (paymentMethod == "CASH")
         {
-            lines.Add(TicketLine.Row("Primljeno", Money(GetString(content, "tenderedAmount")), 11));
-            lines.Add(TicketLine.Row("Kusur", Money(GetString(content, "changeAmount")), 11));
+            lines.Add(RenderMoneyRow("Primljeno", Money(GetString(content, "tenderedAmount")), SizeBody, false, contentWidthPx));
+            lines.Add(RenderMoneyRow("Kusur", Money(GetString(content, "changeAmount")), SizeBody, false, contentWidthPx));
         }
 
         return lines;
@@ -288,25 +373,27 @@ public static class TicketPayload
         var lines = new List<TicketLine>
         {
             // Restaurant identity is prominent but not wasteful — a single
-            // bold, centered, uppercased line (never several giant lines).
-            new(string.IsNullOrWhiteSpace(restaurantName) ? "TABLECORE" : restaurantName.ToUpperInvariant(), 15, true, TicketAlign.Center),
+            // bold, centered, uppercased line (never several giant lines),
+            // and the single largest element on the receipt.
+            new(string.IsNullOrWhiteSpace(restaurantName) ? "TABLECORE" : restaurantName.ToUpperInvariant(), SizeRestaurantName, true, TicketAlign.Center),
         };
-        if (!string.IsNullOrWhiteSpace(restaurantLegalName)) lines.Add(new(restaurantLegalName, 9, false, TicketAlign.Center));
-        if (!string.IsNullOrWhiteSpace(address)) lines.Add(new(address, 9, false, TicketAlign.Center));
-        if (!string.IsNullOrWhiteSpace(phone)) lines.Add(new(phone, 9, false, TicketAlign.Center));
-        if (!string.IsNullOrWhiteSpace(taxIdNumber)) lines.Add(new($"PIB: {taxIdNumber}", 9, false, TicketAlign.Center));
+        if (!string.IsNullOrWhiteSpace(restaurantLegalName)) lines.Add(new(restaurantLegalName, SizeFine, false, TicketAlign.Center));
+        if (!string.IsNullOrWhiteSpace(address)) lines.Add(new(address, SizeFine, false, TicketAlign.Center));
+        if (!string.IsNullOrWhiteSpace(phone)) lines.Add(new(phone, SizeFine, false, TicketAlign.Center));
+        if (!string.IsNullOrWhiteSpace(taxIdNumber)) lines.Add(new($"PIB: {taxIdNumber}", SizeFine, false, TicketAlign.Center));
         lines.Add(TicketLine.Rule());
-        lines.Add(new($"RAČUN #{receiptNumber}", 13, true, TicketAlign.Center));
+        lines.Add(new($"RAČUN #{receiptNumber}", SizeReceiptNumber, true, TicketAlign.Center));
 
-        lines.AddRange(BuildReceiptBodyLines(content));
+        lines.AddRange(BuildReceiptBodyLines(content, paperWidthMm));
 
         lines.Add(TicketLine.Rule());
         var thankYou = string.IsNullOrWhiteSpace(footerText) ? "Hvala na poseti!" : footerText;
-        lines.Add(new(thankYou, 10, false, TicketAlign.Center));
+        lines.Add(new(thankYou, SizeBody, false, TicketAlign.Center));
         // Non-fiscal status — this is still the current NON-FISCAL TableCore
         // receipt (see requirement #6); emphasized in caps like a real legal
-        // disclaimer, exact wording stays Admin-configurable.
-        if (!string.IsNullOrWhiteSpace(legalNote)) lines.Add(new(legalNote.ToUpperInvariant(), 9, true, TicketAlign.Center));
+        // disclaimer, exact wording stays Admin-configurable — bold but
+        // deliberately never larger than TOTAL (SizeFine < SizeTotal).
+        if (!string.IsNullOrWhiteSpace(legalNote)) lines.Add(new(legalNote.ToUpperInvariant(), SizeFine, true, TicketAlign.Center));
 
         return (new Ticket([.. lines]), paperWidthMm, "RECEIPT");
     }
@@ -366,24 +453,24 @@ public static class TicketPayload
               "changeAmount": "1416.66"
             }
             """;
-        var body = BuildReceiptBodyLines(JsonDocument.Parse(syntheticJson).RootElement);
+        var body = BuildReceiptBodyLines(JsonDocument.Parse(syntheticJson).RootElement, paperWidthMm);
 
         var header = new List<TicketLine>
         {
-            new("TABLECORE", 15, true, TicketAlign.Center),
-            new("TEST ŠTAMPE", 12, true, TicketAlign.Center),
+            new("TABLECORE", SizeRestaurantName, true, TicketAlign.Center),
+            new("TEST ŠTAMPE", SizeReceiptNumber, true, TicketAlign.Center),
             TicketLine.Rule(),
-            new($"Radna stanica: {workstationName}", 9, false, TicketAlign.Center),
-            new($"Štampač: {printerName}   Papir: {paperWidthMm} mm", 9, false, TicketAlign.Center),
-            new($"Ruta: RECEIPT   Verzija: {agentVersion}", 9, false, TicketAlign.Center),
-            new("Test znakova: č ć ž š đ Č Ć Ž Š Đ", 9, false, TicketAlign.Center),
+            new($"Radna stanica: {workstationName}", SizeFine, false, TicketAlign.Center),
+            new($"Štampač: {printerName}   Papir: {paperWidthMm} mm", SizeFine, false, TicketAlign.Center),
+            new($"Ruta: RECEIPT   Verzija: {agentVersion}", SizeFine, false, TicketAlign.Center),
+            new("Test znakova: č ć ž š đ Č Ć Ž Š Đ", SizeFine, false, TicketAlign.Center),
             TicketLine.Rule(),
         };
         var footer = new List<TicketLine>
         {
             TicketLine.Rule(),
-            new("TEST USPEŠAN", 12, true, TicketAlign.Center),
-            new("TEST ŠTAMPE — NIJE RAČUN", 9, true, TicketAlign.Center),
+            new("TEST USPEŠAN", SizeReceiptNumber, true, TicketAlign.Center),
+            new("TEST ŠTAMPE — NIJE RAČUN", SizeFine, true, TicketAlign.Center),
         };
         return new Ticket([.. header, .. body, .. footer]);
     }
