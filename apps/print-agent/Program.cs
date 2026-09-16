@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -145,6 +146,40 @@ if (args.Contains("--pair") || args.Contains("--heartbeat") || args.Contains("--
 // "Poveži" explicitly (never auto-submitted), and an already-paired
 // machine never has its existing pairing touched by this (the code box
 // stays disabled/unfilled once paired — see SetupForm.Initialize).
+// PRINTING V2 FINAL — LOGIN_AWARE terminal binding handoff. Checked BEFORE
+// IsInteractiveSetupArgs below so a bind URI NEVER opens the interactive
+// Setup screen and NEVER touches pairing/CredentialStore — it is a
+// completely separate, short-lived, non-interactive action: resolve the
+// server (same fail-closed AgentEndpoint.Resolve as --pair/--heartbeat/
+// --run), POST the token using the ALREADY-stored permanent credential, show
+// one brief native result dialog, exit. Never starts a second service.
+if (args.Any(SetupArgumentDispatch.IsBindUri))
+{
+    var bindToken = SetupArgumentDispatch.ExtractBindToken(args);
+    if (string.IsNullOrWhiteSpace(bindToken))
+    {
+        SetupForm.ShowStandaloneMessage("Nevažeći link za povezivanje.", isError: true);
+        Environment.ExitCode = 1;
+        return;
+    }
+    AgentEndpoint bindEndpoint;
+    try { bindEndpoint = AgentEndpoint.Resolve(args); }
+    catch (AgentEndpointConfigurationException ex)
+    {
+        SetupForm.ShowStandaloneMessage($"Podešavanje servera nije validno: {ex.Message}", isError: true);
+        Environment.ExitCode = 1;
+        return;
+    }
+    AgentEndpoint.ConfigureAgentHttpClients(bindEndpoint);
+    var bindResult = await PairingClient.Bind(bindEndpoint.BaseUrl, bindToken);
+    if (bindResult.Success)
+        SetupForm.ShowStandaloneMessage($"Ovaj računar je povezan sa TableCore-om kao radna stanica za: {SetupForm.PrintRoleLabel(bindResult.PrintRole)}.", isError: false);
+    else
+        SetupForm.ShowStandaloneMessage(bindResult.ErrorMessage ?? "Povezivanje nije uspelo.", isError: true);
+    Environment.ExitCode = bindResult.Success ? 0 : 1;
+    return;
+}
+
 if (SetupArgumentDispatch.IsInteractiveSetupArgs(args))
 {
     var prefillPairingCode = SetupArgumentDispatch.ExtractPairingCode(args);
@@ -287,9 +322,17 @@ public static class SetupArgumentDispatch
     // can hand off a freshly generated pairing code directly to the
     // installed Agent, same pattern as vscode:// / slack:// / zoom://.
     public const string PairingUriScheme = "tablecore-print://";
+    // PRINTING V2 FINAL — LOGIN_AWARE terminal binding. Distinct action on
+    // the SAME custom URI scheme (no new [Registry] entry needed — the
+    // installer already forwards ANY tablecore-print://... URI to this exe
+    // as its one argument); recognized and routed to a completely separate,
+    // NON-interactive branch (Program.cs's TerminalBind call) — never opens
+    // the interactive Setup screen, never touches an existing pairing.
+    private const string BindUriPrefix = "tablecore-print://bind";
 
     private static bool IsEndpointFlag(string arg) => arg is "--mode" or "--server" or "--bypass-header";
-    private static bool IsPairingUri(string arg) => arg.StartsWith(PairingUriScheme, StringComparison.OrdinalIgnoreCase);
+    public static bool IsBindUri(string arg) => arg.StartsWith(BindUriPrefix, StringComparison.OrdinalIgnoreCase);
+    private static bool IsPairingUri(string arg) => arg.StartsWith(PairingUriScheme, StringComparison.OrdinalIgnoreCase) && !IsBindUri(arg);
 
     public static bool IsInteractiveSetupArgs(string[] args)
     {
@@ -302,6 +345,28 @@ public static class SetupArgumentDispatch
             if (!isFlag && !isValueOfPrecedingFlag && !isUri) onlyRecognized = false;
         }
         return onlyRecognized;
+    }
+
+    /// <summary>Same tolerant scheme as ExtractPairingCode below, for the
+    /// `bind` action's `token` query parameter instead of `code`.</summary>
+    public static string? ExtractBindToken(string[] args)
+    {
+        foreach (var arg in args)
+        {
+            if (!IsBindUri(arg)) continue;
+            var queryStart = arg.IndexOf('?');
+            if (queryStart < 0) return null;
+            foreach (var pair in arg[(queryStart + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = pair.Split('=', 2);
+                if (kv.Length == 2 && string.Equals(kv[0], "token", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { return Uri.UnescapeDataString(kv[1]); } catch (FormatException) { return null; }
+                }
+            }
+            return null;
+        }
+        return null;
     }
 
     /// <summary>
@@ -351,9 +416,21 @@ public static class SetupArgumentDispatch
         for (var i = 0; i < args.Length; i++)
         {
             if (i > 0 && args[i - 1] == "--bypass-header") { redacted[i] = "***"; continue; }
-            redacted[i] = IsPairingUri(args[i]) ? RedactPairingUri(args[i]) : args[i];
+            redacted[i] = IsPairingUri(args[i]) ? RedactPairingUri(args[i])
+                : IsBindUri(args[i]) ? RedactBindUri(args[i])
+                : args[i];
         }
         return string.Join(' ', redacted);
+    }
+
+    /// <summary>Same redaction principle as RedactPairingUri below — a
+    /// terminal-bind token is short-lived and single-use but is still a
+    /// bearer-style secret (whoever presents it consumes it) and must never
+    /// appear in full in a log/error string.</summary>
+    private static string RedactBindUri(string uri)
+    {
+        var queryStart = uri.IndexOf('?');
+        return queryStart < 0 ? uri : uri[..queryStart] + "?token=***";
     }
 
     private static string RedactPairingUri(string uri)

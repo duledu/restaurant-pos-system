@@ -28,19 +28,43 @@
 import { prisma } from "@rcs/db";
 import type { AuthContext, WorkstationAuthContext, WorkstationStationValue } from "@rcs/auth";
 import { beginPrintAttempt, startPrintSubmission, confirmPrintResult, STALE_PRINT_LEASE_MS } from "./print-service";
-import { activeWorkstationFor, AGENT_ACTIVE_WINDOW_MS } from "./print-policy";
+import { activeWorkstationFor, resolveEligibleWorkstation, AGENT_ACTIVE_WINDOW_MS, type PrintRouteTypeValue } from "./print-policy";
 
-export type PrintRouteTypeValue = "KITCHEN" | "BAR" | "RECEIPT";
+export type { PrintRouteTypeValue };
 
-/** Sveži spisak tipova ruta ovog Workstation-a koje su trenutno omogućene —
- * NAMERNO upitano po pozivu (ne keširano na wsCtx), jer se Admin može
- * promeniti između dva poll ciklusa i agent MORA odmah videti novo stanje. */
-async function activeRouteTypes(workstationId: string): Promise<PrintRouteTypeValue[]> {
+/**
+ * Sveži spisak tipova ruta ovog Workstation-a koje su trenutno DEFINITIVNO
+ * NJEGOVE (Admin ih je podesio na ovom računaru) I za koje je OVAJ tačno
+ * ovaj Workstation trenutno mode-aware autoritativan izbor — NAMERNO
+ * upitano po pozivu (ne keširano na wsCtx), jer se Admin (ruta/mod) ili
+ * prijavljena operativna uloga (LOGIN_AWARE) mogu promeniti između dva poll
+ * ciklusa i agent MORA odmah videti novo stanje.
+ *
+ * PRINTING V2 FINAL — u CENTRAL_ROUTING režimu ovo je i dalje "sve
+ * omogućene rute ovog računara" kao pre (jedina fizička postavka danas ima
+ * tačno jedan Workstation po lokaciji, pa je deterministički izbor u
+ * resolveEligibleWorkstation uvek upravo OVAJ Workstation — bez promene
+ * ponašanja). Kad Admin doda DRUGI Agent sa istim tipom rute na istu
+ * lokaciju, ovo je mesto koje sprečava "koji god prvi anketira" trku:
+ * SAMO deterministički izabran (isPrimary ili najniži workstationId)
+ * Workstation ikad vidi taj tip kao kandidata za claim.
+ *
+ * U LOGIN_AWARE režimu, tip se pojavljuje OVDE samo ako trenutna
+ * WorkstationTerminalSession OVOG računara ima printRole jednak tom tipu —
+ * videti resolveEligibleWorkstation (print-policy.ts) za tačnu proveru.
+ */
+async function activeRouteTypes(wsCtx: WorkstationAuthContext): Promise<PrintRouteTypeValue[]> {
   const routes = await prisma.workstationPrintRoute.findMany({
-    where: { workstationId, isEnabled: true },
+    where: { workstationId: wsCtx.workstationId, isEnabled: true },
     select: { type: true },
   });
-  return routes.map((r) => r.type) as PrintRouteTypeValue[];
+  const results: PrintRouteTypeValue[] = [];
+  for (const route of routes) {
+    const type = route.type as PrintRouteTypeValue;
+    const eligible = await resolveEligibleWorkstation(prisma, wsCtx.restaurantId, wsCtx.locationId, type);
+    if (eligible?.workstationId === wsCtx.workstationId) results.push(type);
+  }
+  return results;
 }
 
 function workstationAsPrintClaimant(wsCtx: WorkstationAuthContext, routeTypes: PrintRouteTypeValue[]): AuthContext {
@@ -86,7 +110,7 @@ export interface AgentTicketPayload {
  */
 export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<AgentTicketPayload | null> {
   const { restaurantId, locationId } = wsCtx;
-  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
+  const routeTypes = await activeRouteTypes(wsCtx);
   if (routeTypes.length === 0) return null;
   const staleThreshold = new Date(Date.now() - STALE_PRINT_LEASE_MS);
 
@@ -149,7 +173,7 @@ export async function pollAndClaim(wsCtx: WorkstationAuthContext): Promise<Agent
  * efekat (assertStationAccess unutar startPrintSubmission dodatno proverava
  * `roles` za KITCHEN/BAR poslove). */
 export async function beginSubmission(wsCtx: WorkstationAuthContext, jobId: string, attemptId: string) {
-  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
+  const routeTypes = await activeRouteTypes(wsCtx);
   const job = await prisma.printJob.findFirst({
     where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId },
     select: { orderId: true, type: true },
@@ -171,7 +195,7 @@ export async function submitResult(
   outcome: AgentResultOutcome,
   errorMessage?: string
 ) {
-  const routeTypes = await activeRouteTypes(wsCtx.workstationId);
+  const routeTypes = await activeRouteTypes(wsCtx);
   const job = await prisma.printJob.findFirst({
     where: { id: jobId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId },
     select: { orderId: true, type: true },

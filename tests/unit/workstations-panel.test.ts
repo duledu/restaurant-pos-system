@@ -30,6 +30,7 @@ function route(type: "KITCHEN" | "BAR" | "RECEIPT", overrides: Record<string, un
     paperWidthMm: null,
     printerAvailable: null,
     isEnabled: true,
+    isPrimary: false,
     updatedAt: "2026-09-15T09:00:00Z",
     ...overrides,
   };
@@ -44,6 +45,7 @@ function workstation(overrides: Record<string, unknown> = {}) {
     availablePrinters: ["POS-58"],
     printersReportedAt: "2026-09-15T09:00:00Z",
     printRoutes: [],
+    terminalSession: null,
     agentVersion: "1.0.0-pilot.3",
     osDescription: null,
     isEnabled: true,
@@ -65,6 +67,7 @@ let root: Root;
 let host: HTMLDivElement;
 let fetchMock: ReturnType<typeof vi.fn>;
 let workstationsResponse: unknown[];
+let printingModeResponse: "LOGIN_AWARE" | "CENTRAL_ROUTING";
 
 beforeEach(() => {
   vi.stubGlobal("React", React);
@@ -74,9 +77,10 @@ beforeEach(() => {
   document.body.append(host);
   root = createRoot(host);
   workstationsResponse = [workstation({ lastSeenAt: null })]; // starts offline
+  printingModeResponse = "CENTRAL_ROUTING";
   fetchMock = vi.fn(async (input: string) => {
     const path = String(input).split("?")[0];
-    if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [] });
+    if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [], printingMode: printingModeResponse });
     if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
     throw new Error(`Unexpected request ${input}`);
   });
@@ -393,5 +397,73 @@ describe("WorkstationsPanel — Admin -> Agent pairing handoff (tablecore-print:
     });
     expect(host.textContent).not.toContain("ABCD-EFGH-JKMN");
     expect(host.textContent).toContain("komp_test");
+  });
+});
+
+describe("WorkstationsPanel — Printing V2 Final (printing modes + deterministic CENTRAL_ROUTING)", () => {
+  it("shows both printing mode options, defaults to the server-reported mode, and PUTs a confirmed change", async () => {
+    printingModeResponse = "CENTRAL_ROUTING";
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const putCalls: unknown[] = [];
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      const path = String(input).split("?")[0];
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [], printingMode: printingModeResponse });
+      if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
+      if (path === "/api/admin/workstations/printing-mode" && options?.method === "PUT") {
+        putCalls.push(JSON.parse(String(options.body)));
+        printingModeResponse = "LOGIN_AWARE";
+        return response({ printingMode: "LOGIN_AWARE" });
+      }
+      throw new Error(`Unexpected request ${input}`);
+    });
+    await mount();
+    expect(host.textContent).toContain("Prema prijavljenom korisniku");
+    expect(host.textContent).toContain("Centralno rutiranje");
+
+    await act(async () => {
+      const button = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Prema prijavljenom korisniku"));
+      button!.click();
+    });
+    expect(putCalls).toEqual([{ printingMode: "LOGIN_AWARE" }]);
+  });
+
+  it("changing printing mode requires confirmation — a cancelled confirm() never calls the API", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    await mount();
+    await act(async () => {
+      const button = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Prema prijavljenom korisniku"));
+      button!.click();
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("printing-mode"))).toBe(false);
+  });
+
+  it("under LOGIN_AWARE, a workstation with a bound terminal session shows its current operational role", async () => {
+    printingModeResponse = "LOGIN_AWARE";
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        terminalSession: { printRole: "KITCHEN", employeeId: "emp-1", expiresAt: new Date(Date.now() + 60000).toISOString() },
+      }),
+    ];
+    await mount();
+    expect(host.textContent).toContain("Trenutna operativna uloga:");
+    expect(host.textContent).toContain("Kuhinja");
+  });
+
+  it("the 'Glavna' primary toggle is hidden with only one workstation, and shown once a second workstation shares the same enabled route type", async () => {
+    workstationsResponse = [
+      workstation({ id: "ws-1", name: "PC1", lastSeenAt: new Date().toISOString(), printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true })] }),
+    ];
+    await mount();
+    expect(host.textContent).not.toContain("Glavna ruta");
+
+    workstationsResponse = [
+      workstation({ id: "ws-1", name: "PC1", lastSeenAt: new Date().toISOString(), printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true })] }),
+      workstation({ id: "ws-2", name: "PC2", locationId: "l1", lastSeenAt: new Date().toISOString(), printRoutes: [route("KITCHEN", { printerName: "Printer-2", printerAvailable: true })] }),
+    ];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(host.textContent).toContain("Glavna ruta");
   });
 });

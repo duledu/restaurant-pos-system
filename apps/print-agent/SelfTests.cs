@@ -416,6 +416,34 @@ internal static class SelfTests
         Check(!uriRedacted.Contains("ABCD-EFGH-JKMN", StringComparison.Ordinal) && uriRedacted.Contains("code=***", StringComparison.Ordinal),
             "Redact() never lets a pairing code from a tablecore-print:// URI reach an error/log line either");
 
+        // PRINTING V2 FINAL — LOGIN_AWARE terminal binding URI. A bind URI
+        // is a DIFFERENT action on the same custom scheme and must NEVER be
+        // routed to the interactive Setup screen (Program.cs's separate
+        // TerminalBind branch handles it instead, checked BEFORE
+        // IsInteractiveSetupArgs) — this is the one thing this self-test
+        // suite must prove never regresses, since a bind URI accidentally
+        // opening Setup would silently do nothing with the token at all.
+        Check(SetupArgumentDispatch.IsBindUri("tablecore-print://bind?token=abc123"),
+            "IsBindUri recognizes the bind action");
+        Check(!SetupArgumentDispatch.IsBindUri("tablecore-print://pair?code=ABCD-EFGH-JKMN"),
+            "IsBindUri does NOT match a pairing URI");
+        Check(!SetupArgumentDispatch.IsInteractiveSetupArgs(["tablecore-print://bind?token=abc123"]),
+            "a bind URI is NEVER recognized as interactive Setup args — it must route to the separate, non-interactive TerminalBind branch");
+        Check(SetupArgumentDispatch.ExtractBindToken(["tablecore-print://bind?token=abc123XYZ"]) == "abc123XYZ",
+            "ExtractBindToken reads the token query parameter from a bind URI");
+        Check(SetupArgumentDispatch.ExtractBindToken(["tablecore-print://bind?other=1&token=tok-2"]) == "tok-2",
+            "ExtractBindToken finds token even when it isn't the first query parameter");
+        Check(SetupArgumentDispatch.ExtractBindToken([]) is null, "ExtractBindToken returns null with no args");
+        Check(SetupArgumentDispatch.ExtractBindToken(["tablecore-print://bind?notoken=1"]) is null,
+            "ExtractBindToken returns null (never throws) for a URI missing the token parameter");
+        Check(SetupArgumentDispatch.ExtractBindToken(["tablecore-print://pair?code=ABCD-EFGH-JKMN"]) is null,
+            "ExtractBindToken never reads a pairing URI's code as if it were a bind token");
+        var bindRedacted = SetupArgumentDispatch.Redact(["tablecore-print://bind?token=super-secret-token", "--unknown"]);
+        Check(!bindRedacted.Contains("super-secret-token", StringComparison.Ordinal) && bindRedacted.Contains("token=***", StringComparison.Ordinal),
+            "Redact() never lets a terminal-bind token reach an error/log line");
+        Check(SetupForm.PrintRoleLabel("KITCHEN") == "KUHINJA" && SetupForm.PrintRoleLabel("BAR") == "ŠANK" && SetupForm.PrintRoleLabel("RECEIPT") == "RAČUN",
+            "PrintRoleLabel translates every PrintJobType to the exact Serbian Admin-panel wording");
+
         // Physical QA follow-up — broken re-pair UX. A fresh pairing was
         // generated in Admin and "Otvori TableCore Print Agent" launched
         // the Agent to consume it, but the incoming code was silently

@@ -34,8 +34,27 @@ export const upsertPrintRouteSchema = z.object({
   printerName: z.string().trim().min(1).max(200).nullable().optional(),
   paperWidthMm: z.union([z.literal(58), z.literal(80)]).nullable().optional(),
   isEnabled: z.boolean().optional(),
+  // PRINTING V2 FINAL — CENTRAL_ROUTING deterministic multi-agent routing.
+  // Only meaningful once a location has more than one workstation with an
+  // enabled route of the same type; harmless (never read) otherwise.
+  isPrimary: z.boolean().optional(),
 });
 export type UpsertPrintRouteInput = z.infer<typeof upsertPrintRouteSchema>;
+
+// PRINTING V2 FINAL — Admin's restaurant-level printing mode choice.
+export const printingModeSchema = z.enum(["LOGIN_AWARE", "CENTRAL_ROUTING"]);
+export const setPrintingModeSchema = z.object({ printingMode: printingModeSchema });
+export type SetPrintingModeInput = z.infer<typeof setPrintingModeSchema>;
+
+// PRINTING V2 FINAL — LOGIN_AWARE terminal binding. The browser never
+// asserts a workstationId or role here — a bind-intent is scoped to the
+// authenticated employee's own session; the resulting one-time token is
+// consumed only by whichever physical Agent process the OS itself routes a
+// tablecore-print://bind?token=... URI to (see terminal-service.ts).
+export const agentTerminalBindSchema = z.object({
+  token: z.string().trim().min(16).max(200),
+});
+export type AgentTerminalBindInput = z.infer<typeof agentTerminalBindSchema>;
 
 // Admin "Podešavanja" na već upareneoj radnoj stanici — namerno samo polja
 // koja već postoje u Workstation modelu i koja Admin legitimno kontroliše

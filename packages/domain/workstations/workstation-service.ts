@@ -30,6 +30,7 @@ import {
   updateWorkstationSchema,
   upsertPrintRouteSchema,
   printRouteTypeSchema,
+  setPrintingModeSchema,
   type CreateWorkstationPairingInput,
   type ConsumeWorkstationPairingInput,
   type WorkstationHeartbeatInput,
@@ -37,6 +38,7 @@ import {
   type UpdateWorkstationInput,
   type UpsertPrintRouteInput,
   type PrintRouteType,
+  type SetPrintingModeInput,
 } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
 import { lockPrintLocation } from "../printing/print-policy";
@@ -81,6 +83,7 @@ const WORKSTATION_PUBLIC_SELECT = {
       paperWidthMm: true,
       printerAvailable: true,
       isEnabled: true,
+      isPrimary: true,
       updatedAt: true,
     },
   },
@@ -100,6 +103,11 @@ const WORKSTATION_PUBLIC_SELECT = {
   createdAt: true,
   updatedAt: true,
   location: { select: { id: true, name: true } },
+  // PRINTING V2 FINAL — LOGIN_AWARE only; always null under CENTRAL_ROUTING.
+  // Admin surfaces this as "trenutna operativna uloga" per workstation.
+  terminalSession: {
+    select: { printRole: true, employeeId: true, expiresAt: true },
+  },
 } as const;
 
 const PAIRING_PUBLIC_SELECT = {
@@ -312,6 +320,7 @@ const PRINT_ROUTE_SELECT = {
   paperWidthMm: true,
   printerAvailable: true,
   isEnabled: true,
+  isPrimary: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -374,25 +383,40 @@ export async function upsertPrintRoute(
   // agent-confirmed availability intact.
   const printerNameChanging = data.printerName !== undefined && data.printerName !== (previous?.printerName ?? null);
 
-  const route = await prisma.workstationPrintRoute.upsert({
-    where: { workstationId_type: { workstationId, type: routeType } },
-    create: {
-      restaurantId: workstation.restaurantId,
-      locationId: workstation.locationId,
-      workstationId,
-      type: routeType,
-      printerName: data.printerName ?? null,
-      paperWidthMm: data.paperWidthMm ?? null,
-      isEnabled: data.isEnabled ?? true,
-    },
-    update: {
-      ...(data.printerName !== undefined
-        ? { printerName: data.printerName, ...(printerNameChanging ? { printerAvailable: null } : {}) }
-        : {}),
-      ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
-      ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
-    },
-    select: PRINT_ROUTE_SELECT,
+  const route = await prisma.$transaction(async (tx) => {
+    // PRINTING V2 FINAL — deterministic CENTRAL_ROUTING multi-agent routing:
+    // at most one PRIMARY route per (location, type). Marking this route
+    // primary demotes any other workstation's route of the SAME type at the
+    // SAME location — never two simultaneous primaries, which would just
+    // reintroduce the exact ambiguity this field exists to remove.
+    if (data.isPrimary === true) {
+      await tx.workstationPrintRoute.updateMany({
+        where: { locationId: workstation.locationId, type: routeType, workstationId: { not: workstationId }, isPrimary: true },
+        data: { isPrimary: false },
+      });
+    }
+    return tx.workstationPrintRoute.upsert({
+      where: { workstationId_type: { workstationId, type: routeType } },
+      create: {
+        restaurantId: workstation.restaurantId,
+        locationId: workstation.locationId,
+        workstationId,
+        type: routeType,
+        printerName: data.printerName ?? null,
+        paperWidthMm: data.paperWidthMm ?? null,
+        isEnabled: data.isEnabled ?? true,
+        isPrimary: data.isPrimary ?? false,
+      },
+      update: {
+        ...(data.printerName !== undefined
+          ? { printerName: data.printerName, ...(printerNameChanging ? { printerAvailable: null } : {}) }
+          : {}),
+        ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
+        ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
+        ...(data.isPrimary !== undefined ? { isPrimary: data.isPrimary } : {}),
+      },
+      select: PRINT_ROUTE_SELECT,
+    });
   });
 
   await recordAuditEntry(ctx, {
@@ -400,13 +424,48 @@ export async function upsertPrintRoute(
     entityId: route.id,
     action: "workstation.route_updated",
     previousValue: previous
-      ? { printerName: previous.printerName, paperWidthMm: previous.paperWidthMm, isEnabled: previous.isEnabled }
+      ? { printerName: previous.printerName, paperWidthMm: previous.paperWidthMm, isEnabled: previous.isEnabled, isPrimary: previous.isPrimary }
       : null,
-    newValue: { workstationId, type: routeType, printerName: route.printerName, paperWidthMm: route.paperWidthMm, isEnabled: route.isEnabled },
+    newValue: { workstationId, type: routeType, printerName: route.printerName, paperWidthMm: route.paperWidthMm, isEnabled: route.isEnabled, isPrimary: route.isPrimary },
     locationId: workstation.locationId,
   });
 
   return route;
+}
+
+/**
+ * PRINTING V2 FINAL — the restaurant-level choice between LOGIN_AWARE and
+ * CENTRAL_ROUTING (section 5: a restaurant operates in exactly one mode at a
+ * time, never an undocumented per-workstation hybrid). Deliberately changes
+ * NOTHING else — pairing, credentials, print routes, printer discovery,
+ * print history and audit history are all untouched; the new mode only
+ * changes which workstation resolveEligibleWorkstation (print-policy.ts)
+ * considers eligible for the NEXT claim, evaluated fresh at claim time. A
+ * PENDING PrintJob created under the old mode is never lost — it simply
+ * waits for whichever workstation becomes eligible under the new one.
+ */
+export async function setPrintingMode(ctx: AuthContext, input: SetPrintingModeInput) {
+  requirePermission(ctx, WORKSTATIONS_MANAGE);
+  const data = setPrintingModeSchema.parse(input);
+  const restaurant = await prisma.restaurant.findUnique({ where: { id: ctx.restaurantId }, select: { printingMode: true } });
+  if (!restaurant) throw new Error("Restoran nije pronađen");
+  if (restaurant.printingMode === data.printingMode) return { printingMode: restaurant.printingMode };
+
+  await prisma.restaurant.update({ where: { id: ctx.restaurantId }, data: { printingMode: data.printingMode } });
+  await recordAuditEntry(ctx, {
+    entityType: "Restaurant",
+    entityId: ctx.restaurantId,
+    action: "printing.mode_changed",
+    previousValue: { printingMode: restaurant.printingMode },
+    newValue: { printingMode: data.printingMode },
+    severity: "WARNING",
+  });
+  return { printingMode: data.printingMode };
+}
+
+export async function getPrintingMode(ctx: AuthContext) {
+  const restaurant = await prisma.restaurant.findUnique({ where: { id: ctx.restaurantId }, select: { printingMode: true } });
+  return restaurant?.printingMode ?? "CENTRAL_ROUTING";
 }
 
 /**

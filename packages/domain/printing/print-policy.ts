@@ -45,42 +45,78 @@ export async function suppressAutomaticJobs(tx: Prisma.TransactionClient, restau
 // (agent-print-service.ts) nikad ne mogu tiho da se razminu.
 export const AGENT_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
 
+export type PrintRouteTypeValue = "KITCHEN" | "BAR" | "RECEIPT";
+
+/**
+ * PRINTING V2 FINAL — the SINGLE, mode-aware source of truth for "which one
+ * physical workstation is eligible to serve this restaurant/location/type
+ * right now", shared by dispatch gating (activeWorkstationFor below),
+ * claim eligibility (agent-print-service.ts activeRouteTypes), and Admin/KDS
+ * status. Never "whichever Agent polls first" — always deterministic:
+ *
+ * - CENTRAL_ROUTING: any enabled route of this type on an online, non-revoked
+ *   workstation is a candidate. If more than one exists (multiple Agents
+ *   configured for the same type), an explicit `isPrimary` route always wins;
+ *   otherwise the LOWEST workstationId wins — arbitrary but 100% stable and
+ *   reproducible (never depends on heartbeat timing/poll order). With today's
+ *   single-workstation-per-location physical reality this is a no-op (exactly
+ *   one candidate), so no existing restaurant's behavior changes.
+ * - LOGIN_AWARE: browser login, not route configuration, decides eligibility.
+ *   Only a workstation whose CURRENT WorkstationTerminalSession.printRole
+ *   matches `type` (and has that route configured+enabled) is a candidate —
+ *   see workstation-service.ts's terminal-binding flow for how that session
+ *   is established. Never login-role, never Agent-asserted.
+ */
+export async function resolveEligibleWorkstation(
+  tx: Prisma.TransactionClient,
+  restaurantId: string,
+  locationId: string,
+  type: PrintRouteTypeValue
+): Promise<{ workstationId: string; paperWidthMm: number | null } | null> {
+  const restaurant = await tx.restaurant.findUnique({ where: { id: restaurantId }, select: { printingMode: true } });
+  const onlineWorkstation = {
+    isEnabled: true,
+    revokedAt: null,
+    lastSeenAt: { gt: new Date(Date.now() - AGENT_ACTIVE_WINDOW_MS) },
+  };
+
+  if (restaurant?.printingMode === "LOGIN_AWARE") {
+    const route = await tx.workstationPrintRoute.findFirst({
+      where: {
+        restaurantId, locationId, type, isEnabled: true,
+        workstation: { ...onlineWorkstation, terminalSession: { printRole: type, expiresAt: { gt: new Date() } } },
+      },
+      select: { workstationId: true, paperWidthMm: true },
+    });
+    return route;
+  }
+
+  // CENTRAL_ROUTING — deterministic multi-agent tie-break (see doc comment).
+  const candidates = await tx.workstationPrintRoute.findMany({
+    where: { restaurantId, locationId, type, isEnabled: true, workstation: onlineWorkstation },
+    select: { workstationId: true, paperWidthMm: true, isPrimary: true },
+  });
+  if (candidates.length === 0) return null;
+  const primary = candidates.find((c) => c.isPrimary);
+  if (primary) return primary;
+  return [...candidates].sort((a, b) => a.workstationId.localeCompare(b.workstationId))[0];
+}
+
 // Printing V2 — widened from the old "KITCHEN"|"BAR" (a single Workstation
 // locked to one station) to the full PrintJobType so RECEIPT can finally be
 // agent-routed too: eligibility now comes from an enabled WorkstationPrintRoute
 // row of this exact type, joined to its parent workstation, rather than a
 // scalar Workstation.station column. A workstation can have several routes
-// (KITCHEN/BAR/RECEIPT), each independently active.
+// (KITCHEN/BAR/RECEIPT), each independently active. Kept as a thin wrapper
+// (existing callers only ever destructure `.paperWidthMm`) over the new
+// mode-aware resolveEligibleWorkstation above — one shared decision, never a
+// second slightly-different one.
 export async function activeWorkstationFor(
   tx: Prisma.TransactionClient,
   restaurantId: string,
   locationId: string,
-  type: "KITCHEN" | "BAR" | "RECEIPT"
+  type: PrintRouteTypeValue
 ): Promise<{ paperWidthMm: number | null } | null> {
-  // Hardening audit finding: if an admin mistakenly pairs two workstations
-  // with an active route of the same type (both live), findFirst without an
-  // explicit order depends on undefined DB row order — deterministically
-  // prefer the MOST RECENTLY active one (same convention as
-  // stationPrinterStatus below), so which one's paperWidthMm gets
-  // snapshotted into ticket content is at least predictable rather than
-  // arbitrary. This does not change which physical workstation actually
-  // wins the print CLAIM (that stays a fair, atomic race via
-  // beginPrintAttempt's updateMany) — only which one's reported paper width
-  // is used to size the ticket that gets created.
-  const route = await tx.workstationPrintRoute.findFirst({
-    where: {
-      restaurantId,
-      locationId,
-      type,
-      isEnabled: true,
-      workstation: {
-        isEnabled: true,
-        revokedAt: null,
-        lastSeenAt: { gt: new Date(Date.now() - AGENT_ACTIVE_WINDOW_MS) },
-      },
-    },
-    orderBy: { workstation: { lastSeenAt: "desc" } },
-    select: { paperWidthMm: true },
-  });
-  return route;
+  const resolved = await resolveEligibleWorkstation(tx, restaurantId, locationId, type);
+  return resolved ? { paperWidthMm: resolved.paperWidthMm } : null;
 }

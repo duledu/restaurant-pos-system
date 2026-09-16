@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef, memo } from "react";
 import Link from "next/link";
 import { LogoutButton } from "../ui/LogoutButton";
+import { TerminalBindingBadge } from "../ui/TerminalBindingBadge";
 import { AppLogo } from "../branding/AppLogo";
 import { TicketPrintPanel, type TicketContent } from "../printing/TicketPrintPanel";
 import { getOrFetch, CLIENT_CACHE_KEYS, CLIENT_CACHE_TTL_MS } from "../../lib/client-cache";
@@ -790,6 +791,7 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
               {employee.roles.length > 0 && <span className="text-cream-300/50"> · {employeeRoleDisplay(employee.roles)}</span>}
             </p>
           )}
+          <TerminalBindingBadge theme="dark" />
           <LogoutButton theme="dark" />
         </div>
       </div>

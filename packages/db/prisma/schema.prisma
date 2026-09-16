@@ -71,6 +71,13 @@ model Restaurant {
   updatedAt DateTime         @updatedAt
   createdBy String?
 
+  // PRINTING V2 FINAL — restaurant-level choice between the two supported
+  // operational printing models (see PrintingMode below). Defaults to
+  // CENTRAL_ROUTING to exactly preserve every existing restaurant's current
+  // behavior (a route-configured Agent already claims KITCHEN/BAR/RECEIPT
+  // regardless of who is logged into any browser) — switching to LOGIN_AWARE
+  // is always a deliberate, audited Admin action, never inferred.
+  printingMode        PrintingMode         @default(CENTRAL_ROUTING)
   tenant              Tenant               @relation(fields: [tenantId], references: [id])
   locations           Location[]
   employees           Employee[]
@@ -93,6 +100,20 @@ model Restaurant {
   @@index([tenantId])
   @@index([status])
   @@map("restaurants")
+}
+
+// PRINTING V2 FINAL — the two supported operational printing models.
+// LOGIN_AWARE: which PrintJob type a paired workstation's Agent may claim
+// follows the OPERATIONAL role of whoever is currently authenticated on
+// that exact physical computer (see WorkstationTerminalSession) — the SAME
+// computer/Agent/printer serves KITCHEN, then BAR, then RECEIPT as the
+// active login changes, with no re-pairing/reconfiguration.
+// CENTRAL_ROUTING: eligibility ignores browser login entirely — a paired
+// Agent may simultaneously service every WorkstationPrintRoute type Admin
+// has enabled for it (today's existing, already-shipped behavior).
+enum PrintingMode {
+  LOGIN_AWARE
+  CENTRAL_ROUTING
 }
 
 enum RestaurantStatus {
@@ -1409,6 +1430,10 @@ model Workstation {
   location   Location                 @relation(fields: [locationId], references: [id])
   pairings   WorkstationPairing[]
   printRoutes WorkstationPrintRoute[]
+  // PRINTING V2 FINAL — LOGIN_AWARE only: at most ONE currently-authenticated
+  // operational TableCore session bound to this physical computer at a time
+  // (see WorkstationTerminalSession). Always null under CENTRAL_ROUTING.
+  terminalSession WorkstationTerminalSession?
 
   @@index([restaurantId])
   @@index([locationId])
@@ -1436,6 +1461,15 @@ model WorkstationPrintRoute {
   paperWidthMm     Int?
   printerAvailable Boolean?
   isEnabled        Boolean      @default(true)
+  // PRINTING V2 FINAL — CENTRAL_ROUTING deterministic multi-agent routing
+  // (never "whichever Agent polls first"): when more than one workstation
+  // in the same location has an enabled route of this same type, Admin may
+  // mark exactly one as the PRIMARY destination. print-policy.ts's
+  // resolveEligibleWorkstation prefers an explicit primary; if none is
+  // marked (the common single-workstation case, or an admin hasn't chosen
+  // yet), it falls back to the lowest workstationId — deterministic and
+  // stable either way, never dependent on poll timing.
+  isPrimary        Boolean      @default(false)
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
@@ -1446,6 +1480,39 @@ model WorkstationPrintRoute {
   @@index([locationId])
   @@index([type])
   @@map("workstation_print_routes")
+}
+
+// PRINTING V2 FINAL — LOGIN_AWARE terminal binding. Proves, without ever
+// handing the Agent's permanent bearer credential to browser JavaScript and
+// without trusting any client-asserted workstationId, that a specific
+// authenticated TableCore employee session is physically running on THIS
+// exact paired Windows computer right now — see
+// packages/domain/printing/terminal-service.ts for the full bind flow
+// (reuses the already-shipped tablecore-print:// custom URI + installed
+// Agent process, the same mechanism proven for pairing handoff).
+// `workstationId` is @unique: exactly one active operational role per
+// physical computer at a time (a new bind for the same workstation replaces
+// the previous one — "new operational user becomes active" requirement).
+// `expiresAt` is a rolling TTL refreshed by the browser's own authenticated
+// heartbeat (no Agent round-trip needed after the initial proof) — an
+// abandoned tab/crashed browser naturally lapses without anyone needing to
+// explicitly clear it, and CENTRAL_ROUTING restaurants never create rows
+// here at all.
+model WorkstationTerminalSession {
+  workstationId String       @id
+  restaurantId  String
+  locationId    String
+  employeeId    String
+  printRole     PrintJobType // KITCHEN | BAR | RECEIPT — the operational print eligibility this login currently grants
+  boundAt       DateTime     @default(now())
+  lastSeenAt    DateTime     @default(now())
+  expiresAt     DateTime
+
+  workstation Workstation @relation(fields: [workstationId], references: [id])
+
+  @@index([restaurantId])
+  @@index([employeeId])
+  @@map("workstation_terminal_sessions")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

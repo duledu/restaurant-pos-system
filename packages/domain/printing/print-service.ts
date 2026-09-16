@@ -332,6 +332,22 @@ export async function dispatchReceiptPrintJob(
       station: null,
       dispatchKey: opts.dispatchKey,
       content: toJson(content),
+      // PRINTING V2 FINAL — physical PREPROD root cause: this was left at
+      // the schema default (false), same as a MANUAL KITCHEN/BAR
+      // reprint (requestStationPrint) — correct for that case (a KDS
+      // operator's own browser is expected to claim it), but WRONG here.
+      // agentPrinting.pollAndClaim's candidate query filters
+      // `isAutomatic: true` (mirroring dispatchStationPrintJobs's
+      // KITCHEN/BAR automatic dispatch below) — with this left false,
+      // EVERY receipt PrintJob (both the automatic payment-time dispatch
+      // and the new silent printing.printReceipt primary action) was
+      // structurally invisible to the Agent's own poll forever, only ever
+      // reachable by an employee's own browser manually claiming it
+      // (printAndConfirm/beginPrintJob). That is exactly the observed bug:
+      // the waiter UI correctly reported "sent" (the job genuinely exists),
+      // but no Agent ever printed it. RECEIPT now dispatches automatic
+      // exactly like KITCHEN/BAR.
+      isAutomatic: true,
       isReprint: opts.isReprint,
       requestedBy: opts.requestedBy,
     },
@@ -429,7 +445,7 @@ export async function retryPrintJob(ctx: AuthContext, orderId: string, printJobI
     // legacy gate is already bypassed for this case (see fix above).
     // Fallback stations (no active Agent) keep the exact original
     // behavior — isAutomatic:false, immediate manual claim by the caller.
-    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
+    const activeWorkstation = await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.type);
     const changed = await tx.printJob.updateMany({
       where: { id: job.id, status: "FAILED", resultOutcome: "FAILED_BEFORE_SUBMISSION" },
       data: { status: "PENDING", failureReason: null, attemptId: null, claimedBy: null, claimedAt: null,
@@ -459,7 +475,17 @@ export async function beginPrintAttempt(ctx: AuthContext, orderId: string, print
     // Browser/QZ toggle. `policy === null` below means "an active agent
     // owns this station — skip legacy gates entirely", exactly mirroring
     // dispatchStationPrintJobs's rule.
-    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
+    //
+    // PRINTING V2 FINAL fix — this used to be `job.station ? ... : null`.
+    // `job.station` (legacy ProductionStation) is ALWAYS null for RECEIPT by
+    // design, so that gate NEVER consulted Agent eligibility for a RECEIPT
+    // job — it silently fell through to legacy Browser/QZ PrinterConfig
+    // policy every time, regardless of whether a live, route-configured
+    // Agent existed. `job.type` (KITCHEN|BAR|RECEIPT) is always populated
+    // and is the correct, mode-aware key (activeWorkstationFor now also
+    // honors LOGIN_AWARE terminal binding and CENTRAL_ROUTING's
+    // deterministic primary selection — see print-policy.ts).
+    const activeWorkstation = await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.type);
     const policy = activeWorkstation ? null : await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
     if (policy && !policy.isEnabled) return null;
     // Also recover an individual manual/receipt claim without requiring KDS polling.
@@ -491,7 +517,7 @@ export async function startPrintSubmission(ctx: AuthContext, orderId: string, pr
     await lockPrintLocation(tx, ctx.restaurantId, job.locationId);
     // Same rule as beginPrintAttempt above — an active Print Agent
     // workstation makes legacy PrinterConfig irrelevant for this station.
-    const activeWorkstation = job.station ? await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.station) : null;
+    const activeWorkstation = await activeWorkstationFor(tx, ctx.restaurantId, job.locationId, job.type);
     const policy = activeWorkstation ? null : await stationPolicy(tx, ctx.restaurantId, job.locationId, job.type);
     if (policy && !policy.isEnabled) throw new Error("Štampač je isključen");
     const changed = await tx.printJob.updateMany({

@@ -590,4 +590,30 @@ public sealed class SetupForm : Form
             "TableCore Print Agent — greška",
             MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
+
+    /// <summary>
+    /// PRINTING V2 FINAL — LOGIN_AWARE terminal binding result. A brief,
+    /// modal-but-standalone dialog (no SetupForm instance behind it, no
+    /// Application.Run message loop needed beyond this single call) — the
+    /// bind action never opens the full interactive Setup screen, and
+    /// nothing else on this process needs a window.
+    /// </summary>
+    public static void ShowStandaloneMessage(string message, bool isError)
+    {
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
+        Application.EnableVisualStyles();
+        MessageBox.Show(message, "TableCore Print Agent",
+            MessageBoxButtons.OK, isError ? MessageBoxIcon.Error : MessageBoxIcon.Information);
+    }
+
+    /// <summary>Restaurant-facing Serbian label for a PrintJobType, used
+    /// only by the terminal-bind result dialog above (mirrors ROUTE_LABEL's
+    /// wording already established in the Admin panel — Kuhinja/Šank/Račun).</summary>
+    public static string PrintRoleLabel(string? printRole) => printRole switch
+    {
+        "KITCHEN" => "KUHINJA",
+        "BAR" => "ŠANK",
+        "RECEIPT" => "RAČUN",
+        _ => printRole ?? "?",
+    };
 }

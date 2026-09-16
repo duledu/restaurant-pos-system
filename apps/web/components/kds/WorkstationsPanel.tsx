@@ -15,7 +15,14 @@ interface PrintRoute {
   paperWidthMm: number | null;
   printerAvailable: boolean | null;
   isEnabled: boolean;
+  isPrimary: boolean;
   updatedAt: string;
+}
+// PRINTING V2 FINAL — LOGIN_AWARE only; always null under CENTRAL_ROUTING.
+interface TerminalSession {
+  printRole: RouteType;
+  employeeId: string;
+  expiresAt: string;
 }
 interface Workstation {
   id: string;
@@ -25,6 +32,7 @@ interface Workstation {
   availablePrinters: string[] | null;
   printersReportedAt: string | null;
   printRoutes: PrintRoute[];
+  terminalSession: TerminalSession | null;
   agentVersion: string | null;
   osDescription: string | null;
   isEnabled: boolean;
@@ -57,7 +65,10 @@ interface RouteDraft {
   printerName: string;
   paperWidthMm: 58 | 80;
   isEnabled: boolean;
+  isPrimary: boolean;
 }
+type PrintingMode = "LOGIN_AWARE" | "CENTRAL_ROUTING";
+const PRINTING_MODE_LABEL: Record<PrintingMode, string> = { LOGIN_AWARE: "Prema prijavljenom korisniku", CENTRAL_ROUTING: "Centralno rutiranje" };
 
 const ROUTE_TYPES: RouteType[] = ["KITCHEN", "BAR", "RECEIPT"];
 const ROUTE_LABEL: Record<RouteType, string> = { KITCHEN: "Kuhinja", BAR: "Šank", RECEIPT: "Račun" };
@@ -162,6 +173,8 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [routeDrafts, setRouteDrafts] = useState<Record<string, RouteDraft>>({});
   const [savingRoutesId, setSavingRoutesId] = useState<string | null>(null);
   const [testingRoute, setTestingRoute] = useState<string | null>(null);
+  const [printingMode, setPrintingModeState] = useState<PrintingMode>("CENTRAL_ROUTING");
+  const [savingMode, setSavingMode] = useState(false);
 
   // PREPROD physical QA follow-up (Part A2) — ranije se ovo učitavalo TAČNO
   // JEDNOM pri montiranju, pa je Admin morao da se ručno F5-uje da vidi
@@ -185,6 +198,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       setWorkstationList(res.workstations ?? []);
       const pending: PendingPairing[] = res.pendingPairings ?? [];
       setPendingPairings(pending);
+      if (res.printingMode === "LOGIN_AWARE" || res.printingMode === "CENTRAL_ROUTING") setPrintingModeState(res.printingMode);
       // Printing V2 — auto-resolve the "just created" code panel the
       // instant its pairing is no longer PENDING (consumed by a
       // successful Agent pairing, cancelled, or naturally expired) — no
@@ -225,6 +239,31 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       setError(e instanceof Error ? e.message : "Greška pri zahtevu za test štampu");
     } finally {
       setTestingRoute(null);
+    }
+  }
+
+  // PRINTING V2 FINAL — mode change must be a deliberate Admin action
+  // (section 7), never a stray click: confirm() gates it, same convention
+  // already used for "Opozovi" below. Pairing, credentials, routes, printer
+  // discovery and print history are all untouched — only which workstation
+  // resolveEligibleWorkstation considers eligible for the NEXT claim changes.
+  async function changePrintingMode(next: PrintingMode) {
+    if (next === printingMode || savingMode) return;
+    const confirmMessage =
+      next === "LOGIN_AWARE"
+        ? "Prebaciti na REŽIM: Prema prijavljenom korisniku? Svaki računar će štampati prema ulozi trenutno prijavljenog korisnika na njemu, umesto po unapred podešenim rutama."
+        : "Prebaciti na REŽIM: Centralno rutiranje? Rute štampe podešene ispod postaju odmah aktivne, bez obzira ko je prijavljen na računaru.";
+    if (!confirm(confirmMessage)) return;
+    setSavingMode(true);
+    setError(null);
+    try {
+      await apiFetch("/api/admin/workstations/printing-mode", { method: "PUT", body: JSON.stringify({ printingMode: next }) });
+      setPrintingModeState(next);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri promeni režima štampe");
+    } finally {
+      setSavingMode(false);
     }
   }
 
@@ -384,7 +423,12 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     const draft = routeDrafts[key];
     if (draft) return draft;
     const existing = routeOf(w, type);
-    return { printerName: existing?.printerName ?? "", paperWidthMm: (existing?.paperWidthMm as 58 | 80) ?? 58, isEnabled: existing?.isEnabled ?? true };
+    return {
+      printerName: existing?.printerName ?? "",
+      paperWidthMm: (existing?.paperWidthMm as 58 | 80) ?? 58,
+      isEnabled: existing?.isEnabled ?? true,
+      isPrimary: existing?.isPrimary ?? false,
+    };
   }
   function patchRouteDraft(w: Workstation, type: RouteType, patch: Partial<RouteDraft>) {
     const key = draftKey(w.id, type);
@@ -403,6 +447,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             printerName: draft.printerName.trim() || null,
             paperWidthMm: draft.printerName.trim() ? draft.paperWidthMm : null,
             isEnabled: draft.isEnabled,
+            isPrimary: draft.isPrimary,
           }),
         });
       }
@@ -437,6 +482,19 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
 
   const revokedWorkstations = workstationList.filter((w) => w.revokedAt);
 
+  // PRINTING V2 FINAL — CENTRAL_ROUTING deterministic multi-agent routing:
+  // the "Glavna" (primary) toggle only makes sense (and is only shown) once
+  // more than one active workstation has an ENABLED route of the SAME type
+  // in the SAME location — otherwise there is no ambiguity to resolve, and
+  // showing it would just be Admin-panel clutter with today's single-Agent
+  // physical reality (test_11). Irrelevant under LOGIN_AWARE (eligibility
+  // there follows terminal login, never route priority) — never shown then.
+  function multipleWorkstationsShareRoute(type: RouteType, locationId: string, excludeWorkstationId?: string): boolean {
+    return activeWorkstations.some(
+      (w) => w.locationId === locationId && w.id !== excludeWorkstationId && routeOf(w, type)?.isEnabled
+    );
+  }
+
   function renderRouteRow(w: Workstation, type: RouteType) {
     const route = routeOf(w, type);
     const draft = getRouteDraft(w, type);
@@ -444,8 +502,11 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     const revoked = Boolean(w.revokedAt);
     const printerOptions = w.availablePrinters ?? [];
     const testKey = `${w.id}:${type}`;
+    const showPrimaryToggle =
+      printingMode === "CENTRAL_ROUTING" && draft.isEnabled && multipleWorkstationsShareRoute(type, w.locationId, w.id);
     return (
-      <div key={type} className="grid grid-cols-1 items-center gap-2 border-t border-line/60 py-2 first:border-t-0 sm:grid-cols-[80px_1fr_90px_120px_auto]">
+      <div key={type} className="border-t border-line/60 py-2 first:border-t-0">
+      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[80px_1fr_90px_120px_auto]">
         <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">{ROUTE_LABEL[type]}</span>
         <select
           value={draft.printerName}
@@ -488,6 +549,18 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           Test {ROUTE_LABEL[type].toLowerCase()}
         </button>
       </div>
+      {showPrimaryToggle && (
+        <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-inkSoft">
+          <input
+            type="checkbox"
+            checked={draft.isPrimary}
+            onChange={(e) => patchRouteDraft(w, type, { isPrimary: e.target.checked })}
+            disabled={revoked}
+          />
+          Glavna ruta za {ROUTE_LABEL[type].toLowerCase()} na ovoj lokaciji (kad više računara ima ovu rutu, samo glavni je preuzima)
+        </label>
+      )}
+      </div>
     );
   }
 
@@ -523,6 +596,12 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           <span>Poslednji kontakt: {formatDateTime(w.lastSeenAt)}</span>
           <span>Poslednja uspešna komunikacija: {formatDateTime(w.lastSuccessfulCommunicationAt)}</span>
           <span>Poslednja predaja na štampu: {formatDateTime(w.lastPrintAt)}</span>
+          {printingMode === "LOGIN_AWARE" && !revoked && (
+            <span className={w.terminalSession ? "font-semibold text-success" : "text-inkSoft"}>
+              Trenutna operativna uloga:{" "}
+              {w.terminalSession ? ROUTE_LABEL[w.terminalSession.printRole] : "nijedna (niko prijavljen na ovom računaru)"}
+            </span>
+          )}
           {w.testPrintStatus === "PENDING" && (
             <span className="font-semibold text-inkSoft">
               Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}): čeka se sledeći kontakt agenta…
@@ -631,6 +710,43 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           Omogućava tihu, automatsku štampu na računaru u kuhinji/šanku — bez otvaranja browsera, bez Chrome
           dijaloga za štampu i bez ručnog odobrenja po tiketu. Jedan uparen računar može imati više ruta štampe
           (Kuhinja, Šank, Račun) — isti fizički štampač sme da posluži sve tri.
+        </p>
+      </div>
+
+      <div className="mb-4 rounded-md border border-line p-3">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-inkSoft">Režim štampe</p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => changePrintingMode("LOGIN_AWARE")}
+            disabled={savingMode}
+            className={`rounded-md border-2 p-3 text-left transition-colors disabled:opacity-60 ${
+              printingMode === "LOGIN_AWARE" ? "border-gold bg-gold-soft" : "border-line hover:border-gold/50"
+            }`}
+          >
+            <p className="text-sm font-semibold text-ink">Prema prijavljenom korisniku</p>
+            <p className="mt-0.5 text-xs text-inkSoft">
+              Računar štampa prema ulozi korisnika koji je trenutno prijavljen na njemu.
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => changePrintingMode("CENTRAL_ROUTING")}
+            disabled={savingMode}
+            className={`rounded-md border-2 p-3 text-left transition-colors disabled:opacity-60 ${
+              printingMode === "CENTRAL_ROUTING" ? "border-gold bg-gold-soft" : "border-line hover:border-gold/50"
+            }`}
+          >
+            <p className="text-sm font-semibold text-ink">Centralno rutiranje</p>
+            <p className="mt-0.5 text-xs text-inkSoft">
+              Agent automatski šalje kuhinju, šank i račune na štampače podešene ispod, bez obzira ko je prijavljen na
+              računaru.
+            </p>
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-inkSoft">
+          Trenutno aktivno: <strong>{PRINTING_MODE_LABEL[printingMode]}</strong>. Promena režima ne briše uparivanje,
+          rute štampe ni istoriju štampe.
         </p>
       </div>
 

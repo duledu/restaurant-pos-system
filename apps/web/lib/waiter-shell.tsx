@@ -8,6 +8,8 @@ import { myReadyItemIds, hasNewReadyId } from "./ready-notifications";
 import { createWaiterLocalDraft, type WaiterLocalDraft } from "./waiter-local-draft";
 import { createWaiterFavorites } from "./waiter-table-memory";
 import { shareWaiterSnapshot } from "./waiter-snapshot";
+import { useTerminalBinding } from "./terminal-binding";
+import { TerminalBindingBadge } from "../components/ui/TerminalBindingBadge";
 
 async function apiFetch(url: string) {
   const res = await fetch(url);
@@ -186,6 +188,22 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
     [data, setFloors, setShift, refreshAvailability, readySoundOn, toggleReadySound, getDraft, favorites]);
   return <WaiterShellContext.Provider value={value}>
     {notice && <div role="status" className="fixed right-3 top-3 z-50 rounded-md bg-gold-soft px-4 py-3 text-sm text-gold-dark shadow-card">{notice}</div>}
+    {/* PRINTING V2 FINAL — LOGIN_AWARE terminal binding. Mounted ONCE here
+        (not per waiter screen) so every route under this shell offers it
+        uniformly. The corner chip itself only renders when there is
+        something to show — never an empty floating box under
+        CENTRAL_ROUTING or for a role with no operational print mapping. */}
+    <TerminalBindingCorner />
     {children}
   </WaiterShellContext.Provider>;
+}
+
+function TerminalBindingCorner() {
+  const { status } = useTerminalBinding();
+  if (status === "not-applicable") return null;
+  return (
+    <div className="fixed bottom-3 left-3 z-40 rounded-md bg-white/95 px-2.5 py-1.5 shadow-card backdrop-blur">
+      <TerminalBindingBadge />
+    </div>
+  );
 }

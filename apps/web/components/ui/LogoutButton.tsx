@@ -9,6 +9,14 @@ export function LogoutButton({ theme = "light" }: { theme?: "light" | "dark" }) 
     if (loading) return;
     setLoading(true);
     try {
+      // PRINTING V2 FINAL — LOGIN_AWARE terminal binding must be removed
+      // PROMPTLY on logout (section 11), not left to lapse on its TTL. Every
+      // surface that renders LogoutButton shares this one call, so KITCHEN/
+      // BAR/WAITER logout always releases operational print eligibility
+      // immediately. Best-effort/idempotent — a caller with no active
+      // binding (elevated role, CENTRAL_ROUTING restaurant, phone) is a
+      // normal no-op; a failure here must never block the actual logout.
+      await fetch("/api/pos/terminal/unbind", { method: "POST" }).catch(() => {});
       const response = await fetch("/api/auth/logout", { method: "POST" });
       if (response.ok) window.location.assign("/login");
     } finally {

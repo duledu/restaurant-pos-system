@@ -140,6 +140,58 @@ public static class PairingClient
         return $"Server je odbio kod uparivanja ({statusCode}).";
     }
 
+    public sealed record BindResult(bool Success, string? PrintRole, string? ErrorMessage);
+
+    /// <summary>
+    /// PRINTING V2 FINAL — LOGIN_AWARE terminal binding, Agent side. Reached
+    /// ONLY via tablecore-print://bind?token=... (Program.cs's TerminalBind
+    /// branch, launched by the SAME OS protocol-handler mechanism proven for
+    /// pairing) — a completely separate, short-lived process invocation,
+    /// same as --pair/--heartbeat above. NEVER touches AgentRunner's service
+    /// loop. Uses the ALREADY-STORED permanent credential (never re-pairs,
+    /// never asks for one) — this call itself IS the physical-co-location
+    /// proof the server needs (see terminal-service.ts consumeTerminalBind):
+    /// only a process running on this exact paired machine could ever reach
+    /// this code path with a real credential loaded.
+    /// </summary>
+    public static async Task<BindResult> Bind(string baseUrl, string token)
+    {
+        var credential = CredentialStore.Load();
+        if (credential is null)
+            return new BindResult(false, null, "Ovaj računar još nije uparen sa TableCore-om — prvo ga upari preko Admin panela.");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/agent/terminal/bind");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
+        request.Content = JsonContent.Create(new { token });
+
+        HttpResponseMessage response;
+        string body;
+        try
+        {
+            response = await Http.SendAsync(request);
+            body = await response.Content.ReadAsStringAsync();
+        }
+        catch (HttpRequestException ex)
+        {
+            return new BindResult(false, null, $"Mrežna greška: {ex.Message}");
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            // Server-side messages here (expired token, wrong restaurant) are
+            // already restaurant-facing Serbian text — safe to show as-is,
+            // same trust level as any other TableCore-authored error string.
+            string? serverMessage = null;
+            try { using var json = JsonDocument.Parse(body); serverMessage = json.RootElement.TryGetProperty("error", out var e) ? e.GetString() : null; }
+            catch (JsonException) { /* fall through to generic message below */ }
+            return new BindResult(false, null, serverMessage ?? $"Server je odbio povezivanje ({(int)response.StatusCode}).");
+        }
+
+        using var okJson = JsonDocument.Parse(body);
+        var printRole = okJson.RootElement.TryGetProperty("printRole", out var r) ? r.GetString() : null;
+        return new BindResult(true, printRole, null);
+    }
+
     public static async Task Heartbeat(string baseUrl)
     {
         var credential = CredentialStore.Load();
