@@ -1264,6 +1264,19 @@ model RestaurantSettings {
   // dok ne postoji stvarna fiskalizaciona integracija).
   receiptLegalNote  String?
   logoUrl           String?
+  // RECEIPT RENDERING POLISH — restaurant-level choice of whether the
+  // printed receipt shows the Osnovica/PDV tax breakdown at all. Default
+  // true preserves every existing restaurant's current (always-shown)
+  // behavior with no admin action required. This is the LIVE, currently-
+  // configured value only — a per-receipt PrintJob freezes whatever this
+  // was at the time of the ORIGINAL automatic dispatch into its own
+  // content JSON (see dispatchReceiptPrintJob's reuse-of-original-content
+  // logic in print-service.ts), so changing this later never alters a
+  // reprint of an already-issued receipt. Reuses this existing table
+  // rather than adding a new Receipt column — the toggle only affects
+  // DISPLAY, never the underlying tax VALUES, which were already frozen on
+  // Receipt.taxTotal/taxBreakdown long before this field existed.
+  showTaxBreakdown Boolean @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

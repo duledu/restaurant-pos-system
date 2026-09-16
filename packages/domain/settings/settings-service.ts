@@ -31,6 +31,12 @@ export interface RestaurantSettingsView {
   receiptFooterText: string | null;
   receiptLegalNote: string | null;
   logoUrl: string | null;
+  // RECEIPT RENDERING POLISH — restaurant-level, Admin-configurable choice
+  // of whether the printed receipt shows the Osnovica/PDV breakdown at all.
+  // This is the LIVE, current value only — see dispatchReceiptPrintJob in
+  // print-service.ts for how an already-dispatched receipt's reprint stays
+  // historically correct even after this changes.
+  showTaxBreakdown: boolean;
 }
 
 const DEFAULTS = (restaurantId: string): RestaurantSettingsView => ({
@@ -41,6 +47,7 @@ const DEFAULTS = (restaurantId: string): RestaurantSettingsView => ({
   receiptFooterText: null,
   receiptLegalNote: null,
   logoUrl: null,
+  showTaxBreakdown: true,
 });
 
 /**
@@ -65,6 +72,7 @@ export interface UpdateRestaurantSettingsInput {
   receiptFooterText?: string | null;
   receiptLegalNote?: string | null;
   logoUrl?: string | null;
+  showTaxBreakdown?: boolean;
 }
 
 export async function updateRestaurantSettings(
@@ -79,6 +87,41 @@ export async function updateRestaurantSettings(
   });
   await cacheDel(settingsCacheKey(ctx.restaurantId));
   return updated;
+}
+
+/**
+ * RECEIPT RENDERING POLISH — the receipt's restaurant identity must come
+ * from an Admin-configurable field, not a hardcoded/seed value. Restaurant.name
+ * was already the authoritative source everywhere a receipt is ISSUED
+ * (billing-service.ts freezes it onto Receipt.restaurantName at that exact
+ * moment — already historically correct, unchanged by this function) — the
+ * only real gap was that no Admin UI ever let it be edited. Deliberately a
+ * separate function/model from RestaurantSettings above (Restaurant.name is
+ * a distinct table), but gated by the SAME "settings.manage" permission and
+ * exposed from the SAME admin API route, since from an Admin's perspective
+ * it's one "restaurant settings" page.
+ */
+export async function getRestaurantName(ctx: Pick<AuthContext, "restaurantId">): Promise<string> {
+  const restaurant = await prisma.restaurant.findUniqueOrThrow({ where: { id: ctx.restaurantId }, select: { name: true } });
+  return restaurant.name;
+}
+
+export async function updateRestaurantName(ctx: AuthContext, name: string): Promise<string> {
+  requirePermission(ctx, SETTINGS_MANAGE);
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Naziv restorana je obavezan");
+  if (trimmed.length > 200) throw new Error("Naziv restorana je predugačak (max 200 znakova)");
+  const previous = await prisma.restaurant.findUniqueOrThrow({ where: { id: ctx.restaurantId }, select: { name: true } });
+  if (previous.name === trimmed) return previous.name;
+  const updated = await prisma.restaurant.update({ where: { id: ctx.restaurantId }, data: { name: trimmed }, select: { name: true } });
+  await recordAuditEntry(ctx, {
+    entityType: "Restaurant",
+    entityId: ctx.restaurantId,
+    action: "restaurant.name_updated",
+    previousValue: { name: previous.name },
+    newValue: { name: updated.name },
+  });
+  return updated.name;
 }
 
 export interface PrinterConfigInput {

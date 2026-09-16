@@ -305,7 +305,14 @@ public static class AgentRunner
         }
         else
         {
-            var ticket = Ticket.TestPrint(Environment.MachineName, route.Type, route.PrinterName, route.PaperWidthMm, AgentVersion.Current);
+            // RECEIPT RENDERING POLISH — a RECEIPT-route Test Print must
+            // validate the REAL receipt renderer (TicketPayload.ParseReceipt's
+            // shared body), not the generic diagnostic ticket used for
+            // KITCHEN/BAR — see TicketPayload.BuildReceiptTestPrintTicket.
+            // KITCHEN/BAR Test Print is intentionally unchanged.
+            var ticket = route.Type == "RECEIPT"
+                ? TicketPayload.BuildReceiptTestPrintTicket(Environment.MachineName, route.PrinterName, route.PaperWidthMm, AgentVersion.Current)
+                : Ticket.TestPrint(Environment.MachineName, route.Type, route.PrinterName, route.PaperWidthMm, AgentVersion.Current);
             var outcome = WindowsPrinter.Print(route, ticket, "test-" + Guid.NewGuid().ToString("N"));
             status = outcome.Status == "SUBMITTED_TO_SPOOLER" ? "SUCCEEDED" : "FAILED";
             error = outcome.Status == "SUBMITTED_TO_SPOOLER" ? null : (outcome.Error ?? outcome.Guarantee);
@@ -521,5 +528,5 @@ public static class AgentRunner
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.7";
+    public const string Current = "1.0.0-pilot.8";
 }

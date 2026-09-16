@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { settings } from "@rcs/domain";
 import { requirePermission } from "@rcs/auth";
-import { updateRestaurantSettingsSchema } from "@rcs/shared";
+import { adminRestaurantSettingsPutSchema } from "@rcs/shared";
 import { withApiAuth } from "../../../../../lib/api-helpers";
 
 // settings.getRestaurantSettings(ctx) itself has NO permission check by
@@ -11,13 +11,24 @@ import { withApiAuth } from "../../../../../lib/api-helpers";
 // of these settings, without touching that shared internal reader.
 export const GET = withApiAuth(async (ctx) => {
   requirePermission(ctx, "settings.manage");
-  const restaurantSettings = await settings.getRestaurantSettings(ctx);
-  return NextResponse.json({ settings: restaurantSettings });
+  const [restaurantSettings, name] = await Promise.all([
+    settings.getRestaurantSettings(ctx),
+    settings.getRestaurantName(ctx),
+  ]);
+  return NextResponse.json({ settings: { ...restaurantSettings, name } });
 });
 
+// RECEIPT RENDERING POLISH — `name` belongs to a different table
+// (Restaurant, not RestaurantSettings) but is exposed on this same admin
+// page/request for a simple one-form editing experience. Split before
+// delegating to the two domain functions, each of which independently
+// enforces "settings.manage".
 export const PUT = withApiAuth(async (ctx, request) => {
   const body = await request.json();
-  const input = updateRestaurantSettingsSchema.parse(body);
-  const restaurantSettings = await settings.updateRestaurantSettings(ctx, input);
-  return NextResponse.json({ settings: restaurantSettings });
+  const { name, ...settingsInput } = adminRestaurantSettingsPutSchema.parse(body);
+  const [restaurantSettings, updatedName] = await Promise.all([
+    settings.updateRestaurantSettings(ctx, settingsInput),
+    name === undefined ? settings.getRestaurantName(ctx) : settings.updateRestaurantName(ctx, name),
+  ]);
+  return NextResponse.json({ settings: { ...restaurantSettings, name: updatedName } });
 });

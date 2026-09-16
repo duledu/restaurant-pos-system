@@ -264,6 +264,16 @@ internal static class SelfTests
             var real80Result = WindowsPrinter.Print(new("RECEIPT", printerName, 80), realReceiptTicket80, "regression-425-wrong-width", dryRun: true);
             Check(real80Result.Status == "FAILED_BEFORE_SUBMISSION" && (real80Result.Error?.Contains("printable area", StringComparison.OrdinalIgnoreCase) ?? false),
                 $"[{printerName}] NEGATIVE REGRESSION PROOF for #425's real root cause: the exact real receipt content, rendered at the WRONG server-embedded width (80mm) instead of the driver's real 58mm roll, reproduces the exact physical failure — {real80Result.Status} / {real80Result.Error}");
+
+            // RECEIPT RENDERING POLISH — the Admin Test Print for a RECEIPT
+            // route deliberately contains MORE stress-test content than a
+            // typical real receipt (short/long/very-long names, modifiers,
+            // two VAT rates); prove it still fits this same real driver at
+            // 58mm, exactly like a real receipt does above.
+            var testPrintTicketForDriver = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", printerName, 58, "1.0.0-pilot.8");
+            var testPrintDriverResult = WindowsPrinter.Print(new("RECEIPT", printerName, 58), testPrintTicketForDriver, "self-test-receipt-test-print", dryRun: true);
+            Check(testPrintDriverResult.Status == "PREFLIGHT_ONLY",
+                $"[{printerName}] the realistic RECEIPT Test Print ticket (stress-test content, same renderer as a real receipt) fits this same real driver — {testPrintDriverResult.Guarantee}");
         }
 
         // Faza 2B Korak 0 — DPAPI CredentialStore round-trip. Sačuvaj/vrati
@@ -355,41 +365,121 @@ internal static class SelfTests
              "subtotal":"5500.00","taxTotal":"1100.00","discountAmount":null,"total":"6600.00","currency":"RSD",
              "paymentMethod":"CASH","tenderedAmount":"8000.00","changeAmount":"1400.00","paperWidthMm":58}
             """).RootElement;
+        // RECEIPT RENDERING POLISH — money/labels now live in a two-column
+        // TicketLine (Text=left label, RightText=right amount), so a
+        // meaningful text search must join BOTH per line, not just Text.
+        static string JoinedText(Ticket t) => string.Join("\n", t.Lines.Select(l => l.RightText is null ? l.Text : $"{l.Text} {l.RightText}"));
+
         var (receiptTicket, receiptWidth, receiptStation) = TicketPayload.Parse(receiptJson);
         Check(receiptWidth == 58, "TicketPayload.ParseReceipt reads paperWidthMm from the frozen payload");
         Check(receiptStation == "RECEIPT", "TicketPayload.ParseReceipt reports station RECEIPT — the OLD (bug) code always reported KITCHEN for any receipt, since ReceiptTicketContent has no `stationLabel`/`kind` matching the KitchenBar parser's checks");
-        var receiptText = string.Join("\n", receiptTicket.Lines.Select(l => l.Text));
-        Check(receiptText.Contains("TableCore Restoran"), "receipt includes the restaurant name (never present under the old KitchenBar parser)");
-        Check(receiptText.Contains("RACUN #425"), "receipt includes the receipt number");
+        var receiptText = JoinedText(receiptTicket);
+        Check(receiptText.Contains("TABLECORE RESTORAN"), "restaurant name is shown prominently, uppercased for emphasis (typography hierarchy requirement)");
+        Check(receiptText.Contains("RAČUN #425"), "receipt includes the receipt number, correct Serbian diacritics (proven printable elsewhere in this suite)");
+        Check(receiptText.Contains("Sto: 1"), "table identity uses a clean 'Sto: {label}' format, never the old bare 'STO {label}' concatenation");
+        Check(receiptText.Contains("Konobar: Test_11 Detlic"), "receipt includes the authoritative waiter identity");
         Check(receiptText.Contains("Dimljeni svinjski vrat"), "receipt includes a real item name");
-        Check(receiptText.Contains("2000.00"), "receipt includes item pricing (never present under the old parser, which only ever read quantity+name)");
-        Check(receiptText.Contains("Ljuto") && receiptText.Contains("50.00"), "receipt includes a priced modifier — the OLD parser's modifier check required a plain string and silently dropped every real {name,priceDelta} object");
-        Check(receiptText.Contains("Osnovica: 5500.00"), "receipt includes the subtotal");
-        Check(receiptText.Contains("PDV: 1100.00"), "receipt includes the tax total");
-        Check(receiptText.Contains("UKUPNO: 6600.00 RSD"), "receipt includes the grand total with currency");
-        Check(receiptText.Contains("Primljeno: 8000.00") && receiptText.Contains("Kusur: 1400.00"), "receipt includes tendered/change amounts for a CASH payment (never present under the old parser)");
-        Check(receiptText.Contains("Radni nalog"), "receipt includes the non-fiscal legal note (required wording, never present under the old parser)");
+        Check(receiptText.Contains("2.000,00"), "item pricing uses Serbian money formatting (dot thousands, comma decimal), not raw application decimals");
+        Check(receiptText.Contains("Ljuto") && receiptText.Contains("50,00"), "receipt includes a priced modifier in Serbian money format — the OLD parser's modifier check required a plain string and silently dropped every real {name,priceDelta} object");
+        Check(receiptText.Contains("Osnovica") && receiptText.Contains("5.500,00"), "receipt includes the subtotal (Osnovica), Serbian-formatted");
+        Check(receiptText.Contains("PDV") && receiptText.Contains("1.100,00"), "receipt includes the tax total (PDV), Serbian-formatted");
+        Check(receiptText.Contains("UKUPNO") && receiptText.Contains("6.600,00 RSD"), "receipt includes the grand total with currency, Serbian-formatted, as the strongest financial emphasis");
+        Check(receiptText.Contains("Primljeno") && receiptText.Contains("8.000,00") && receiptText.Contains("Kusur") && receiptText.Contains("1.400,00"), "receipt includes tendered/change amounts for a CASH payment, Serbian-formatted");
+        Check(receiptText.Contains("RADNI NALOG"), "receipt includes the non-fiscal legal note, emphasized in caps like a real legal disclaimer");
         Check(!receiptText.Contains("KUHINJA"), "receipt never prints the old parser's incorrect always-KITCHEN station fallback");
+        Check(receiptTicket.Lines.Count(l => l.IsRule) >= 3, "receipt uses drawn rule separators (not fixed-length dash text) to structure header/items/totals/footer");
         receiptTicket.Validate();
         Check(true, "TicketPayload.ParseReceipt output passes existing Ticket.Validate() unchanged");
 
         // A receipt with NO discount/no modifiers/a CARD payment must never
-        // print an empty "Popust:"/tendered/change line that doesn't apply.
+        // print an empty "Popust"/tendered/change line that doesn't apply.
         var cardReceiptJson = System.Text.Json.JsonDocument.Parse("""
             {"kind":"RECEIPT","restaurantName":"TableCore Restoran","restaurantLegalName":null,"address":null,"phone":null,
              "taxIdNumber":null,"legalNote":"Radni nalog – nije fiskalni račun","footerText":null,"receiptNumber":1,
-             "orderNumber":"AAAA1111","tableLabel":"2","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
+             "orderNumber":"AAAA1111","tableLabel":"Sto 1","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
              "items":[{"quantity":1,"name":"Kafa","unitPrice":"150.00","lineTotal":"150.00"}],
              "subtotal":"150.00","taxTotal":"30.00","discountAmount":"0.00","total":"180.00","currency":"RSD",
              "paymentMethod":"CARD","tenderedAmount":"180.00","changeAmount":"0.00","paperWidthMm":80}
             """).RootElement;
         var (cardTicket, _, _) = TicketPayload.Parse(cardReceiptJson);
-        var cardText = string.Join("\n", cardTicket.Lines.Select(l => l.Text));
-        Check(!cardText.Contains("Popust:"), "a zero discountAmount never renders a Popust line");
-        Check(!cardText.Contains("Primljeno:") && !cardText.Contains("Kusur:"), "a CARD payment never renders tendered/change lines (CASH-only fields)");
+        var cardText = JoinedText(cardTicket);
+        Check(!cardText.Contains("Popust"), "a zero discountAmount never renders a Popust line");
+        Check(!cardText.Contains("Primljeno") && !cardText.Contains("Kusur"), "a CARD payment never renders tendered/change lines (CASH-only fields)");
         Check(cardText.Contains("KARTICA"), "CARD payment method renders the correct Serbian label");
+        Check(cardText.Contains("Sto: Sto 1"), "REGRESSION PROOF for the reported 'STO Sto 1' duplication bug: a table whose real label already reads 'Sto 1' now renders exactly 'Sto: Sto 1' (single, unambiguous prefix), never a bare 'STO Sto 1' concatenation");
         cardTicket.Validate();
         Check(true, "TicketPayload.ParseReceipt (CARD, no discount) output passes existing Ticket.Validate() unchanged");
+
+        // RECEIPT RENDERING POLISH — VAT display OFF must never print a
+        // misleading Osnovica/PDV breakdown, but the total itself (already
+        // tax-inclusive in the frozen data) must be unaffected.
+        var noVatJson = System.Text.Json.JsonDocument.Parse("""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+             "receiptNumber":2,"tableLabel":"3","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z","showTaxBreakdown":false,
+             "items":[{"quantity":1,"name":"Kafa","basePrice":"150.00","lineTotal":"150.00"}],
+             "subtotal":"150.00","taxTotal":"30.00","discountAmount":null,"total":"180.00","currency":"RSD",
+             "paymentMethod":"CASH","tenderedAmount":"200.00","changeAmount":"20.00","paperWidthMm":58}
+            """).RootElement;
+        var (noVatTicket, _, _) = TicketPayload.Parse(noVatJson);
+        var noVatText = JoinedText(noVatTicket);
+        Check(!noVatText.Contains("Osnovica") && !noVatText.Contains("PDV"), "showTaxBreakdown:false never prints Osnovica/PDV — the receipt would otherwise misleadingly imply a tax breakdown that isn't being disclosed");
+        Check(noVatText.Contains("UKUPNO") && noVatText.Contains("180,00"), "the total itself (already tax-inclusive in the frozen data) is unaffected by the display toggle — only the breakdown DISPLAY changes, never the underlying value");
+        noVatTicket.Validate();
+
+        // A receipt payload predating this field (no `showTaxBreakdown` key
+        // at all) must default to SHOWING the breakdown — the exact
+        // always-on behavior every restaurant had before this feature
+        // existed (backward compatibility for older frozen PrintJob rows).
+        Check(receiptJson.TryGetProperty("showTaxBreakdown", out _) == false, "sanity: the main #425 fixture above has no showTaxBreakdown key");
+        Check(receiptText.Contains("Osnovica") && receiptText.Contains("PDV"), "a receipt predating the showTaxBreakdown field still shows the breakdown by default (backward compatible)");
+
+        // Multiple simultaneous VAT rates are a real, already-supported
+        // case (order-totals.ts groups by rate) — must render EACH rate's
+        // own Osnovica/PDV line, never collapse them into one fake blended
+        // rate.
+        var multiVatJson = System.Text.Json.JsonDocument.Parse("""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+             "receiptNumber":3,"tableLabel":"4","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z","showTaxBreakdown":true,
+             "items":[{"quantity":1,"name":"Hleb","basePrice":"100.00","lineTotal":"100.00"},{"quantity":1,"name":"Pivo","basePrice":"300.00","lineTotal":"300.00"}],
+             "subtotal":"400.00","taxTotal":"70.00",
+             "taxBreakdown":[{"taxRate":"10","taxableAmount":"100.00","taxAmount":"10.00"},{"taxRate":"20","taxableAmount":"300.00","taxAmount":"60.00"}],
+             "discountAmount":null,"total":"470.00","currency":"RSD","paymentMethod":"CARD","tenderedAmount":"470.00","changeAmount":"0.00","paperWidthMm":58}
+            """).RootElement;
+        var (multiVatTicket, _, _) = TicketPayload.Parse(multiVatJson);
+        var multiVatText = JoinedText(multiVatTicket);
+        Check(multiVatText.Contains("Osnovica (10%)") && multiVatText.Contains("PDV (10%)"), "multiple VAT rates: the 10% bucket gets its own labeled Osnovica/PDV line");
+        Check(multiVatText.Contains("Osnovica (20%)") && multiVatText.Contains("PDV (20%)"), "multiple VAT rates: the 20% bucket gets its own labeled Osnovica/PDV line, never collapsed into a single fake rate");
+        multiVatTicket.Validate();
+
+        // Long-name wrapping — an item name well beyond one line's width
+        // must wrap without ever overlapping/displacing its own price row
+        // or clipping (proven by successful raster construction + Validate,
+        // and by a real-driver dry-run further below).
+        var longNameJson = System.Text.Json.JsonDocument.Parse("""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","legalNote":"Radni nalog – nije fiskalni račun",
+             "receiptNumber":4,"tableLabel":"5","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
+             "items":[{"quantity":1,"name":"Specijalni dnevni meni sa dodatnim prilogom po izboru kuvara i domaćim hlebom","basePrice":"12500.00","lineTotal":"12500.00"}],
+             "subtotal":"12500.00","taxTotal":"2500.00","discountAmount":null,"total":"15000.00","currency":"RSD",
+             "paymentMethod":"CASH","tenderedAmount":"15000.00","changeAmount":"0.00","paperWidthMm":58}
+            """).RootElement;
+        var (longNameTicket, _, _) = TicketPayload.Parse(longNameJson);
+        using (var longNameRaster = new TicketRaster(longNameTicket, 58)) { Check(longNameRaster.ContentHeightUnits > 0, "a very long item name renders into a valid, non-empty raster without throwing"); }
+        longNameTicket.Validate();
+        Check(JoinedText(longNameTicket).Contains("12.500,00"), "a very long item name still gets its correctly Serbian-formatted price on its own row");
+
+        // RECEIPT RENDERING POLISH, requirement #17 — the Admin Test Print
+        // for a RECEIPT route must exercise this SAME renderer (not a
+        // disconnected diagnostic ticket) and must be unmistakable.
+        var testPrintTicket = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", "POS-58", 58, "1.0.0-pilot.8");
+        var testPrintText = JoinedText(testPrintTicket);
+        Check(testPrintText.Contains("TEST ŠTAMPE") && testPrintText.Contains("TEST USPEŠAN"), "Test Print is unmistakably marked, cannot be confused with a real customer receipt");
+        Check(!testPrintText.Contains("RAČUN #"), "Test Print never renders a receipt number — it must never look like a real, sequence-consuming transaction");
+        Check(testPrintText.Contains("Šopska salata") && testPrintText.Contains("Dimljeni svinjski vrat") && testPrintText.Contains("Specijalni dnevni meni"), "Test Print stress-tests short/long/very-long item names through the REAL renderer");
+        Check(testPrintText.Contains("č ć ž š đ"), "Test Print stress-tests Serbian characters through the REAL renderer");
+        Check(testPrintText.Contains("Osnovica (10%)") && testPrintText.Contains("Osnovica (20%)"), "Test Print stress-tests multiple VAT rates through the REAL renderer");
+        Check(testPrintText.Contains("Primljeno") && testPrintText.Contains("Kusur"), "Test Print stress-tests a CASH payment with change through the REAL renderer");
+        testPrintTicket.Validate();
+        Check(true, "TicketPayload.BuildReceiptTestPrintTicket output passes existing Ticket.Validate() unchanged");
 
         // Faza 2C — bezbedno rešavanje servera (AgentEndpoint). Napravljeno
         // POSLE stvarnog incidenta (vidi AgentEndpoint.cs) gde je tih pad na

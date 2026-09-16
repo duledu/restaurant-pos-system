@@ -142,6 +142,16 @@ export interface ReceiptTicketContent {
   subtotal: string;
   taxTotal: string;
   taxBreakdown: ReceiptTaxBreakdownEntry[];
+  // RECEIPT RENDERING POLISH — whether the renderer should print the
+  // Osnovica/PDV breakdown at all. Frozen into this content at dispatch
+  // time (from RestaurantSettings.showTaxBreakdown at that exact moment),
+  // NEVER re-read live on reprint — see dispatchReceiptPrintJob in
+  // print-service.ts, which reuses this ENTIRE frozen content object
+  // unchanged on every reprint rather than recomputing it. Optional only so
+  // a receipt dispatched before this field existed still parses (renderer
+  // treats a missing value as true, matching the always-shown behavior
+  // every restaurant had before this feature existed).
+  showTaxBreakdown?: boolean;
   discountAmount: string | null;
   total: string;
   currency: string;
@@ -170,6 +180,7 @@ export function buildReceiptTicketContent(params: {
   subtotal: string;
   taxTotal: string;
   taxBreakdown: ReceiptTaxBreakdownEntry[];
+  showTaxBreakdown: boolean;
   discountAmount: string | null;
   total: string;
   currency: string;
@@ -196,6 +207,7 @@ export function buildReceiptTicketContent(params: {
     subtotal: params.subtotal,
     taxTotal: params.taxTotal,
     taxBreakdown: params.taxBreakdown,
+    showTaxBreakdown: params.showTaxBreakdown,
     discountAmount: params.discountAmount,
     total: params.total,
     currency: params.currency,

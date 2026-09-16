@@ -6,12 +6,14 @@ import { Skeleton } from "../../../../components/ui/Skeleton";
 import { useInstallPrompt } from "../../../../components/system/InstallAppButton";
 
 interface RestaurantSettings {
+  name: string;
   address: string | null;
   phone: string | null;
   taxIdNumber: string | null;
   receiptFooterText: string | null;
   receiptLegalNote: string | null;
   logoUrl: string | null;
+  showTaxBreakdown: boolean;
 }
 
 async function apiFetch(url: string, options?: RequestInit) {
@@ -20,6 +22,12 @@ async function apiFetch(url: string, options?: RequestInit) {
   if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
   return body;
 }
+
+const IDENTITY_FIELD: { key: keyof RestaurantSettings; label: string; placeholder: string } = {
+  key: "name",
+  label: "Naziv restorana",
+  placeholder: "Restoran Stari Hrast",
+};
 
 const FIELDS: { key: keyof RestaurantSettings; label: string; placeholder: string; multiline?: boolean }[] = [
   { key: "address", label: "Adresa", placeholder: "Ulica i broj, grad" },
@@ -87,17 +95,46 @@ export function RestaurantSettingsClient() {
           <Skeleton className="h-64" />
         ) : (
           <div className="space-y-4">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-inkSoft">{IDENTITY_FIELD.label}</label>
+              <input
+                value={values.name}
+                placeholder={IDENTITY_FIELD.placeholder}
+                onChange={(e) => setValues({ ...values, name: e.target.value })}
+                className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+              />
+              <p className="mt-1 text-xs text-inkSoft">Prikazuje se na vrhu kupčevog računa.</p>
+            </div>
             {FIELDS.map((f) => (
               <div key={f.key}>
                 <label className="mb-1.5 block text-sm font-medium text-inkSoft">{f.label}</label>
                 <input
-                  value={values[f.key] ?? ""}
+                  value={(values[f.key] as string | null) ?? ""}
                   placeholder={f.placeholder}
                   onChange={(e) => setValues({ ...values, [f.key]: e.target.value || null })}
                   className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
                 />
               </div>
             ))}
+            <div className="flex items-start justify-between gap-4 rounded-md border border-line px-3 py-3">
+              <div>
+                <p className="text-sm font-medium text-inkSoft">PDV rekapitulacija na računu</p>
+                <p className="mt-0.5 text-xs text-inkSoft">
+                  Kad je isključeno, račun ne prikazuje Osnovica/PDV stavke — samo ukupan iznos i plaćanje.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={values.showTaxBreakdown}
+                onClick={() => setValues({ ...values, showTaxBreakdown: !values.showTaxBreakdown })}
+                className={`relative min-h-6 w-11 shrink-0 rounded-full transition-colors ${values.showTaxBreakdown ? "bg-graphite" : "bg-line"}`}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${values.showTaxBreakdown ? "translate-x-5" : "translate-x-0.5"}`}
+                />
+              </button>
+            </div>
             <button
               type="button"
               onClick={save}

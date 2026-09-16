@@ -1,0 +1,17 @@
+-- RECEIPT PRINTING POLISH + VAT SETTINGS
+--
+-- Adds ONE additive column: a per-restaurant, Admin-configurable toggle for
+-- whether the printed receipt shows the Osnovica/PDV tax breakdown at all.
+-- Default TRUE preserves every existing restaurant's current (always-shown)
+-- behavior with zero admin action required.
+--
+-- This is deliberately the ONLY schema change for this task. The
+-- historical-accuracy requirement (changing this setting later must never
+-- alter a reprint of an already-issued receipt) is satisfied WITHOUT a new
+-- Receipt column: dispatchReceiptPrintJob now reuses the original automatic
+-- dispatch's already-frozen PrintJob.content JSON verbatim on every reprint,
+-- instead of recomputing it from live settings (see print-service.ts) — the
+-- existing PrintJob.content field is already the authoritative frozen
+-- snapshot for this purpose (see its own doc comment above), no new
+-- database field was needed to close that gap.
+ALTER TABLE "restaurant_settings" ADD COLUMN "showTaxBreakdown" BOOLEAN NOT NULL DEFAULT true;

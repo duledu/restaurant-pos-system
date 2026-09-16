@@ -274,73 +274,104 @@ export async function dispatchReceiptPrintJob(
   });
   if (!receipt) return;
 
-  // Physical PREPROD root cause (real receipt #425, POS-58 — "Driver
-  // printable area is too small for this ticket.", reproduced exactly by
-  // rendering this receipt's real content at 80mm against the SAME driver
-  // family test_11 uses): this UNCONDITIONALLY read the legacy Browser/QZ
-  // PrinterConfig default (80mm, since no PrinterConfig row exists for a
-  // restaurant fully on the Printing V2 WorkstationPrintRoute model) instead
-  // of the REAL Agent-configured RECEIPT route (58mm) — the exact same class
-  // of bug dispatchStationPrintJobs (KITCHEN/BAR, below) already correctly
-  // avoids by preferring the active Agent workstation's own reported
-  // paperWidthMm first, only falling back to legacy PrinterConfig when no
-  // Agent is active at all. RECEIPT was never given the same treatment when
-  // it became Agent-routable. The ticket was then frozen with the WRONG
-  // width, and AgentRunner.cs's own (now-removed) override compounded this
-  // by letting that wrong value replace the Agent's correct local route
-  // width — this fix removes the root cause at its source; the paired Agent
-  // fix (see AgentRunner.cs ProcessReceivedJob) removes the second, unsafe
-  // "trust the server's embedded width over local config" layer too.
-  const [settings, activeWorkstation] = await Promise.all([
-    getRestaurantSettings(ctx),
-    activeWorkstationFor(prisma, ctx.restaurantId, receipt.locationId, "RECEIPT"),
-  ]);
-  const paperWidthMm = activeWorkstation
-    ? (activeWorkstation.paperWidthMm ?? 80)
-    : (await getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT")).paperWidthMm;
-  const items = receipt.items as unknown as {
-    name: string;
-    price: string;
-    basePrice?: string;
-    modifiers?: { name: string; priceDelta: string }[];
-    taxRate: string;
-    quantity: number;
-    lineTotal: string;
-  }[];
-  const taxBreakdown = receipt.taxBreakdown as unknown as { taxRate: string; taxableAmount: string; taxAmount: string }[];
+  // RECEIPT RENDERING POLISH — historical accuracy on reprint (audit
+  // finding, not previously covered by any test): PrintJob.content's own
+  // doc comment in schema.prisma promises reprint "NIKAD ne preračunava"
+  // (never recomputes), but this function used to rebuild `content` fresh
+  // from LIVE RestaurantSettings (address/phone/PIB/footer/legal
+  // note/showTaxBreakdown) on EVERY call, including every explicit reprint
+  // — so if Admin edited any of those fields (or the new VAT-display
+  // toggle) between the original transaction and a later reprint, the
+  // reprint would silently show the NEW values, not what was true when the
+  // sale actually happened. Fix: a reprint (any dispatchKey other than the
+  // ORIGINAL automatic one) now looks up that original PrintJob row and
+  // reuses its `content` JSON completely unchanged — the exact same
+  // "replay the frozen snapshot" contract already used for KITCHEN/BAR.
+  // Falls through to building fresh content only when no original row
+  // exists yet (e.g. the automatic dispatch itself failed before ever
+  // creating one — this reprint click is then effectively the first-ever
+  // dispatch) or when this call IS that original dispatch itself.
+  const originalDispatchKey = `receipt:${paymentId}`;
+  const original =
+    opts.dispatchKey === originalDispatchKey
+      ? null
+      : await prisma.printJob.findUnique({
+          where: { orderId_dispatchKey: { orderId: receipt.orderId, dispatchKey: originalDispatchKey } },
+        });
 
-  const content = buildReceiptTicketContent({
-    restaurantName: receipt.restaurantName,
-    restaurantLegalName: receipt.restaurantLegalName,
-    address: settings.address,
-    phone: settings.phone,
-    taxIdNumber: settings.taxIdNumber,
-    legalNote: settings.receiptLegalNote,
-    footerText: settings.receiptFooterText,
-    receiptNumber: receipt.sequenceNumber,
-    orderNumber: shortOrderNumber(receipt.orderId),
-    tableLabel: receipt.tableLabel,
-    waiterName: receipt.waiterName,
-    issuedAt: receipt.issuedAt.toISOString(),
-    items: items.map((i) => ({
-      quantity: i.quantity,
-      name: i.name,
-      unitPrice: i.price,
-      lineTotal: i.lineTotal,
-      basePrice: i.basePrice,
-      modifiers: i.modifiers,
-    })),
-    subtotal: receipt.subtotal.toString(),
-    taxTotal: receipt.taxTotal.toString(),
-    taxBreakdown,
-    discountAmount: receipt.discountAmount ? receipt.discountAmount.toString() : null,
-    total: receipt.total.toString(),
-    currency: receipt.currency,
-    paymentMethod: receipt.paymentMethod,
-    tenderedAmount: receipt.payment.tenderedAmount.toString(),
-    changeAmount: receipt.payment.changeAmount.toString(),
-    paperWidthMm,
-  });
+  let content: ReturnType<typeof buildReceiptTicketContent>;
+  if (original) {
+    content = original.content as unknown as ReturnType<typeof buildReceiptTicketContent>;
+  } else {
+    // Physical PREPROD root cause (real receipt #425, POS-58 — "Driver
+    // printable area is too small for this ticket.", reproduced exactly by
+    // rendering this receipt's real content at 80mm against the SAME driver
+    // family test_11 uses): this UNCONDITIONALLY read the legacy Browser/QZ
+    // PrinterConfig default (80mm, since no PrinterConfig row exists for a
+    // restaurant fully on the Printing V2 WorkstationPrintRoute model) instead
+    // of the REAL Agent-configured RECEIPT route (58mm) — the exact same class
+    // of bug dispatchStationPrintJobs (KITCHEN/BAR, below) already correctly
+    // avoids by preferring the active Agent workstation's own reported
+    // paperWidthMm first, only falling back to legacy PrinterConfig when no
+    // Agent is active at all. RECEIPT was never given the same treatment when
+    // it became Agent-routable. The ticket was then frozen with the WRONG
+    // width, and AgentRunner.cs's own (now-removed) override compounded this
+    // by letting that wrong value replace the Agent's correct local route
+    // width — this fix removes the root cause at its source; the paired Agent
+    // fix (see AgentRunner.cs ProcessReceivedJob) removes the second, unsafe
+    // "trust the server's embedded width over local config" layer too.
+    const [settings, activeWorkstation] = await Promise.all([
+      getRestaurantSettings(ctx),
+      activeWorkstationFor(prisma, ctx.restaurantId, receipt.locationId, "RECEIPT"),
+    ]);
+    const paperWidthMm = activeWorkstation
+      ? (activeWorkstation.paperWidthMm ?? 80)
+      : (await getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT")).paperWidthMm;
+    const items = receipt.items as unknown as {
+      name: string;
+      price: string;
+      basePrice?: string;
+      modifiers?: { name: string; priceDelta: string }[];
+      taxRate: string;
+      quantity: number;
+      lineTotal: string;
+    }[];
+    const taxBreakdown = receipt.taxBreakdown as unknown as { taxRate: string; taxableAmount: string; taxAmount: string }[];
+
+    content = buildReceiptTicketContent({
+      restaurantName: receipt.restaurantName,
+      restaurantLegalName: receipt.restaurantLegalName,
+      address: settings.address,
+      phone: settings.phone,
+      taxIdNumber: settings.taxIdNumber,
+      legalNote: settings.receiptLegalNote,
+      footerText: settings.receiptFooterText,
+      receiptNumber: receipt.sequenceNumber,
+      orderNumber: shortOrderNumber(receipt.orderId),
+      tableLabel: receipt.tableLabel,
+      waiterName: receipt.waiterName,
+      issuedAt: receipt.issuedAt.toISOString(),
+      items: items.map((i) => ({
+        quantity: i.quantity,
+        name: i.name,
+        unitPrice: i.price,
+        lineTotal: i.lineTotal,
+        basePrice: i.basePrice,
+        modifiers: i.modifiers,
+      })),
+      subtotal: receipt.subtotal.toString(),
+      taxTotal: receipt.taxTotal.toString(),
+      taxBreakdown,
+      showTaxBreakdown: settings.showTaxBreakdown,
+      discountAmount: receipt.discountAmount ? receipt.discountAmount.toString() : null,
+      total: receipt.total.toString(),
+      currency: receipt.currency,
+      paymentMethod: receipt.paymentMethod,
+      tenderedAmount: receipt.payment.tenderedAmount.toString(),
+      changeAmount: receipt.payment.changeAmount.toString(),
+      paperWidthMm,
+    });
+  }
 
   await prisma.printJob.upsert({
     where: { orderId_dispatchKey: { orderId: receipt.orderId, dispatchKey: opts.dispatchKey } },
@@ -369,6 +400,7 @@ export async function dispatchReceiptPrintJob(
       // exactly like KITCHEN/BAR.
       isAutomatic: true,
       isReprint: opts.isReprint,
+      reprintOfId: original?.id ?? null,
       requestedBy: opts.requestedBy,
     },
     update: {},

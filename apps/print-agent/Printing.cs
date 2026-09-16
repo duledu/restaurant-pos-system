@@ -95,15 +95,59 @@ public sealed record AgentConfig(PrintRoute[] Routes)
     }
 }
 
-public sealed record TicketLine(string Text, float Size = 11, bool Bold = false);
+public enum TicketAlign { Left, Center, Right }
+
+/// <summary>
+/// RECEIPT RENDERING POLISH — extended with `Align`/`RightText`/`IsRule`,
+/// all optional and defaulted so every EXISTING call site (KITCHEN/BAR
+/// tickets, Test Print, self-tests) that only ever passed
+/// (Text, Size, Bold) positionally keeps compiling and rendering
+/// byte-for-byte identically. Nothing about KITCHEN/BAR rendering changes.
+/// </summary>
+public sealed record TicketLine(string Text, float Size = 11, bool Bold = false, TicketAlign Align = TicketAlign.Left, string? RightText = null, bool IsRule = false)
+{
+    /// <summary>
+    /// Full-width horizontal divider, drawn as an actual thin filled
+    /// rectangle rather than repeated dash characters — its length is
+    /// therefore ALWAYS exactly the raster's real usable width, never a
+    /// guessed/fixed character count, and it can never be thrown off by
+    /// font/character-width differences between drivers, sizes, or the
+    /// Serbian character set. This is the fix for the "separators look too
+    /// short" complaint: the old fixed 16-dash string was sized for nothing
+    /// in particular and fell well short of the real usable width.
+    /// </summary>
+    public static TicketLine Rule() => new("RULE", 4, false, TicketAlign.Left, null, true);
+
+    /// <summary>
+    /// Two-column row on one line: `left` at the start, `right` at the end,
+    /// same font/size — used for "3 × 200,00 ... 600,00" item lines and
+    /// every label/amount financial-summary/payment row ("Osnovica ...
+    /// 4.800,00"). Both sides are short, non-wrapping strings by design;
+    /// long, variable-length text (item names) always gets its own
+    /// full-width line instead (see TicketPayload.ParseReceipt) so wrapping
+    /// a long name never has to fight for space with a price column.
+    /// Passing an empty `left` (e.g. a quantity-1 item whose unit price
+    /// would just repeat its own total) renders as a right-aligned amount
+    /// alone, cleanly, without an empty leading column.
+    /// </summary>
+    public static TicketLine Row(string left, string right, float size = 11, bool bold = false) =>
+        new(left, size, bold, TicketAlign.Left, right);
+}
 public sealed record Ticket(TicketLine[] Lines)
 {
     public void Validate()
     {
-        if (Lines is null || Lines.Length is < 1 or > 80 || Lines.Any(l => l is null ||
-            string.IsNullOrWhiteSpace(l.Text) || l.Text.Length > 200 || l.Text.Any(char.IsControl) ||
-            !float.IsFinite(l.Size) || l.Size < 8 || l.Size > 24))
-            throw new ArgumentException("Ticket requires 1-80 lines, 1-200 printable characters per line, font size 8-24.");
+        if (Lines is null || Lines.Length is < 1 or > 80) throw new ArgumentException("Ticket requires 1-80 lines.");
+        foreach (var l in Lines)
+        {
+            if (l is null) throw new ArgumentException("Ticket lines cannot be null.");
+            if (l.IsRule) continue; // a rule carries no real text — nothing else to validate.
+            var hasContent = !string.IsNullOrWhiteSpace(l.Text) || !string.IsNullOrWhiteSpace(l.RightText);
+            if (!hasContent || l.Text.Length > 200 || l.Text.Any(char.IsControl) ||
+                (l.RightText?.Length ?? 0) > 200 || (l.RightText?.Any(char.IsControl) ?? false) ||
+                !float.IsFinite(l.Size) || l.Size < 8 || l.Size > 24)
+                throw new ArgumentException("Ticket lines require 1-200 printable characters (left and/or right column), font size 8-24.");
+        }
     }
 
     /// <summary>
@@ -153,6 +197,13 @@ public sealed class TicketRaster : IDisposable
     // vrednosti, nikad je ne umanjuje.
     public int ContentHeightUnits { get; }
     public const float Dpi = 203;
+    // RECEIPT RENDERING POLISH — a divider drawn as an actual thin filled
+    // bar (see TicketLine.Rule) rather than text, so its length is always
+    // exactly the real raster width and it never depends on font metrics.
+    // ~2 px line + padding above/below reads as a clean, deliberate divider
+    // at 203 DPI without wasting much vertical space on a 58 mm roll.
+    private const int RuleRowHeightPx = 16;
+    private const int RuleThicknessPx = 2;
     public TicketRaster(Ticket ticket, int widthMm)
     {
         ticket.Validate();
@@ -165,8 +216,11 @@ public sealed class TicketRaster : IDisposable
         using var measure = Graphics.FromImage(probe);
         using var format = new StringFormat(StringFormat.GenericDefault) { Trimming = StringTrimming.None };
         var heights = ticket.Lines.Select(line => {
+            if (line.IsRule) return RuleRowHeightPx;
             using var font = new Font("Arial", line.Size, line.Bold ? FontStyle.Bold : FontStyle.Regular);
-            return (int)Math.Ceiling(measure.MeasureString(line.Text, font, width, format).Height) + 3;
+            var leftHeight = (int)Math.Ceiling(measure.MeasureString(line.Text, font, width, format).Height);
+            var rightHeight = line.RightText is null ? 0 : (int)Math.Ceiling(measure.MeasureString(line.RightText, font, width, format).Height);
+            return Math.Max(leftHeight, rightHeight) + 3;
         }).ToArray();
         int height = heights.Sum();
         if (height / Dpi * 25.4f > 500) throw new ArgumentException("Ticket exceeds prototype 500 mm limit.");
@@ -175,12 +229,34 @@ public sealed class TicketRaster : IDisposable
         using var graphics = Graphics.FromImage(Image);
         graphics.Clear(Color.White);
         graphics.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+        using var centerFormat = new StringFormat(StringFormat.GenericDefault) { Trimming = StringTrimming.None, Alignment = StringAlignment.Center };
+        using var farFormat = new StringFormat(StringFormat.GenericDefault) { Trimming = StringTrimming.None, Alignment = StringAlignment.Far };
         float y = 0;
         for (int i = 0; i < ticket.Lines.Length; i++)
         {
             var line = ticket.Lines[i];
+            if (line.IsRule)
+            {
+                graphics.FillRectangle(Brushes.Black, 0, y + (RuleRowHeightPx - RuleThicknessPx) / 2f, width, RuleThicknessPx);
+                y += heights[i];
+                continue;
+            }
             using var font = new Font("Arial", line.Size, line.Bold ? FontStyle.Bold : FontStyle.Regular);
-            graphics.DrawString(line.Text, font, Brushes.Black, new RectangleF(0, y, width, heights[i]), format);
+            var rect = new RectangleF(0, y, width, heights[i]);
+            if (line.RightText is not null)
+            {
+                // Two-column row: left text near-aligned, right text
+                // far-aligned, same rect/font — both are short, non-wrapping
+                // strings by design (see TicketLine.Row), so they never
+                // fight for space with each other.
+                if (!string.IsNullOrEmpty(line.Text)) graphics.DrawString(line.Text, font, Brushes.Black, rect, format);
+                graphics.DrawString(line.RightText, font, Brushes.Black, rect, farFormat);
+            }
+            else
+            {
+                var lineFormat = line.Align switch { TicketAlign.Center => centerFormat, TicketAlign.Right => farFormat, _ => format };
+                graphics.DrawString(line.Text, font, Brushes.Black, rect, lineFormat);
+            }
             y += heights[i];
         }
         WidthUnits = (int)Math.Round(widthMm / 25.4 * 100);
