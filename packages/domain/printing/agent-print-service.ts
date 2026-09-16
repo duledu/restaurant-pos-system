@@ -273,17 +273,31 @@ export async function stationPrinterStatus(
       isEnabled: true,
       workstation: { isEnabled: true, revokedAt: null },
     },
-    select: { printerName: true, printerAvailable: true, workstation: { select: { lastSeenAt: true } } },
+    select: {
+      printerName: true,
+      printerAvailable: true,
+      workstation: { select: { lastSeenAt: true, availablePrinters: true } },
+    },
     orderBy: { workstation: { lastSeenAt: "desc" } },
   });
   if (!route) return { hasWorkstation: false, isOnline: false, state: "NOT_CONFIGURED" };
   const isOnline = Boolean(route.workstation.lastSeenAt && route.workstation.lastSeenAt.getTime() > Date.now() - AGENT_ACTIVE_WINDOW_MS);
   if (!isOnline) return { hasWorkstation: true, isOnline: false, state: "AGENT_OFFLINE" };
-  // printerAvailable === true is required, not just "not false" — null
-  // means the agent has not reported yet (fresh pairing, printer choice
-  // not yet confirmed against the live Windows printer list), which is
-  // exactly as un-ready as a confirmed-missing printer for this purpose.
-  if (!route.printerName || route.printerAvailable !== true) {
+  // False-"Štampač nedostupan" root cause (Part B) — printerAvailable===false
+  // is a proven per-route signal (the Agent checked THIS route's printer
+  // against the live Windows list and it wasn't there): always trust it.
+  // printerAvailable===null only means "not yet reconfirmed since the route
+  // was last saved" (see upsertPrintRoute) — every heartbeat unconditionally
+  // refreshes workstation.availablePrinters (the Agent's full enumeration),
+  // so while waiting for the next per-route confirmation, fall back to that
+  // fresher, never-artificially-reset signal instead of assuming the worst.
+  // Never invents availability out of thin air: if the Agent were offline or
+  // had never reported printers, isOnline above / an empty list here already
+  // fails this check, same as before.
+  const availablePrinters = route.workstation.availablePrinters as string[] | null;
+  const listedAsAvailable = route.printerName != null && (availablePrinters?.includes(route.printerName) ?? false);
+  const printerReady = route.printerAvailable === true || (route.printerAvailable === null && listedAsAvailable);
+  if (!route.printerName || !printerReady) {
     return { hasWorkstation: true, isOnline: true, state: "PRINTER_UNAVAILABLE" };
   }
   return { hasWorkstation: true, isOnline: true, state: "READY" };

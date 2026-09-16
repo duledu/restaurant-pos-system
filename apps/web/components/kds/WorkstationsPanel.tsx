@@ -102,7 +102,16 @@ function routeOf(w: Workstation, type: RouteType): PrintRoute | undefined {
 function routeReadiness(w: Workstation, route: PrintRoute | undefined): "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" {
   if (!route || !route.isEnabled || w.revokedAt || !w.isEnabled) return "NOT_CONFIGURED";
   if (!isOnline(w.lastSeenAt)) return "AGENT_OFFLINE";
-  if (!route.printerName || route.printerAvailable !== true) return "PRINTER_UNAVAILABLE";
+  // False-"Štampač nedostupan" root cause (Part B, mirrors
+  // agent-print-service.ts stationPrinterStatus) — printerAvailable===false
+  // is a proven signal, trust it. printerAvailable===null only means "not
+  // yet reconfirmed since the route was last saved" (every route save nulls
+  // it, even a same-value resave of an unrelated field); fall back to the
+  // workstation's latest availablePrinters (refreshed on every heartbeat,
+  // never reset by a route save) instead of showing a false negative.
+  const listedAsAvailable = route.printerName != null && (w.availablePrinters?.includes(route.printerName) ?? false);
+  const printerReady = route.printerAvailable === true || (route.printerAvailable === null && listedAsAvailable);
+  if (!route.printerName || !printerReady) return "PRINTER_UNAVAILABLE";
   return "READY";
 }
 

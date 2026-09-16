@@ -362,6 +362,18 @@ export async function upsertPrintRoute(
     select: PRINT_ROUTE_SELECT,
   });
 
+  // False-"Štampač nedostupan" root cause (Part A) — the Admin "Sačuvaj
+  // rute" form always resends every route's printerName, even when the
+  // operator only touched an unrelated field (paperWidthMm/isEnabled) on a
+  // DIFFERENT route, or re-saved the same printer unchanged. Unconditionally
+  // nulling printerAvailable here on every save (old code) threw away a
+  // just-confirmed READY state for up to one full heartbeat interval (~25s)
+  // for no reason — the printer didn't actually change. Only reset
+  // printerAvailable when printerName is ACTUALLY changing; a same-value
+  // resave (or a change to paperWidthMm/isEnabled alone) leaves the last
+  // agent-confirmed availability intact.
+  const printerNameChanging = data.printerName !== undefined && data.printerName !== (previous?.printerName ?? null);
+
   const route = await prisma.workstationPrintRoute.upsert({
     where: { workstationId_type: { workstationId, type: routeType } },
     create: {
@@ -374,7 +386,9 @@ export async function upsertPrintRoute(
       isEnabled: data.isEnabled ?? true,
     },
     update: {
-      ...(data.printerName !== undefined ? { printerName: data.printerName, printerAvailable: null } : {}),
+      ...(data.printerName !== undefined
+        ? { printerName: data.printerName, ...(printerNameChanging ? { printerAvailable: null } : {}) }
+        : {}),
       ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
       ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
     },

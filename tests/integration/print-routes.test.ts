@@ -227,3 +227,103 @@ describe("Printing V2 — one Agent, multiple print routes sharing one printer",
     expect(routes[0].printerName).toBeNull(); // not configured yet — Admin still has to pick a printer
   });
 });
+
+// Physical PREPROD QA (pilot.5, test_11) — POS-58 was reported in
+// availablePrinters, selectable in Admin, and physically printing, yet all
+// three routes showed a hard red "Štampač nedostupan". Root cause: (1) every
+// "Sačuvaj rute" save unconditionally resent printerName for all routes,
+// resetting printerAvailable to null (unconfirmed) even when the printer
+// never changed, and (2) stationPrinterStatus/routeReadiness treated
+// printerAvailable===null identically to printerAvailable===false — a
+// deliberate, agent-proven "not there" verdict is NOT the same thing as
+// "not yet reconfirmed since the last save". These tests pin the fix: null
+// now falls back to the workstation's freshest availablePrinters report
+// (updated on every heartbeat, never reset by a route save) instead of a
+// false negative, while a genuine, agent-proven printerAvailable===false
+// still reports unavailable exactly as before.
+describe("Printing V2 — printer availability status (false-\"Štampač nedostupan\" regression)", () => {
+  it("availablePrinters=[POS-58] + route.printerName=POS-58 + unconfirmed (null) => READY, not PRINTER_UNAVAILABLE", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered } = await pairComputer(fixture, owner);
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+    await prisma.workstation.update({ where: { id: registered.workstationId }, data: { availablePrinters: ["POS-58"], printersReportedAt: new Date() } });
+
+    const route = await prisma.workstationPrintRoute.findFirst({ where: { workstationId: registered.workstationId, type: "KITCHEN" } });
+    expect(route!.printerAvailable).toBeNull(); // never confirmed by a heartbeat yet — this is the exact bug state
+
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("READY");
+  });
+
+  it("one printer serving KITCHEN+BAR+RECEIPT: all three read READY from availablePrinters alone, unconfirmed", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered } = await pairComputer(fixture, owner);
+    for (const type of ["KITCHEN", "BAR", "RECEIPT"] as const) {
+      await workstations.upsertPrintRoute(owner, registered.workstationId, type, { printerName: "POS-58", paperWidthMm: 58 });
+    }
+    await prisma.workstation.update({
+      where: { id: registered.workstationId },
+      data: { availablePrinters: ["POS-58", "Microsoft Print to PDF"], printersReportedAt: new Date() },
+    });
+
+    for (const type of ["KITCHEN", "BAR", "RECEIPT"] as const) {
+      expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, type)).state).toBe("READY");
+    }
+  });
+
+  it("availablePrinters does not contain the configured printer, unconfirmed (null) => PRINTER_UNAVAILABLE", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered } = await pairComputer(fixture, owner);
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+    await prisma.workstation.update({ where: { id: registered.workstationId }, data: { availablePrinters: ["Microsoft Print to PDF"], printersReportedAt: new Date() } });
+
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("PRINTER_UNAVAILABLE");
+  });
+
+  it("POS-58 disappears on a later heartbeat (agent-proven false) => READY flips to PRINTER_UNAVAILABLE, even though nothing was re-saved", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered, wsCtx } = await pairComputer(fixture, owner);
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+    await workstations.recordHeartbeat(wsCtx, { availablePrinters: ["POS-58"], routes: [{ type: "KITCHEN", printerAvailable: true }] });
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("READY");
+
+    // Printer physically unplugged/uninstalled — the next heartbeat reports it gone.
+    await workstations.recordHeartbeat(wsCtx, { availablePrinters: [], routes: [{ type: "KITCHEN", printerAvailable: false }] });
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("PRINTER_UNAVAILABLE");
+  });
+
+  it("POS-58 returns on a later heartbeat => PRINTER_UNAVAILABLE flips back to READY automatically, no manual route re-save", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered, wsCtx } = await pairComputer(fixture, owner);
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+    await workstations.recordHeartbeat(wsCtx, { availablePrinters: [], routes: [{ type: "KITCHEN", printerAvailable: false }] });
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("PRINTER_UNAVAILABLE");
+
+    await workstations.recordHeartbeat(wsCtx, { availablePrinters: ["POS-58"], routes: [{ type: "KITCHEN", printerAvailable: true }] });
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("READY");
+  });
+
+  it("re-saving a route's paperWidthMm alone (printer unchanged) does not reset a confirmed-available printer to unavailable", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    const { registered, wsCtx } = await pairComputer(fixture, owner);
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+    await workstations.recordHeartbeat(wsCtx, { availablePrinters: ["POS-58"], routes: [{ type: "KITCHEN", printerAvailable: true }] });
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("READY");
+
+    // Admin's "Sačuvaj rute" always resends printerName even when unchanged — this must be a no-op for availability.
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 80 });
+    const route = await prisma.workstationPrintRoute.findFirst({ where: { workstationId: registered.workstationId, type: "KITCHEN" } });
+    expect(route!.printerAvailable).toBe(true); // NOT reset to null — printer name did not actually change
+    expect((await agentPrinting.stationPrinterStatus(fixture.restaurantId, fixture.locationId, "KITCHEN")).state).toBe("READY");
+
+    // Actually changing the printer still correctly resets to unconfirmed (existing behavior, unchanged).
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "KITCHEN", { printerName: "EPSON-NEW" });
+    const changed = await prisma.workstationPrintRoute.findFirst({ where: { workstationId: registered.workstationId, type: "KITCHEN" } });
+    expect(changed!.printerAvailable).toBeNull();
+  });
+});

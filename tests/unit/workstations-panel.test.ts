@@ -169,6 +169,41 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     expect(host.textContent).toContain("Štampač nedostupan"); // RECEIPT — configured but agent reports it missing
   });
 
+  it("false-\"Štampač nedostupan\" regression — printerAvailable:null (unconfirmed since last save) but the printer IS in availablePrinters shows Spremna, not Štampač nedostupan", async () => {
+    // Physical PREPROD QA (pilot.5, test_11): POS-58 was reported in
+    // availablePrinters, selectable, and physically printing, yet Admin
+    // showed a hard red "Štampač nedostupan" for all three routes. Root
+    // cause: every route save resets printerAvailable to null pending
+    // reconfirmation, and null was treated identically to a proven "false".
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["POS-58", "Microsoft Print to PDF"],
+        printRoutes: [
+          route("KITCHEN", { printerName: "POS-58", printerAvailable: null, paperWidthMm: 58 }),
+          route("BAR", { printerName: "POS-58", printerAvailable: null, paperWidthMm: 58 }),
+          route("RECEIPT", { printerName: "POS-58", printerAvailable: null, paperWidthMm: 58 }),
+        ],
+      }),
+    ];
+    await mount();
+    expect(host.textContent).not.toContain("Štampač nedostupan");
+    const readyBadges = [...host.querySelectorAll("span")].filter((el) => el.textContent?.trim() === "Spremna");
+    expect(readyBadges).toHaveLength(3);
+  });
+
+  it("false-\"Štampač nedostupan\" regression — printerAvailable:null and the printer is genuinely NOT in availablePrinters still shows Štampač nedostupan", async () => {
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["Microsoft Print to PDF"],
+        printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: null, paperWidthMm: 58 })],
+      }),
+    ];
+    await mount();
+    expect(host.textContent).toContain("Štampač nedostupan");
+  });
+
   it("the same physical printer can be selected for all three routes (Dostupni štampači lists it once, usable everywhere)", async () => {
     workstationsResponse = [
       workstation({
