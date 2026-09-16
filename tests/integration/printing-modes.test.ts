@@ -335,4 +335,49 @@ describe("RECEIPT physical-failure root cause — isAutomatic fix", () => {
     expect(claimed?.documentType).toBe("RECEIPT");
     expect(claimed?.jobId).toBe(job.id);
   });
+
+  it("REGRESSION for real receipt #425: the automatic RECEIPT job's ticket content is sized for the REAL Agent route's paper width (58mm), not the legacy empty PrinterConfig default (80mm) — reproduces the exact payment -> receipt -> pollAndClaim path, not dispatchReceiptPrintJob in isolation", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, ["OWNER"], "owner-1");
+    // Same restaurant shape as the real PREPROD failure: no legacy
+    // Browser/QZ PrinterConfig row exists (this restaurant is fully on the
+    // Printing V2 Agent/WorkstationPrintRoute model), and the real RECEIPT
+    // route is configured for a 58mm roll printer (POS-58), same as test_11.
+    const { wsCtx, registered } = await pairComputer(fixture, owner, "PC1");
+    await workstations.upsertPrintRoute(owner, registered.workstationId, "RECEIPT", { printerName: "POS-58", paperWidthMm: 58 });
+
+    const { order } = await payOrder(fixture, context(fixture, ["WAITER"], "waiter-1"));
+    const job = await prisma.printJob.findFirstOrThrow({ where: { orderId: order.id, type: "RECEIPT" } });
+
+    // The bug: dispatchReceiptPrintJob unconditionally read the legacy
+    // PrinterConfig default (80mm) instead of the real Agent route (58mm),
+    // freezing the wrong width into the ticket content forever. This is the
+    // exact numeric divergence that made real receipt #425 fail physically
+    // ("Driver printable area is too small for this ticket.") even though
+    // the job was correctly automatic and correctly claimable.
+    const content = job.content as unknown as { paperWidthMm: number };
+    expect(content.paperWidthMm).toBe(58);
+    expect(content.paperWidthMm).not.toBe(80);
+
+    // And the full real path still works end to end: the job is Agent-
+    // eligible, atomically claimable by the eligible workstation...
+    const claimed = await agentPrinting.pollAndClaim(wsCtx);
+    expect(claimed?.documentType).toBe("RECEIPT");
+    expect(claimed?.jobId).toBe(job.id);
+
+    // ...and NOT claimable by an unrelated, ineligible Agent (a second
+    // workstation with no RECEIPT route configured at all).
+    const other = await pairComputer(fixture, owner, "PC2");
+    const { order: order2 } = await payOrder(fixture, context(fixture, ["WAITER"], "waiter-2"));
+    const job2 = await prisma.printJob.findFirstOrThrow({ where: { orderId: order2.id, type: "RECEIPT" } });
+    expect((job2.content as unknown as { paperWidthMm: number }).paperWidthMm).toBe(58);
+    expect(await agentPrinting.pollAndClaim(other.wsCtx)).toBeNull();
+  });
+
+  it("REGRESSION for #425: when NO Agent is active for RECEIPT at all, dispatch still falls back to the legacy PrinterConfig default (80mm) unchanged — the fix only reorders preference, it never removes the fallback", async () => {
+    const fixture = await createFixture();
+    const { order } = await payOrder(fixture, context(fixture, ["WAITER"], "waiter-1"));
+    const job = await prisma.printJob.findFirstOrThrow({ where: { orderId: order.id, type: "RECEIPT" } });
+    expect((job.content as unknown as { paperWidthMm: number }).paperWidthMm).toBe(80);
+  });
 });

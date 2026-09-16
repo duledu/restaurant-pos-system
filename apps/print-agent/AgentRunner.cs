@@ -377,15 +377,37 @@ public static class AgentRunner
             return;
         }
 
-        var (ticket, paperWidthMm, _) = TicketPayload.Parse(content);
-        var effectiveRoute = route with { PaperWidthMm = paperWidthMm is 58 or 80 ? paperWidthMm : route.PaperWidthMm };
+        // PREPROD physical root cause (real receipt #425, POS-58 — "Driver
+        // printable area is too small for this ticket.") — this USED to
+        // build an `effectiveRoute` that let the server-embedded ticket
+        // content's own `paperWidthMm` silently REPLACE this Agent's own
+        // locally-configured, Admin-verified, printer-matching
+        // route.PaperWidthMm whenever the server's value was merely a valid
+        // NUMBER (58 or 80) — never checking whether it actually matched
+        // what THIS printer/paper roll is physically loaded with. A
+        // server-side bug (since fixed — see print-service.ts
+        // dispatchReceiptPrintJob) once froze a RECEIPT ticket's content at
+        // 80mm for a restaurant whose real RECEIPT route is 58mm; this
+        // override then discarded the Agent's correct local 58mm and tried
+        // to print an 80mm-wide page on a driver bound to a 58mm roll —
+        // exactly reproduced in SelfTests.cs against a real installed
+        // driver. `route.PaperWidthMm` (this computer's own Admin-configured
+        // value, validated at pairing/route-save time to match an actual
+        // printer) is the ONLY width ever used now — "agent NIKAD ne veruje
+        // slepo serveru za stvaran fizički efekat" already applies to
+        // printer NAME above; it now applies to paper width too. The parsed
+        // `_` (server's own paperWidthMm hint) is intentionally unused —
+        // TicketRaster measures/wraps the ticket's lines for WHATEVER width
+        // is actually passed to WindowsPrinter.Print below, so this is fully
+        // self-consistent regardless of what the server happened to embed.
+        var (ticket, _, _) = TicketPayload.Parse(content);
 
         // Poslednji upis PRE nepovratnog koraka — ako proces padne TAČNO
         // unutar WindowsPrinter.Print poziva ispod, restart MORA videti da
         // je štampa MOGLA biti pokrenuta i NIKAD sam ne pokušava ponovo
         // (vidi ReconcileOnStartup, stanje PrintInvoked -> SUBMISSION_UNKNOWN).
         AgentDatabase.RecordPrintInvoked(jobId);
-        var outcome = WindowsPrinter.Print(effectiveRoute, ticket, jobId);
+        var outcome = WindowsPrinter.Print(route, ticket, jobId);
         var mappedStatus = outcome.Status == "PREFLIGHT_ONLY" ? "SUBMISSION_UNKNOWN" : outcome.Status;
         AgentDatabase.RecordResultKnown(jobId, mappedStatus, outcome.Error);
         LogInfo($"Ishod za jobId={jobId}: {mappedStatus}{(outcome.Error is null ? "" : $" ({outcome.Error})")}");
@@ -499,5 +521,5 @@ public static class AgentRunner
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.6";
+    public const string Current = "1.0.0-pilot.7";
 }

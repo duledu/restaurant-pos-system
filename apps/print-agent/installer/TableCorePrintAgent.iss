@@ -31,7 +31,7 @@
 ; sam po sebi da potvrdi KOJI je tačno instaler instaliran (samo SHA-256
 ; je to razlikovao). Uvećaj OVAJ broj pri SVAKOM novom fizičkom-QA
 ; kandidatu ubuduće.
-#define MyAppVersion "1.0.0-pilot.6"
+#define MyAppVersion "1.0.0-pilot.7"
 #define MyAppPublisher "TableCore"
 #define MyServiceName "TableCorePrintAgent"
 #define MyServiceAccount "NT SERVICE\TableCorePrintAgent"

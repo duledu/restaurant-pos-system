@@ -19,7 +19,7 @@
          (Windows Svojstva/Details -> Product version), MORA se poklapati sa
          AgentVersion.Current (AgentRunner.cs) i MyAppVersion (installer/
          TableCorePrintAgent.iss). NE javno stabilno izdanje. -->
-    <Version>1.0.0-pilot.6</Version>
+    <Version>1.0.0-pilot.7</Version>
     <!-- Never package workstation config, local SDKs, or prior publish/test output. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;.tools/**;agent.local.json</DefaultItemExcludes>
   </PropertyGroup>

@@ -236,18 +236,45 @@ public static class WindowsPrinter
             // testirana direktno u SelfTests.cs sa sintetičkim vrednostima
             // margine, bez potrebe za stvarnim/virtuelnim štampačem koji baš
             // ima nenulti margin.
-            var finalHeightUnits = ComputeFinalHeightUnits(raster.ContentHeightUnits, probePage.Bounds.Height, probePage.PrintableArea.Height);
-            RoundTripPaperSize(document, raster.WidthUnits, finalHeightUnits);
-            var page = document.DefaultPageSettings;
-            if (Math.Abs(page.Bounds.Width - raster.WidthUnits) > 2 || Math.Abs(page.Bounds.Height - finalHeightUnits) > 2)
-                throw new InvalidOperationException("Driver rejected compact custom paper size. Configure its roll/custom form.");
             float imageWidth = raster.Image.Width / TicketRaster.Dpi * 100;
             float imageHeight = raster.Image.Height / TicketRaster.Dpi * 100;
-            // I posle ispravnog sizing-a prema stvarnoj drajver margini, ovo
-            // ostaje kao STVARNA bezbednosna provera (zahtev specifikacije:
-            // "only fail if content truly cannot fit after proper sizing") —
-            // nikad se ne pretvara u "štampaj svejedno"; sadržaj se NIKAD ne
-            // seče/skraćuje da bi prošao ovu proveru.
+            var finalHeightUnits = ComputeFinalHeightUnits(raster.ContentHeightUnits, probePage.Bounds.Height, probePage.PrintableArea.Height);
+
+            // Physical PREPROD failure (real receipt #425, POS-58): a SHORT
+            // probe (content + a nominal ~4mm) measured this driver's margin
+            // correctly for a short ticket (Test Print, 11-12 lines), but a
+            // much TALLER real receipt (30+ lines once priced/taxed/totalled
+            // — see TicketPayload.ParseReceipt) still failed "printable area
+            // too small" even after using that SAME measured margin. Some
+            // custom/continuous-roll thermal drivers do NOT report a margin
+            // that scales linearly with requested page height — the margin
+            // measured at a short height understates the real margin at a
+            // much taller one. Re-measure (never assume) at the ACTUAL
+            // height just tried and grow again if still short, bounded so a
+            // driver that truly can never fit this content still fails
+            // deterministically rather than looping forever. For any ticket
+            // short enough that the original single-probe estimate was
+            // already sufficient (every KITCHEN/BAR ticket and Test Print to
+            // date), this executes exactly one iteration — byte-for-byte the
+            // same behavior as before this fix.
+            const int maxHeightAttempts = 4;
+            PageSettings page;
+            var attempt = 1;
+            while (true)
+            {
+                RoundTripPaperSize(document, raster.WidthUnits, finalHeightUnits);
+                page = document.DefaultPageSettings;
+                if (Math.Abs(page.Bounds.Width - raster.WidthUnits) > 2 || Math.Abs(page.Bounds.Height - finalHeightUnits) > 2)
+                    throw new InvalidOperationException("Driver rejected compact custom paper size. Configure its roll/custom form.");
+                if (page.PrintableArea.Height >= imageHeight || attempt >= maxHeightAttempts) break;
+                finalHeightUnits = ComputeFinalHeightUnits(raster.ContentHeightUnits, page.Bounds.Height, page.PrintableArea.Height);
+                attempt++;
+            }
+            // I posle ispravnog sizing-a (uklj. ponovljenog merenja iznad),
+            // ovo ostaje kao STVARNA bezbednosna provera (zahtev
+            // specifikacije: "only fail if content truly cannot fit after
+            // proper sizing") — nikad se ne pretvara u "štampaj svejedno";
+            // sadržaj se NIKAD ne seče/skraćuje da bi prošao ovu proveru.
             if (page.PrintableArea.Width < imageWidth || page.PrintableArea.Height < imageHeight)
                 throw new InvalidOperationException("Driver printable area is too small for this ticket.");
             if (dryRun)

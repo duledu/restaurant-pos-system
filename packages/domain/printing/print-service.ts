@@ -274,10 +274,30 @@ export async function dispatchReceiptPrintJob(
   });
   if (!receipt) return;
 
-  const [settings, { paperWidthMm }] = await Promise.all([
+  // Physical PREPROD root cause (real receipt #425, POS-58 — "Driver
+  // printable area is too small for this ticket.", reproduced exactly by
+  // rendering this receipt's real content at 80mm against the SAME driver
+  // family test_11 uses): this UNCONDITIONALLY read the legacy Browser/QZ
+  // PrinterConfig default (80mm, since no PrinterConfig row exists for a
+  // restaurant fully on the Printing V2 WorkstationPrintRoute model) instead
+  // of the REAL Agent-configured RECEIPT route (58mm) — the exact same class
+  // of bug dispatchStationPrintJobs (KITCHEN/BAR, below) already correctly
+  // avoids by preferring the active Agent workstation's own reported
+  // paperWidthMm first, only falling back to legacy PrinterConfig when no
+  // Agent is active at all. RECEIPT was never given the same treatment when
+  // it became Agent-routable. The ticket was then frozen with the WRONG
+  // width, and AgentRunner.cs's own (now-removed) override compounded this
+  // by letting that wrong value replace the Agent's correct local route
+  // width — this fix removes the root cause at its source; the paired Agent
+  // fix (see AgentRunner.cs ProcessReceivedJob) removes the second, unsafe
+  // "trust the server's embedded width over local config" layer too.
+  const [settings, activeWorkstation] = await Promise.all([
     getRestaurantSettings(ctx),
-    getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT"),
+    activeWorkstationFor(prisma, ctx.restaurantId, receipt.locationId, "RECEIPT"),
   ]);
+  const paperWidthMm = activeWorkstation
+    ? (activeWorkstation.paperWidthMm ?? 80)
+    : (await getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT")).paperWidthMm;
   const items = receipt.items as unknown as {
     name: string;
     price: string;

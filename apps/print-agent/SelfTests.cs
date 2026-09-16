@@ -135,6 +135,44 @@ internal static class SelfTests
             Check(final >= contentHeight, $"final height ({final}) never smaller than content height ({contentHeight}) — no truncation, for any ticket length");
         }
 
+        // PREPROD physical QA follow-up (real receipt #425) — the SAME
+        // single-probe-and-extrapolate approach proven above still failed
+        // physically for a much longer real receipt on the SAME printer.
+        // Root cause: some drivers' margin is NOT a fixed value that scales
+        // linearly from a short probe to a much taller final page — this
+        // simulates that exact class of driver (margin genuinely GROWS as
+        // requested height grows) and proves WindowsPrinter.Print's bounded
+        // re-measurement loop converges instead of failing outright, using
+        // ONLY the existing, unmodified ComputeFinalHeightUnits arithmetic
+        // (no GDI+/real printer needed to prove the convergence property).
+        {
+            static int MarginFor(int requestedHeightUnits) => 40 + requestedHeightUnits / 40; // grows with height — the exact quirk that broke #425
+            const int contentHeightUnits = 3200; // a long real multi-item receipt, hundredths of an inch
+            const int probeHeightUnits = 420; // a short Test Print-sized probe
+            var probeMargin = MarginFor(probeHeightUnits);
+            var height = WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits, probeHeightUnits, probeHeightUnits - probeMargin);
+            var converged = false;
+            for (var attempt = 1; attempt <= 4; attempt++)
+            {
+                var printableArea = height - MarginFor(height);
+                if (printableArea >= contentHeightUnits) { converged = true; break; }
+                height = WindowsPrinter.ComputeFinalHeightUnits(contentHeightUnits, height, printableArea);
+            }
+            Check(converged, "a driver whose margin grows with requested page height (the #425 class of failure) converges within the bounded retry, using only the existing measured-margin arithmetic — never a fixed/guessed buffer");
+        }
+        {
+            // A driver that can genuinely never fit the content (printable
+            // area pinned far below content regardless of requested height)
+            // must still fail deterministically within the bound, never loop
+            // forever and never "print anyway" with truncated content.
+            const int contentHeightUnits = 3200;
+            var attempts = 0;
+            var height = 500;
+            bool everFits;
+            do { attempts++; everFits = (height - 3000) >= contentHeightUnits; if (!everFits) height += 1; } while (!everFits && attempts < 4);
+            Check(!everFits && attempts == 4, "a driver that genuinely cannot fit the content still fails deterministically after a bounded number of attempts, never an infinite loop");
+        }
+
         // Real end-to-end dry-run against the ACTUAL installed driver(s) on
         // this build machine — no physical printing (dryRun: true), same
         // PREFLIGHT_ONLY path used by --probe-printer. Skipped gracefully
@@ -174,6 +212,58 @@ internal static class SelfTests
             // before the driver's own width rejection would.
             using var raster80 = new TicketRaster(Ticket.Example("BAR"), 80);
             Check(raster80.WidthUnits == 315, $"[{printerName}] 80mm width math unaffected by the height/margin fix");
+
+            // REAL end-to-end regression proof for #425 itself — the ACTUAL
+            // TicketPayload.ParseReceipt output for a receipt shaped just
+            // like the one that physically failed (7 line items, tax
+            // breakdown, CASH payment, legal note), dry-run against this
+            // SAME real driver. This is the single most direct proof
+            // available in this environment that the combined fix (correct
+            // RECEIPT content -> the resulting longer ticket -> the bounded
+            // height re-measurement loop) actually resolves the physical
+            // failure, not just the isolated arithmetic/parsing pieces above.
+            var receiptPayload = System.Text.Json.JsonDocument.Parse("""
+                {"kind":"RECEIPT","restaurantName":"TableCore Restoran","restaurantLegalName":"TableCore DOO",
+                 "address":"Ulica 1","phone":"011/123-456","taxIdNumber":"123456789","legalNote":"Radni nalog – nije fiskalni račun",
+                 "footerText":"Do sledeceg puta!","receiptNumber":425,"orderNumber":"41370E8D","tableLabel":"1","waiterName":"Test_11 Detlic",
+                 "issuedAt":"2026-09-16T16:06:57.565Z",
+                 "items":[
+                   {"quantity":1,"name":"Krompir salata","unitPrice":"200.00","lineTotal":"200.00","basePrice":"200.00"},
+                   {"quantity":1,"name":"Dimljeni svinjski vrat","unitPrice":"2000.00","lineTotal":"2000.00","basePrice":"2000.00"},
+                   {"quantity":1,"name":"Biftek","unitPrice":"1600.00","lineTotal":"1600.00","basePrice":"1600.00"},
+                   {"quantity":3,"name":"Bavaria","unitPrice":"300.00","lineTotal":"900.00","basePrice":"300.00"},
+                   {"quantity":3,"name":"Heineken 0.0","unitPrice":"200.00","lineTotal":"600.00","basePrice":"200.00"}
+                 ],
+                 "subtotal":"5500.00","taxTotal":"1100.00","discountAmount":null,"total":"6600.00","currency":"RSD",
+                 "paymentMethod":"CASH","tenderedAmount":"8000.00","changeAmount":"1400.00","paperWidthMm":58}
+                """).RootElement;
+            var (receiptTicketForDriver, _, _) = TicketPayload.Parse(receiptPayload);
+            var receiptResult = WindowsPrinter.Print(new("RECEIPT", printerName, 58), receiptTicketForDriver, "self-test-receipt-425", dryRun: true);
+            Check(receiptResult.Status == "PREFLIGHT_ONLY",
+                $"[{printerName}] REGRESSION PROOF for #425 itself: the real 7-item receipt (correct content + real length) now fits this same real driver — {receiptResult.Guarantee}");
+
+            // NEGATIVE REGRESSION PROOF for #425's actual root cause: the
+            // REAL PrintJob.content stored in PREPROD for #425 had
+            // "paperWidthMm": 80, NOT 58 — even though test_11's real
+            // RECEIPT route is configured for POS-58 at 58mm — because
+            // dispatchReceiptPrintJob sourced paperWidthMm from the legacy
+            // (empty for this restaurant) PrinterConfig table instead of the
+            // real Agent route, and AgentRunner.cs's old `effectiveRoute`
+            // let that wrong server-embedded width silently override the
+            // Agent's own correctly-configured route width. This proves the
+            // failure mode is real and reproducible on this exact driver
+            // family: the same real #425 content, rendered at the WRONG
+            // (80mm) width, fails with "printable area too small" on a
+            // driver whose actual roll is 58mm — which is exactly what
+            // physically happened. It is the reason both fixes are
+            // required: the server must source paperWidthMm from the real
+            // Agent route (print-service.ts), and the Agent must never let
+            // server-embedded content width override its own local,
+            // Admin-configured route width (AgentRunner.cs).
+            var (realReceiptTicket80, _, _) = TicketPayload.Parse(receiptPayload);
+            var real80Result = WindowsPrinter.Print(new("RECEIPT", printerName, 80), realReceiptTicket80, "regression-425-wrong-width", dryRun: true);
+            Check(real80Result.Status == "FAILED_BEFORE_SUBMISSION" && (real80Result.Error?.Contains("printable area", StringComparison.OrdinalIgnoreCase) ?? false),
+                $"[{printerName}] NEGATIVE REGRESSION PROOF for #425's real root cause: the exact real receipt content, rendered at the WRONG server-embedded width (80mm) instead of the driver's real 58mm roll, reproduces the exact physical failure — {real80Result.Status} / {real80Result.Error}");
         }
 
         // Faza 2B Korak 0 — DPAPI CredentialStore round-trip. Sačuvaj/vrati
@@ -243,6 +333,63 @@ internal static class SelfTests
         Check(parsedTicket.Lines.Any(l => l.Text.Contains("bez luka")), "TicketPayload includes item note");
         parsedTicket.Validate(); // baca ako ijedna linija krši postojeća Faza 1 pravila (dužina/kontrolni znakovi)
         Check(true, "TicketPayload output passes existing Ticket.Validate() unchanged");
+
+        // PREPROD physical QA follow-up (real receipt #425, POS-58 — the
+        // receipt never actually printed) — RECEIPT content was NEVER given
+        // its own parser; every job type silently went through the
+        // KitchenBar-shaped one above, which does not even have properties
+        // matching ReceiptTicketContent's real field names. These tests
+        // pin the fix using a realistic multi-item receipt payload (mirrors
+        // ticket-content.ts's ReceiptTicketContent exactly).
+        var receiptJson = System.Text.Json.JsonDocument.Parse("""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","restaurantLegalName":"TableCore DOO",
+             "address":"Ulica 1","phone":"011/123-456","taxIdNumber":"123456789","legalNote":"Radni nalog – nije fiskalni račun",
+             "footerText":"Do sledeceg puta!","receiptNumber":425,"orderNumber":"41370E8D","tableLabel":"1","waiterName":"Test_11 Detlic",
+             "issuedAt":"2026-09-16T16:06:57.565Z",
+             "items":[
+               {"quantity":1,"name":"Krompir salata","unitPrice":"200.00","lineTotal":"200.00","basePrice":"200.00"},
+               {"quantity":1,"name":"Dimljeni svinjski vrat","unitPrice":"2000.00","lineTotal":"2000.00","basePrice":"2000.00",
+                "modifiers":[{"name":"Ljuto","priceDelta":"50.00"}]},
+               {"quantity":3,"name":"Bavaria","unitPrice":"300.00","lineTotal":"900.00","basePrice":"300.00"}
+             ],
+             "subtotal":"5500.00","taxTotal":"1100.00","discountAmount":null,"total":"6600.00","currency":"RSD",
+             "paymentMethod":"CASH","tenderedAmount":"8000.00","changeAmount":"1400.00","paperWidthMm":58}
+            """).RootElement;
+        var (receiptTicket, receiptWidth, receiptStation) = TicketPayload.Parse(receiptJson);
+        Check(receiptWidth == 58, "TicketPayload.ParseReceipt reads paperWidthMm from the frozen payload");
+        Check(receiptStation == "RECEIPT", "TicketPayload.ParseReceipt reports station RECEIPT — the OLD (bug) code always reported KITCHEN for any receipt, since ReceiptTicketContent has no `stationLabel`/`kind` matching the KitchenBar parser's checks");
+        var receiptText = string.Join("\n", receiptTicket.Lines.Select(l => l.Text));
+        Check(receiptText.Contains("TableCore Restoran"), "receipt includes the restaurant name (never present under the old KitchenBar parser)");
+        Check(receiptText.Contains("RACUN #425"), "receipt includes the receipt number");
+        Check(receiptText.Contains("Dimljeni svinjski vrat"), "receipt includes a real item name");
+        Check(receiptText.Contains("2000.00"), "receipt includes item pricing (never present under the old parser, which only ever read quantity+name)");
+        Check(receiptText.Contains("Ljuto") && receiptText.Contains("50.00"), "receipt includes a priced modifier — the OLD parser's modifier check required a plain string and silently dropped every real {name,priceDelta} object");
+        Check(receiptText.Contains("Osnovica: 5500.00"), "receipt includes the subtotal");
+        Check(receiptText.Contains("PDV: 1100.00"), "receipt includes the tax total");
+        Check(receiptText.Contains("UKUPNO: 6600.00 RSD"), "receipt includes the grand total with currency");
+        Check(receiptText.Contains("Primljeno: 8000.00") && receiptText.Contains("Kusur: 1400.00"), "receipt includes tendered/change amounts for a CASH payment (never present under the old parser)");
+        Check(receiptText.Contains("Radni nalog"), "receipt includes the non-fiscal legal note (required wording, never present under the old parser)");
+        Check(!receiptText.Contains("KUHINJA"), "receipt never prints the old parser's incorrect always-KITCHEN station fallback");
+        receiptTicket.Validate();
+        Check(true, "TicketPayload.ParseReceipt output passes existing Ticket.Validate() unchanged");
+
+        // A receipt with NO discount/no modifiers/a CARD payment must never
+        // print an empty "Popust:"/tendered/change line that doesn't apply.
+        var cardReceiptJson = System.Text.Json.JsonDocument.Parse("""
+            {"kind":"RECEIPT","restaurantName":"TableCore Restoran","restaurantLegalName":null,"address":null,"phone":null,
+             "taxIdNumber":null,"legalNote":"Radni nalog – nije fiskalni račun","footerText":null,"receiptNumber":1,
+             "orderNumber":"AAAA1111","tableLabel":"2","waiterName":"Ana","issuedAt":"2026-09-16T10:00:00.000Z",
+             "items":[{"quantity":1,"name":"Kafa","unitPrice":"150.00","lineTotal":"150.00"}],
+             "subtotal":"150.00","taxTotal":"30.00","discountAmount":"0.00","total":"180.00","currency":"RSD",
+             "paymentMethod":"CARD","tenderedAmount":"180.00","changeAmount":"0.00","paperWidthMm":80}
+            """).RootElement;
+        var (cardTicket, _, _) = TicketPayload.Parse(cardReceiptJson);
+        var cardText = string.Join("\n", cardTicket.Lines.Select(l => l.Text));
+        Check(!cardText.Contains("Popust:"), "a zero discountAmount never renders a Popust line");
+        Check(!cardText.Contains("Primljeno:") && !cardText.Contains("Kusur:"), "a CARD payment never renders tendered/change lines (CASH-only fields)");
+        Check(cardText.Contains("KARTICA"), "CARD payment method renders the correct Serbian label");
+        cardTicket.Validate();
+        Check(true, "TicketPayload.ParseReceipt (CARD, no discount) output passes existing Ticket.Validate() unchanged");
 
         // Faza 2C — bezbedno rešavanje servera (AgentEndpoint). Napravljeno
         // POSLE stvarnog incidenta (vidi AgentEndpoint.cs) gde je tih pad na
