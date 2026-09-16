@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type TerminalPrintRole = "KITCHEN" | "BAR" | "RECEIPT";
-export type TerminalBindingStatus = "idle" | "not-applicable" | "connecting" | "bound" | "error";
+// "checking" is the true initial state, before the very first status check
+// resolves — treated the same as "not-applicable" (hidden) by
+// TerminalBindingBadge, so a CENTRAL_ROUTING login never shows even a brief
+// flash of "Poveži ovaj računar" while that first request is in flight.
+export type TerminalBindingStatus = "checking" | "idle" | "not-applicable" | "connecting" | "bound" | "error";
 export interface TerminalBindingState {
   status: TerminalBindingStatus;
   printRole: TerminalPrintRole | null;
@@ -42,7 +46,7 @@ const STATUS_POLL_ATTEMPTS = 40;
  * technical requirement of how custom protocol handlers work.
  */
 export function useTerminalBinding() {
-  const [state, setState] = useState<TerminalBindingState>({ status: "idle", printRole: null, error: null });
+  const [state, setState] = useState<TerminalBindingState>({ status: "checking", printRole: null, error: null });
   const alive = useRef(true);
   const statusRef = useRef(state.status);
   statusRef.current = state.status;
@@ -51,11 +55,23 @@ export function useTerminalBinding() {
     try {
       const res = await apiFetch("/api/pos/terminal/status");
       if (!alive.current) return null;
+      // REGRESSION FIX — "Poveži ovaj računar" was showing on every login
+      // for logins where binding is not even a relevant concept (a
+      // CENTRAL_ROUTING restaurant, or a role with no operational print
+      // mapping): the OLD code only ever learned "not-applicable" reactively,
+      // AFTER an actual (fruitless) bind click — every fresh mount defaulted
+      // back to "idle" (visible) in the meantime, and a fresh mount happens
+      // on every login. The server now reports applicability up front, from
+      // this very first status check.
+      if (!res.applicable) {
+        setState({ status: "not-applicable", printRole: null, error: null });
+        return null;
+      }
       if (res.status) {
         setState({ status: "bound", printRole: res.status.printRole, error: null });
         return res.status.printRole as TerminalPrintRole;
       }
-      setState((prev) => (prev.status === "bound" ? { status: "idle", printRole: null, error: null } : prev));
+      setState((prev) => (prev.status === "idle" ? prev : { status: "idle", printRole: null, error: null }));
       return null;
     } catch {
       return null;

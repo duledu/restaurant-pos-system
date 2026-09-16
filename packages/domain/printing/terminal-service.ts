@@ -87,6 +87,28 @@ export interface TerminalBindIntent {
   expiresAt: string;
 }
 
+/**
+ * Whether terminal binding is even a relevant concept for THIS login right
+ * now — this employee's role must map to an operational print role AND the
+ * restaurant must currently be in LOGIN_AWARE mode (resolveEligibleWorkstation
+ * never reads WorkstationTerminalSession under CENTRAL_ROUTING at all, the
+ * restaurant-wide default every existing/new restaurant starts on). Shared
+ * by createTerminalBindIntent (below) and getTerminalStatus, so the browser
+ * can learn "there's nothing to do here" from its very first status check —
+ * never only after actually clicking "Poveži ovaj računar" and discovering
+ * the resulting intent is null. Regression this closes: without this
+ * up-front check, a CENTRAL_ROUTING restaurant (Agent pairing is a SEPARATE,
+ * permanent, computer-level concept — completely unrelated to this
+ * per-login binding) showed "Poveži ovaj računar" on every single login,
+ * since the hook's default/reset state before any click is indistinguishable
+ * from "genuinely not yet bound".
+ */
+export async function isTerminalBindingApplicable(ctx: Pick<AuthContext, "restaurantId" | "roles">): Promise<boolean> {
+  if (!operationalPrintRoleFor(ctx.roles)) return false;
+  const restaurant = await prisma.restaurant.findUnique({ where: { id: ctx.restaurantId }, select: { printingMode: true } });
+  return restaurant?.printingMode === "LOGIN_AWARE";
+}
+
 /** Browser, authenticated as ctx.employeeId. Returns null (no intent
  * created, nothing for the client to do) when this employee's role has no
  * operational print mapping, OR when the restaurant is currently in
@@ -96,9 +118,7 @@ export interface TerminalBindIntent {
  * reason to ever create one otherwise. */
 export async function createTerminalBindIntent(ctx: AuthContext): Promise<TerminalBindIntent | null> {
   const printRole = operationalPrintRoleFor(ctx.roles);
-  if (!printRole) return null;
-  const restaurant = await prisma.restaurant.findUnique({ where: { id: ctx.restaurantId }, select: { printingMode: true } });
-  if (restaurant?.printingMode !== "LOGIN_AWARE") return null;
+  if (!printRole || !(await isTerminalBindingApplicable(ctx))) return null;
   const now = Date.now();
   pruneExpiredIntents(now);
   const token = randomBytes(32).toString("base64url");

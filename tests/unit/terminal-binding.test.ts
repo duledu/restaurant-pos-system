@@ -47,9 +47,9 @@ async function mount() {
 }
 
 describe("TerminalBindingBadge", () => {
-  it("shows 'Poveži ovaj računar' from the normal idle starting state (not hidden until a bind is actually attempted)", async () => {
+  it("shows 'Poveži ovaj računar' from the normal idle starting state (applicable, just not yet bound this session)", async () => {
     fetchMock = vi.fn(async (input: string) => {
-      if (String(input) === "/api/pos/terminal/status") return response({ status: null });
+      if (String(input) === "/api/pos/terminal/status") return response({ status: null, applicable: true });
       throw new Error(`Unexpected request ${input}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -59,10 +59,28 @@ describe("TerminalBindingBadge", () => {
     expect(button!.disabled).toBe(false);
   });
 
-  it("renders nothing once the server confirms (via a real bind attempt) this login has no operational print role", async () => {
+  // REGRESSION — "Poveži ovaj računar" repeated on every login for a
+  // computer/restaurant where binding isn't even a relevant concept (a
+  // CENTRAL_ROUTING restaurant, or a role with no operational print
+  // mapping): the badge must learn this from the VERY FIRST status check
+  // (server-reported `applicable: false`), never only reactively after an
+  // actual bind click — a fresh login is a fresh mount, so a reactive-only
+  // check would show the prompt again every single time.
+  it("renders nothing from the very first status check when the server reports binding is not applicable — never requires a click to discover this", async () => {
+    fetchMock = vi.fn(async (input: string) => {
+      if (String(input) === "/api/pos/terminal/status") return response({ status: null, applicable: false });
+      throw new Error(`Unexpected request ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await mount();
+    expect(host.textContent).toBe("");
+    expect(host.querySelector("button")).toBeNull();
+  });
+
+  it("renders nothing once the server confirms (via a real bind attempt) this login has no operational print role — a defensive fallback for the rarer case where applicability changes between the status check and the click", async () => {
     fetchMock = vi.fn(async (input: string, options?: RequestInit) => {
       const path = String(input);
-      if (path === "/api/pos/terminal/status") return response({ status: null });
+      if (path === "/api/pos/terminal/status") return response({ status: null, applicable: true });
       if (path === "/api/pos/terminal/bind-intent" && options?.method === "POST") return response({ intent: null });
       throw new Error(`Unexpected request ${input}`);
     });
@@ -85,9 +103,9 @@ describe("TerminalBindingBadge", () => {
         // Bound only from the 3rd status check onward — proves this is a
         // real poll loop, not a single optimistic assumption of success.
         if (statusCalls >= 3) {
-          return response({ status: { workstationId: "ws-1", printRole: "KITCHEN", expiresAt: new Date(Date.now() + 60000).toISOString() } });
+          return response({ status: { workstationId: "ws-1", printRole: "KITCHEN", expiresAt: new Date(Date.now() + 60000).toISOString() }, applicable: true });
         }
-        return response({ status: null });
+        return response({ status: null, applicable: true });
       }
       if (path === "/api/pos/terminal/bind-intent" && options?.method === "POST") {
         return response({ intent: { token: "test-token-123", printRole: "KITCHEN", expiresAt: new Date(Date.now() + 120000).toISOString() } });
@@ -124,7 +142,7 @@ describe("TerminalBindingBadge", () => {
   it("shows a retry action and error message if the Agent round trip never completes", async () => {
     fetchMock = vi.fn(async (input: string, options?: RequestInit) => {
       const path = String(input);
-      if (path === "/api/pos/terminal/status") return response({ status: null }); // never confirms
+      if (path === "/api/pos/terminal/status") return response({ status: null, applicable: true }); // never confirms
       if (path === "/api/pos/terminal/bind-intent" && options?.method === "POST") {
         return response({ intent: { token: "t", printRole: "KITCHEN", expiresAt: new Date(Date.now() + 120000).toISOString() } });
       }

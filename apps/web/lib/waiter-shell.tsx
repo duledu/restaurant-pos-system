@@ -200,7 +200,7 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
 
 function TerminalBindingCorner() {
   const { status } = useTerminalBinding();
-  if (status === "not-applicable") return null;
+  if (status === "not-applicable" || status === "checking") return null;
   return (
     <div className="fixed bottom-3 left-3 z-40 rounded-md bg-white/95 px-2.5 py-1.5 shadow-card backdrop-blur">
       <TerminalBindingBadge />

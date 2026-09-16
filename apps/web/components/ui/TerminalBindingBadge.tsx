@@ -6,18 +6,19 @@ const ROLE_LABEL: Record<string, string> = { KITCHEN: "KUHINJA", BAR: "ŠANK", R
 
 /**
  * PRINTING V2 FINAL — LOGIN_AWARE terminal binding indicator/action.
- * Renders nothing at all (not even a placeholder) ONLY once the server has
- * confirmed (via a real bind-intent attempt) that this login has no
- * operational print role ("not-applicable") — see
- * useTerminalBinding/terminal-service.ts. "idle" (the normal starting
- * state, before the user has clicked anything yet) still shows the
+ * Renders nothing at all (not even a placeholder) while the very first
+ * status check is still in flight ("checking") or once the server has
+ * confirmed this login has no operational print role / the restaurant is
+ * in CENTRAL_ROUTING mode ("not-applicable") — see
+ * useTerminalBinding/terminal-service.ts. "idle" (genuinely LOGIN_AWARE +
+ * an operational role, just not yet bound this session) still shows the
  * "Poveži ovaj računar" action — hiding it there would make the button
  * impossible to ever click. Mount once per waiter/KDS shell (KdsClient.tsx,
  * waiter-shell.tsx).
  */
 export function TerminalBindingBadge({ theme = "light" }: { theme?: "light" | "dark" }) {
   const { status, printRole, error, bind } = useTerminalBinding();
-  if (status === "not-applicable") return null;
+  if (status === "not-applicable" || status === "checking") return null;
 
   const textClass = theme === "dark" ? "text-cream-300/70" : "text-inkSoft";
   if (status === "bound") {

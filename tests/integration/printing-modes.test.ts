@@ -251,6 +251,69 @@ describe("LOGIN_AWARE — terminal binding drives claim eligibility", () => {
     expect(terminal.operationalPrintRoleFor(["WAITER"])).toBe("RECEIPT");
   });
 
+  // REGRESSION — "Poveži ovaj računar" showed on every waiter login on
+  // PREPROD even though the physical computer was already Agent-paired and
+  // printing. Root cause: Agent pairing (permanent, computer-level) and
+  // terminal binding (per-login, LOGIN_AWARE-only) are separate concepts —
+  // the browser had no way to learn "there's nothing to bind here" for a
+  // CENTRAL_ROUTING restaurant (the default for every restaurant, including
+  // this one) except by reactively clicking through a bind attempt, and a
+  // fresh login is a fresh client state that forgets that. These tests
+  // cover the actual authoritative check (isTerminalBindingApplicable) the
+  // browser now consults up front — see lib/terminal-binding.ts.
+  describe("isTerminalBindingApplicable — the fix for the repeated 'Poveži ovaj računar' prompt", () => {
+    it("CENTRAL_ROUTING (the default — every restaurant, including an already Agent-paired one): never applicable, even for a role with an operational print mapping", async () => {
+      const fixture = await createFixture();
+      const owner = context(fixture, ["OWNER"], "owner-1");
+      await pairComputer(fixture, owner, "PC1"); // Agent pairing exists — must not matter here at all
+      const waiterCtx = context(fixture, ["WAITER"], "waiter-1");
+      expect(await workstations.getPrintingMode(waiterCtx)).toBe("CENTRAL_ROUTING");
+      expect(await terminal.isTerminalBindingApplicable(waiterCtx)).toBe(false);
+    });
+
+    it("logging out and back in on an already Agent-paired CENTRAL_ROUTING computer never becomes applicable — a fresh mount is not a fresh answer", async () => {
+      const fixture = await createFixture();
+      const owner = context(fixture, ["OWNER"], "owner-1");
+      await pairComputer(fixture, owner, "PC1");
+      const waiterCtx = context(fixture, ["WAITER"], "waiter-1");
+      // Simulates login -> logout -> login: the check is a pure function of
+      // current restaurant/role state, never of prior client session history.
+      expect(await terminal.isTerminalBindingApplicable(waiterCtx)).toBe(false);
+      expect(await terminal.isTerminalBindingApplicable(waiterCtx)).toBe(false);
+    });
+
+    it("LOGIN_AWARE + an operational role: applicable (the genuine, intended self-bind case is unaffected)", async () => {
+      const fixture = await createFixture();
+      const owner = context(fixture, ["OWNER"], "owner-1");
+      await workstations.setPrintingMode(owner, { printingMode: "LOGIN_AWARE" });
+      expect(await terminal.isTerminalBindingApplicable(context(fixture, ["WAITER"], "waiter-1"))).toBe(true);
+      expect(await terminal.isTerminalBindingApplicable(context(fixture, ["KITCHEN"], "kitchen-1"))).toBe(true);
+    });
+
+    it("LOGIN_AWARE + an elevated role with no operational print mapping: never applicable — Admin/Owner/Manager use Admin -> Štampači instead", async () => {
+      const fixture = await createFixture();
+      const owner = context(fixture, ["OWNER"], "owner-1");
+      await workstations.setPrintingMode(owner, { printingMode: "LOGIN_AWARE" });
+      for (const role of ["OWNER", "ADMIN", "MANAGER", "INVENTORY_MANAGER"]) {
+        expect(await terminal.isTerminalBindingApplicable(context(fixture, [role], `${role}-1`))).toBe(false);
+      }
+    });
+
+    it("a mobile/tablet waiter device (no Agent pairing at all) is judged the exact same way as any other browser — by role + printingMode, never by whether THIS device has an Agent", async () => {
+      const fixture = await createFixture();
+      // No pairComputer() call at all here — this fixture's restaurant has
+      // zero paired workstations, modeling a phone/tablet with no Windows
+      // Agent identity whatsoever.
+      expect(await terminal.isTerminalBindingApplicable(context(fixture, ["WAITER"], "waiter-1"))).toBe(false); // CENTRAL_ROUTING default
+      const owner = context(fixture, ["OWNER"], "owner-1");
+      await workstations.setPrintingMode(owner, { printingMode: "LOGIN_AWARE" });
+      // Under LOGIN_AWARE it's still legitimately applicable — a phone CAN
+      // self-bind if the restaurant is actually in LOGIN_AWARE mode; the
+      // point is this decision never depends on Agent-pairing state.
+      expect(await terminal.isTerminalBindingApplicable(context(fixture, ["WAITER"], "waiter-1"))).toBe(true);
+    });
+  });
+
   it("session heartbeat extends the TTL; a stale, never-heartbeated session eventually expires", async () => {
     const { fixture, wsCtx, registered } = await loginAwareFixture();
     const kitchenCtx = context(fixture, ["KITCHEN"], "kitchen-1");
