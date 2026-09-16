@@ -352,6 +352,27 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
   const itemById = useMemo(() => new Map(items.map(item => [item.id, item])), [items]);
   const view = useMemo(() => activeOrderView(order), [order]);
+
+  // DESKTOP SPLIT-VIEW / MOBILE PANEL — reveal a newly added draft item
+  // without the waiter having to notice/scroll manually. Keyed ONLY on the
+  // draft count INCREASING (a genuinely new item was added) — never on a
+  // quantity change, a removal, or the count shrinking, and never on
+  // already-submitted rows (a separate, read-only section) — so changing
+  // quantity, removing an unrelated item, or a server poll updating
+  // previously-sent items never yanks the scroll position out from under
+  // the waiter mid-edit.
+  const draftItemsScrollRef = useRef<HTMLDivElement>(null);
+  const previousDraftCountRef = useRef(view.draftItems.length);
+  useEffect(() => {
+    const container = draftItemsScrollRef.current;
+    // container.scrollTo isn't implemented in the jsdom unit-test
+    // environment — harmless to skip there (no real scrolling to verify).
+    if (container && view.draftItems.length > previousDraftCountRef.current && typeof container.scrollTo === "function") {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    }
+    previousDraftCountRef.current = view.draftItems.length;
+  }, [view.draftItems.length]);
+
   const memory = useMemo(() => tableMemory(view.sentItems), [view]);
   const suggestions = quickSuggestions(memory.recent, favorites.get(), items);
   const [quickFeedback, setQuickFeedback] = useState("");
@@ -825,12 +846,30 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       </div>
 
       {/* DESKTOP SPLIT-VIEW (>=1280px/xl:) — menu (left, ~68%) and the
-          current-order panel (right, ~32%, sticky) become flex siblings in
-          one row instead of the panel overlaying the bottom of the page.
-          Below xl: this is an inert wrapper (no flex/gap/etc. applied), so
-          tablet/mobile keep the exact existing stacked/fixed-panel layout. */}
-      <div className="xl:mx-auto xl:flex xl:w-full xl:max-w-[1600px] xl:items-start xl:gap-4 xl:px-4 xl:pb-4">
-      <div className="mx-auto w-full max-w-5xl xl:mx-0 xl:min-w-0 xl:max-w-none xl:flex-[68]">
+          current-order panel (right, ~32%) become flex siblings in one row
+          instead of the panel overlaying the bottom of the page.
+
+          The row itself is bound to the remaining viewport height
+          (100dvh - measured header height, see --waiter-header-h) and
+          clips overflow, so EACH column scrolls independently within its
+          own box instead of the whole page scrolling. Regression found
+          while validating this: `position: sticky` on the panel (the
+          original approach) only stays visible while its containing block
+          (this row, auto-height = the taller of the two columns) hasn't
+          scrolled past — for any real menu taller than the panel, once
+          the waiter scrolled near the bottom of the menu the panel's
+          containing block ran out and the ENTIRE panel (including its
+          own already-correct internal item-list scroll, its total and its
+          submit button) scrolled away with the page. A fixed-height,
+          overflow-hidden row with two independently-scrolling children
+          has no such limit — the panel is exactly as tall as the row for
+          as long as the row exists, so its own internal
+          header/items/total/submit structure below is always reachable.
+          Below xl: this is an inert wrapper (no flex/height/etc. applied),
+          so tablet/mobile keep the exact existing stacked/fixed-panel,
+          whole-page-scrolls layout. */}
+      <div className="xl:mx-auto xl:flex xl:h-[calc(100dvh-var(--waiter-header-h))] xl:w-full xl:max-w-[1600px] xl:gap-4 xl:overflow-hidden xl:px-4 xl:pb-4">
+      <div className="mx-auto w-full max-w-5xl xl:mx-0 xl:h-full xl:min-w-0 xl:max-w-none xl:flex-[68] xl:overflow-y-auto xl:overscroll-contain">
         {(error || draft.retryable) && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error ?? "Izmena nije potvrđena."}{draft.retryable && <button onClick={draft.retry} className="ml-3 min-h-11 underline">Pokušaj ponovo</button>}</div>}
 
         {/* FAZA 10: najistaknutija sekcija na ekranu kad postoji bar jedna
@@ -963,15 +1002,20 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           (position:fixed se ne "skraćuje" sam od sebe uz sadržaj).
 
           DESKTOP SPLIT-VIEW (xl:): isti panel, ista unutrašnja struktura
-          (header/lista/footer/dugme), samo drugačiji SPOLJNI kontekst —
-          sticky desna kolona umesto fixed preklopa preko dna stranice.
-          `top` čita --waiter-header-h (izmerena visina sticky header-a
-          iznad, vidi useLayoutEffect) umesto nagađane vrednosti u pikselima,
-          tako da panel uvek počinje TAČNO ispod header-a bez obzira na
-          njegovu stvarnu visinu. min-w/max-w garantuju čitljivu širinu
+          (header/lista/footer/dugme), samo drugačiji SPOLJNI kontekst — sad
+          obična flex stavka koja popunjava PUNU visinu reda (xl:h-full),
+          a red je već ograničen na preostalu visinu ekrana (vidi wrapper
+          red iznad, xl:h-[calc(100dvh-var(--waiter-header-h))]). Ranije je
+          ovo bilo position:sticky, ali sticky element ne može da ostane
+          vidljiv dalje od granica svog containing block-a (ovaj red, čija
+          auto-visina prati VIŠU od dve kolone) — za bilo koji stvaran meni
+          duži od panela, kad bi konobar skrolovao blizu dna menija, CEO
+          panel (uklj. već ispravnu unutrašnju listu/total/dugme) bi
+          nestao zajedno sa stranicom. xl:h-full na fiksno-visokom redu
+          nema tu granicu. min-w/max-w garantuju čitljivu širinu
           (naziv/količina/cena/total) na bilo kojoj desktop rezoluciji —
           nikad se ne skuplja ispod min-w bez obzira na flex-shrink. */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:sticky xl:inset-x-auto xl:bottom-auto xl:left-auto xl:right-auto xl:top-[var(--waiter-header-h)] xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:max-h-[calc(100dvh-var(--waiter-header-h)-1rem)] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
+      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:static xl:inset-auto xl:h-full xl:max-h-none xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
         <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2 xl:mx-0 xl:max-w-none"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftCount} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
@@ -980,7 +1024,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             konobar fizički ne može da dođe do poslednjih stavki na nekim
             uređajima. pb-3 (umesto py-2) ostavlja vidljiv razmak ispod
             poslednje stavke pre linije/Ukupno ispod. */}
-        <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
+        <div ref={draftItemsScrollRef} className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-y-auto overscroll-contain px-3 pt-2 pb-3 [-webkit-overflow-scrolling:touch]">
           {draftItems.length === 0 && (
             <div className="py-2 text-center text-sm text-ink/55">
               {hasEverSubmitted ? "Nema novih stavki." : "Nema stavki još."}
