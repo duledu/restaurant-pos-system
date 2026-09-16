@@ -48,6 +48,14 @@ public sealed class SetupForm : Form
     // ova poruka pojavila, jer je ranije bila AutoSize+Visible=false, što
     // MENJA ukupnu visinu sadržaja u trenutku kad ekran ima fiksnu visinu).
     private readonly Label _pairFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 32), TextAlign = ContentAlignment.TopLeft };
+    // Physical QA follow-up — explicit re-pair confirmation. Reserved-space,
+    // always-visible-when-active label (same "never Visible=false toggling
+    // that changes layout height mid-flow" convention as _pairFeedbackLabel)
+    // shown ONLY while re-pair mode is unlocked (see EnterRepairMode) — both
+    // for a manual "Ponovo upari" click and for an incoming tablecore-print://
+    // URI's explicit re-pair intent while already paired.
+    private readonly Label _repairWarningLabel = new() { AutoSize = false, Size = new Size(420, 34), TextAlign = ContentAlignment.TopLeft, ForeColor = Color.Firebrick, Visible = false };
+    private readonly Button _repairCancelButton = new() { Text = "Otkaži", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6), Margin = new Padding(8, 0, 0, 0), Visible = false };
     // Printing V2 — rute štampe (Kuhinja/Šank/Račun -> štampač) se BIRAJU u
     // Admin panelu POSLE uparivanja, nikad ovde — ovi kontroli su SADA čisto
     // lokalna dijagnostika ("probaj bilo koji instaliran štampač odmah"),
@@ -160,9 +168,12 @@ public sealed class SetupForm : Form
         _pairingCodeBox.Margin = new Padding(0, 6, 0, 0);
         pairRow.Controls.Add(_pairingCodeBox);
         pairRow.Controls.Add(_pairButton);
+        pairRow.Controls.Add(_repairCancelButton);
         layout.Controls.Add(pairRow);
         _pairFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
         layout.Controls.Add(_pairFeedbackLabel);
+        _repairWarningLabel.Margin = new Padding(0, 0, 0, 0);
+        layout.Controls.Add(_repairWarningLabel);
 
         layout.Controls.Add(new Label { Text = "Probna štampa — vrsta (oznaka na tiketu):", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
         layout.Controls.Add(_testRouteTypeBox);
@@ -196,7 +207,24 @@ public sealed class SetupForm : Form
         _paperWidthBox.Items.AddRange(["58", "80"]);
         _printerBox.Items.AddRange(WindowsPrinter.Enumerate());
 
-        _pairButton.Click += async (_, _) => await OnPair();
+        // Physical QA follow-up — clicking the primary button while ALREADY
+        // paired must not immediately attempt to pair with whatever
+        // (probably empty/disabled) text happens to be in the box; it must
+        // first unlock re-pair mode so the user can actually type/verify a
+        // code. This is the fix for the reported "the only pairing action
+        // is Ponovo upari, but the field stays disabled with no way to
+        // enter a new code" — a manual re-pair was structurally impossible
+        // before this, not just the URI-prefill case.
+        _pairButton.Click += async (_, _) =>
+        {
+            if (CredentialStore.HasStoredCredential() && !_repairUnlocked)
+            {
+                EnterRepairMode(presetCode: null, viaUri: false);
+                return;
+            }
+            await OnPair();
+        };
+        _repairCancelButton.Click += (_, _) => ExitRepairMode();
         _saveButton.Click += async (_, _) => await OnSave();
         _testPrintButton.Click += (_, _) => OnTestPrint();
 
@@ -205,6 +233,7 @@ public sealed class SetupForm : Form
 
     private string? _connectedName;
     private int _configuredRouteCount;
+    private bool _repairUnlocked;
 
     private void Initialize()
     {
@@ -212,22 +241,79 @@ public sealed class SetupForm : Form
         var paired = CredentialStore.HasStoredCredential();
         LoadExistingConfigIfPresent();
         RefreshStatus(paired);
-        // Printing V2 — pre-fill from a tablecore-print:// URI activation,
-        // but ONLY when not already paired. An already-paired machine keeps
-        // its pairing box disabled (see RefreshStatus) regardless of this —
-        // opening the Agent from Admin must never risk touching an existing
-        // pairing, so we don't even populate a stray code into that state.
-        if (!paired && !string.IsNullOrWhiteSpace(_prefillPairingCode))
+
+        // PairingFlow.Resolve is the single, independently self-tested
+        // source of truth for CASE A/B — see PairingFlow.cs. This method
+        // just applies whatever it decides to the actual controls.
+        var uiState = PairingFlow.Resolve(paired, _prefillPairingCode);
+        switch (uiState.Mode)
         {
-            _pairingCodeBox.Text = _prefillPairingCode.Trim();
-            ShowPairFeedback("Kod je automatski popunjen sa Admin panela — proveri i klikni „Poveži“.", isError: false);
+            case PairingUiMode.ConfirmRepair:
+                // CASE B, already paired — explicit URI re-pair intent must
+                // win, but ONLY as a visible, confirmable offer (never a
+                // silent credential swap).
+                EnterRepairMode(uiState.PairingCodeBoxText, viaUri: true);
+                break;
+            case PairingUiMode.PrefillUnpaired:
+                // CASE B, unpaired — ordinary pre-fill, no extra
+                // confirmation needed (no existing pairing to protect).
+                _pairingCodeBox.Text = uiState.PairingCodeBoxText;
+                _pairingCodeBox.Enabled = uiState.PairingCodeBoxEnabled;
+                ShowPairFeedback("Kod je automatski popunjen sa Admin panela — proveri i klikni „Poveži“.", isError: false);
+                break;
+            case PairingUiMode.NormalSettings:
+                // CASE A — RefreshStatus(paired) above already applied this
+                // exact state (disabled+empty when paired, enabled+empty
+                // when not); nothing about an existing pairing is touched.
+                break;
         }
+
         if (_endpointError is not null)
         {
             SetPairButtonEnabled(false);
             _pairingCodeBox.Enabled = false;
             ShowPairFeedback($"Server nije ispravno podešen, uparivanje je onemogućeno: {_endpointError}", isError: true);
         }
+    }
+
+    /// <summary>
+    /// Unlocks the pairing field for a NEW code — either because the user
+    /// clicked "Ponovo upari" themselves, or because an incoming
+    /// tablecore-print:// URI carried an explicit new pairing code while
+    /// this machine is already paired. Never submits anything by itself;
+    /// the user still has to click "Poveži ponovo" (see the required
+    /// confirmation UX) or "Otkaži" to back out — see ExitRepairMode.
+    /// </summary>
+    private void EnterRepairMode(string? presetCode, bool viaUri)
+    {
+        _repairUnlocked = true;
+        _pairingCodeBox.Enabled = true;
+        _pairingCodeBox.Text = presetCode ?? "";
+        _pairButton.Text = "Poveži ponovo";
+        _repairCancelButton.Visible = true;
+        if (viaUri)
+        {
+            _repairWarningLabel.Text = "Ovaj računar je već povezan sa TableCore.\nNovi kod će zameniti postojeće uparivanje.";
+            _repairWarningLabel.Visible = true;
+            ShowPairFeedback("Kod je automatski popunjen sa Admin panela.", isError: false);
+        }
+        else
+        {
+            _repairWarningLabel.Visible = false;
+            ShowPairFeedback("Unesite novi kod za uparivanje.", isError: false);
+        }
+    }
+
+    /// <summary>"Otkaži" — backs out of re-pair mode without touching the
+    /// existing credential in any way. Also the natural rest state after a
+    /// successful re-pair (see OnPair's success path).</summary>
+    private void ExitRepairMode()
+    {
+        _repairUnlocked = false;
+        _repairWarningLabel.Visible = false;
+        _repairCancelButton.Visible = false;
+        RefreshStatus(paired: true);
+        ShowPairFeedback("", isError: false);
     }
 
     /// <summary>
@@ -323,6 +409,16 @@ public sealed class SetupForm : Form
             }
             _connectedName = result.Name;
             _pairingCodeBox.Clear();
+            // A successful (re-)pair always ends repair mode cleanly and
+            // resets the stale route count from whatever the PREVIOUS
+            // pairing had cached locally — the new machine identity starts
+            // with zero routes server-side until Admin configures them (see
+            // OnSave, which will correctly report "0 routes" on the next
+            // heartbeat and overwrite this local guess).
+            _repairUnlocked = false;
+            _repairWarningLabel.Visible = false;
+            _repairCancelButton.Visible = false;
+            _configuredRouteCount = 0;
             RefreshStatus(paired: true);
             var who = _connectedName is null ? "" : $" — {_connectedName}";
             ShowPairFeedback($"✓ Upareno{who}. Klikni dugme ispod da preuzmeš rute štampe sa servera.", isError: false);
@@ -330,7 +426,12 @@ public sealed class SetupForm : Form
         finally
         {
             SetPairButtonEnabled(true);
-            _pairingCodeBox.Enabled = !CredentialStore.HasStoredCredential();
+            // Repair mode staying unlocked after a FAILED attempt (old
+            // credential intentionally untouched — see class doc) must keep
+            // the field editable so the user can correct/retry the code,
+            // even though CredentialStore.HasStoredCredential() still
+            // (correctly) reports the untouched OLD credential as present.
+            _pairingCodeBox.Enabled = _repairUnlocked || !CredentialStore.HasStoredCredential();
         }
     }
 

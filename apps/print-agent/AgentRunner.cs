@@ -30,6 +30,21 @@ public static class AgentRunner
     {
         var credential = CredentialStore.Load()
             ?? throw new InvalidOperationException("Nema sačuvanog kredencijala — prvo pokreni: --pair <KOD>");
+        // Physical QA follow-up (broken re-pair UX investigation) — the
+        // credential was previously read ONCE here at startup, never again,
+        // so re-pairing this machine via Setup (SetupForm.OnPair/CredentialStore.Save)
+        // while THIS service process was already running had no effect
+        // until a manual service restart or reboot: the running loop kept
+        // heartbeating with the OLD (possibly just-revoked) credential
+        // indefinitely, even though a valid new one already existed on
+        // disk. Same hot-reload convention as agent.config.json below
+        // (cheap last-write-time poll on the existing 1-3s cycle, no new
+        // package/FileSystemWatcher) — "reconnect, heartbeat, Admin sees
+        // the newly paired computer" now happens within one poll interval
+        // of clicking "Poveži ponovo", no restart required.
+        var credentialLastWriteUtc = File.Exists(AgentPaths.CredentialFilePath)
+            ? File.GetLastWriteTimeUtc(AgentPaths.CredentialFilePath)
+            : DateTime.MinValue;
 
         AgentDatabase.EnsureInitialized();
         AgentDatabase.PruneAcked(TimeSpan.FromDays(7));
@@ -106,6 +121,31 @@ public static class AgentRunner
                     }
                 }
                 catch (Exception ex) { LogWarn($"{configPath} nije čitljiv/validan posle izmene ({ex.Message}) — zadržavam prethodnu konfiguraciju."); }
+            }
+
+            // Credential hot-reload — see comment at Run()'s top for why
+            // this exists. A missing/unreadable file here (mid-write race,
+            // or CredentialStore.Clear() during an uninstall running
+            // concurrently) is handled the same defensive way as config:
+            // keep using the last known-good in-memory value rather than
+            // crashing the loop.
+            if (File.Exists(AgentPaths.CredentialFilePath))
+            {
+                try
+                {
+                    var credWriteUtc = File.GetLastWriteTimeUtc(AgentPaths.CredentialFilePath);
+                    if (credWriteUtc != credentialLastWriteUtc)
+                    {
+                        var reloaded = CredentialStore.Load();
+                        credentialLastWriteUtc = credWriteUtc;
+                        if (reloaded is not null && reloaded != credential)
+                        {
+                            credential = reloaded;
+                            LogInfo("Novi kredencijal učitan (radna stanica je ponovo uparena) — agent se odmah povezuje sa novim identitetom.");
+                        }
+                    }
+                }
+                catch (Exception ex) { LogWarn($"Kredencijal nije čitljiv posle izmene ({ex.Message}) — zadržavam prethodni."); }
             }
 
             if (DateTime.UtcNow - lastHeartbeatAtUtc >= HeartbeatInterval)
@@ -459,5 +499,5 @@ public static class AgentRunner
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.4";
+    public const string Current = "1.0.0-pilot.5";
 }

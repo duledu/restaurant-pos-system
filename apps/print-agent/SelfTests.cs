@@ -416,6 +416,55 @@ internal static class SelfTests
         Check(!uriRedacted.Contains("ABCD-EFGH-JKMN", StringComparison.Ordinal) && uriRedacted.Contains("code=***", StringComparison.Ordinal),
             "Redact() never lets a pairing code from a tablecore-print:// URI reach an error/log line either");
 
+        // Physical QA follow-up — broken re-pair UX. A fresh pairing was
+        // generated in Admin and "Otvori TableCore Print Agent" launched
+        // the Agent to consume it, but the incoming code was silently
+        // ignored because a credential already existed: the field stayed
+        // disabled, the only action was a "Ponovo upari" button that (per
+        // the OLD code) tried to pair with an empty box. PairingFlow.Resolve
+        // is the fix's single source of truth (see PairingFlow.cs) — these
+        // are the exact regression scenarios from the physical report.
+        {
+            // 1: normal Start Menu open + already paired -> must not alter
+            // pairing (disabled field, nothing pre-filled, no warning).
+            var normalPaired = PairingFlow.Resolve(alreadyPaired: true, incomingPairingCode: null);
+            Check(normalPaired.Mode == PairingUiMode.NormalSettings && !normalPaired.PairingCodeBoxEnabled && normalPaired.PairingCodeBoxText.Length == 0 && !normalPaired.ShowRepairWarning,
+                "CASE A: plain open while already paired never alters the existing pairing (field stays disabled/empty, no warning)");
+
+            // 2: URI open + unpaired -> code prefilled, ready for an
+            // explicit "Poveži" (never auto-submitted — Resolve only
+            // decides what to DISPLAY, SetupForm.OnPair is a separate,
+            // explicit user action either way).
+            var prefillUnpaired = PairingFlow.Resolve(alreadyPaired: false, incomingPairingCode: "ABCD-EFGH-JKMN");
+            Check(prefillUnpaired.Mode == PairingUiMode.PrefillUnpaired && prefillUnpaired.PairingCodeBoxText == "ABCD-EFGH-JKMN" && prefillUnpaired.PairingCodeBoxEnabled && !prefillUnpaired.ShowRepairWarning,
+                "CASE B (unpaired): incoming pairing code is pre-filled and the field is enabled for an explicit Poveži");
+
+            // 3 + 4: URI open + ALREADY paired -> THIS is the exact reported
+            // bug. The incoming code must NOT be ignored, and an explicit
+            // re-pair confirmation (warning shown, code visible) must
+            // result — never a silent credential swap.
+            var confirmRepair = PairingFlow.Resolve(alreadyPaired: true, incomingPairingCode: "WXYZ-2345-6789");
+            Check(confirmRepair.Mode == PairingUiMode.ConfirmRepair,
+                "CASE B (already paired): an incoming pairing code is NOT ignored — explicit re-pair confirmation is offered instead of the old silent-drop behavior");
+            Check(confirmRepair.PairingCodeBoxText == "WXYZ-2345-6789" && confirmRepair.PairingCodeBoxEnabled,
+                "CASE B (already paired): the actual incoming code is shown, not a blank/disabled field");
+            Check(confirmRepair.ShowRepairWarning,
+                "CASE B (already paired): the explicit 're-pairing will replace the existing pairing' warning is shown — never a silent swap");
+
+            // Not paired, no incoming code — ordinary first-time pairing
+            // screen (field enabled, empty, no warning) — unchanged baseline.
+            var freshUnpaired = PairingFlow.Resolve(alreadyPaired: false, incomingPairingCode: null);
+            Check(freshUnpaired.Mode == PairingUiMode.NormalSettings && freshUnpaired.PairingCodeBoxEnabled && freshUnpaired.PairingCodeBoxText.Length == 0,
+                "unpaired machine with no incoming code still gets the ordinary empty first-pairing screen (unchanged baseline)");
+
+            // Whitespace-only/empty incoming code is treated as "no code",
+            // not a malformed non-null value — defensive, matches
+            // SetupArgumentDispatch.ExtractPairingCode's own "null on
+            // anything not cleanly parseable" contract.
+            var blankCode = PairingFlow.Resolve(alreadyPaired: true, incomingPairingCode: "   ");
+            Check(blankCode.Mode == PairingUiMode.NormalSettings, "a whitespace-only incoming code is treated as no code at all (defensive)");
+        }
+
         // Faza 2C — Ticket.TestPrint (Admin "Test Print" dugme, autentifikovan
         // put preko AgentRunner.HandleTestPrintRequest). Mora biti jasno
         // obeleženo i uključiti sva tražena polja, i mora proći postojeću

@@ -31,7 +31,7 @@
 ; sam po sebi da potvrdi KOJI je tačno instaler instaliran (samo SHA-256
 ; je to razlikovao). Uvećaj OVAJ broj pri SVAKOM novom fizičkom-QA
 ; kandidatu ubuduće.
-#define MyAppVersion "1.0.0-pilot.4"
+#define MyAppVersion "1.0.0-pilot.5"
 #define MyAppPublisher "TableCore"
 #define MyServiceName "TableCorePrintAgent"
 #define MyServiceAccount "NT SERVICE\TableCorePrintAgent"
@@ -66,6 +66,19 @@
 #endif
 #ifndef AgentServerUrl
   #define AgentServerUrl ""
+#endif
+; Physical QA follow-up (installed-pilot.4-silently-built-as-Production
+; investigation) — build-time fail-closed guard, defense in depth alongside
+; AgentEndpoint.cs's own runtime refusal ("test mode cannot silently use
+; tablecore.net"). Catches the specific, worse mistake of someone typing
+; the PRODUCTION host as the "PREPROD" /DAgentServerUrl value by hand — a
+; compile-time #error is impossible to accidentally ship, unlike a runtime
+; check that only fires once the (wrong) installer is already built and
+; running on a physical machine. This is intentionally NOT a fallback —
+; there is no "silently use Production instead"; the build simply refuses
+; to produce ANY output until the value is corrected.
+#if AgentServerUrl == "https://tablecore.net"
+  #error "AgentServerUrl must never be the Production host (https://tablecore.net) for a PREPROD/test build. Use installer\build-preprod.ps1, which always points at the correct PREPROD Vercel Preview URL."
 #endif
 #if AgentServerUrl != ""
   #if AgentBypassHeader != ""
