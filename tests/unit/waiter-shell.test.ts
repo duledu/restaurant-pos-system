@@ -622,6 +622,40 @@ describe("mounted persistent waiter shell", () => {
     const patches = fetchMock.mock.calls.filter(([, options]) => options?.method === "PATCH");
     expect(patches).toHaveLength(1); expect(JSON.parse(patches[0][1].body)).toEqual({ quantity: 3 });
   });
+  // Physical PREPROD waiter crash fix — reproduces the exact real-world race:
+  // a waiter adds a new item, then taps +1 on it again before its create
+  // request confirms. sendCreation then fires a confirming PATCH; the old
+  // server response for that endpoint omitted `modifiers` entirely, and the
+  // old client code adopted it verbatim, writing `modifiers: undefined` into
+  // the rendered order — crashing the page ("Cannot read properties of
+  // undefined (reading 'length')") the next time DraftRow/HistoryRow read
+  // item.modifiers.length. This proves the full render path survives even
+  // if a PATCH response is still malformed somewhere else in the future.
+  it("regression: a quantity bump racing a still-confirming new item never crashes, even if the PATCH response omits modifiers", async () => {
+    const second = { ...menuItem, id: "m2", name: "Tea" };
+    const pending = deferred<Response>();
+    custom = (url, options) => {
+      if (url.includes("/snapshot")) return response({ ...menu, items: [menuItem, second] });
+      if (url.includes("/availability")) return response({ ...overlay, items: [overlay.items[0], { ...overlay.items[0], menuItemId: "m2" }] });
+      if (url === "/api/pos/orders/o5/items" && options?.method === "POST") return pending.promise;
+      if (url === "/api/pos/orders/o5/items/tea1" && options?.method === "PATCH") {
+        // Simulates the old server bug: `modifiers` relation not included.
+        return response({ item: { id: "tea1", menuItemId: "m2", name: "Tea", price: "200.00", quantity: JSON.parse(options.body).quantity, note: null, status: "DRAFT" } });
+      }
+      return undefined;
+    };
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Tea"); // starts the create; POST is still pending
+    await labelClick("Povećaj količinu — Tea"); // desired quantity becomes 2 while the create is in flight
+    await act(async () => {
+      pending.resolve(response({ item: { id: "tea1", menuItemId: "m2", name: "Tea", price: "200.00", quantity: 1, note: null, status: "DRAFT",
+        modifiers: [{ id: "mod1", modifierOptionId: "opt1", groupName: "Dodaci", optionName: "Limun", priceDelta: "0" }] } }));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(host.textContent).toContain("Tea");
+    expect(host.querySelector('[aria-label="Povećaj količinu — Tea"]')).not.toBeNull();
+  });
+
   it("remove cancels an unsent quantity update", async () => {
     await render(h(OrderClient, { tableId: "5" }));
     await labelClick("Povećaj količinu — Coffee"); await labelClick("Ukloni — Coffee");

@@ -373,7 +373,19 @@ export async function updateItem(ctx: AuthContext, orderId: string, itemId: stri
   }
 
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.orderItem.update({ where: { id: itemId }, data: input });
+    // Waiter client-side crash fix — every OrderItem this API ever returns
+    // (create/modifiers-update/getOrder/getActiveTableOrder) carries its
+    // `modifiers` relation; this was the one call site that didn't, silently
+    // returning an item missing that field. waiter-local-draft.ts's
+    // sendCreation() merges exactly this response into live order state when
+    // a quantity change races an in-flight item creation, so a real waiter
+    // tapping +/- on a just-added item wrote `modifiers: undefined` into the
+    // rendered order — crashing any `.modifiers.length` read (DraftRow/
+    // HistoryRow in order-client.tsx) with "Cannot read properties of
+    // undefined (reading 'length')". Fixing the contract here, not adding
+    // optional chaining at every render site, is what actually closes this class
+    // of bug for every current and future caller of this endpoint.
+    const updated = await tx.orderItem.update({ where: { id: itemId }, data: input, include: ORDER_ITEM_INCLUDE });
     await tx.orderEvent.create({
       data: { orderId, type: "item_updated", createdBy: ctx.employeeId, payload: input },
     });

@@ -193,6 +193,44 @@ describe("order-time validation (server-side, end-to-end through orders.addItem)
     const item = await orders.addItem(waiter, order.id, { menuItemId: bareItem.id, quantity: 1, modifierOptionIds: [] });
     expect(Number(item.price)).toBe(150);
   });
+
+  // Physical PREPROD waiter crash fix — updateItem (PATCH quantity, the
+  // waiter's +/- stepper) returned an OrderItem WITHOUT its `modifiers`
+  // relation, unlike every other item-returning endpoint (addItem,
+  // updateItemModifiers, getOrder, getActiveTableOrder). waiter-local-draft.ts
+  // merges this exact response into live order state when a quantity change
+  // races an item still being created, so a real waiter tapping +/- on a
+  // freshly-added item wrote `modifiers: undefined` into the rendered order —
+  // crashing any `.modifiers.length` read (order-client.tsx DraftRow/
+  // HistoryRow) with "Cannot read properties of undefined (reading 'length')".
+  it("regression: updateItem (quantity change) returns modifiers as an array, matching every other item-returning endpoint", async () => {
+    const fixture = await createFixture();
+    const waiter = waiterCtx(fixture);
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const created = await orders.addItem(waiter, order.id, { menuItemId: fixture.kitchenItemId, quantity: 1, modifierOptionIds: [fixture.kackavaljOptionId] });
+    expect(Array.isArray(created.modifiers)).toBe(true);
+    expect(created.modifiers.length).toBe(1);
+
+    const updated = await orders.updateItem(waiter, order.id, created.id, { quantity: 3 });
+    expect(Array.isArray(updated.modifiers)).toBe(true);
+    expect(updated.modifiers.length).toBe(1);
+    expect(updated.modifiers[0].optionName).toBe("Kačkavalj");
+    expect(updated.quantity).toBe(3);
+  });
+
+  it("regression: updateItem also returns modifiers as an empty array (not undefined/omitted) for an item with none", async () => {
+    const fixture = await createFixture();
+    const waiter = waiterCtx(fixture);
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    const bareItem = await prisma.menuItem.create({
+      data: { restaurantId: fixture.restaurantId, name: "Sok", slug: `sok-${randomUUID()}`, price: "200.00", taxRate: "20", preparationStation: "NONE" },
+    });
+    const created = await orders.addItem(waiter, order.id, { menuItemId: bareItem.id, quantity: 1, modifierOptionIds: [] });
+
+    const updated = await orders.updateItem(waiter, order.id, created.id, { quantity: 2 });
+    expect(Array.isArray(updated.modifiers)).toBe(true);
+    expect(updated.modifiers).toEqual([]);
+  });
 });
 
 describe("pricing", () => {

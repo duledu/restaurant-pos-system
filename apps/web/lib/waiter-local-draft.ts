@@ -117,7 +117,14 @@ export function createWaiterLocalDraft() {
         }
         const result = await request(`/api/pos/orders/${op.orderId}/items/${op.realItem!.id}`, "PATCH", { quantity: desired });
         serverQuantity = desired;
-        if (result.item?.id) op.realItem = result.item;
+        // Defense in depth alongside the server fix (order-service.ts
+        // updateItem) — only adopt this response as the new realItem if it
+        // actually carries a complete OrderItem shape. serverQuantity above
+        // already tracks the authoritative quantity independent of this
+        // object, so skipping a malformed response here costs nothing; the
+        // alternative (accepting it) previously wrote `modifiers: undefined`
+        // into live order state and crashed every `.modifiers.length` read.
+        if (result.item?.id && Array.isArray(result.item.modifiers)) op.realItem = result.item;
       }
       patchLine(op.tempId, () => ({ ...op.realItem!, quantity: serverQuantity, localStatus: undefined }));
       creates.delete(op.tempId);

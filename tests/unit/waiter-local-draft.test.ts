@@ -102,6 +102,40 @@ describe("instant local draft with delayed network", () => {
   it("unknown availability never inserts a local line", () => {
     const draft = session(); draft.add({ ...menu(), availability: null }, []); expect(draft.getSnapshot().order!.items).toEqual([]);
   });
+  // Physical PREPROD waiter crash fix — order-service.ts updateItem (PATCH
+  // quantity) used to return an OrderItem missing its `modifiers` relation.
+  // sendCreation merges exactly that PATCH response into live order state
+  // when a quantity change races an in-flight item creation (this exact
+  // sequence: add, create resolves, THEN a quantity change fires a PATCH).
+  // The old code (`if (result.item?.id) op.realItem = result.item;`) would
+  // adopt the incomplete response, writing `modifiers: undefined` into the
+  // rendered order and crashing every `.modifiers.length` read in
+  // order-client.tsx (DraftRow/HistoryRow) with "Cannot read properties of
+  // undefined (reading 'length')". This proves the fixed guard rejects an
+  // incomplete PATCH response instead of corrupting state, independent of
+  // the paired server-side fix (menu-modifiers.test.ts covers that half).
+  it("a malformed PATCH response missing `modifiers` never corrupts the rendered item (defense in depth)", async () => {
+    const withModifiers = { ...item("real1", "beer", 1), modifiers: [{ id: "m1", modifierOptionId: "opt1", groupName: "Dodaci", optionName: "Slanina", priceDelta: "150" }] };
+    const pending = deferred<ReturnType<typeof response>>();
+    vi.stubGlobal("fetch", vi.fn((_url, options) => {
+      if (options.method === "POST") return pending.promise;
+      // Simulates the old server bug: `modifiers` relation not included in the PATCH response.
+      const malformed = { ...withModifiers, quantity: JSON.parse(options.body).quantity } as Record<string, unknown>;
+      delete malformed.modifiers;
+      return Promise.resolve(response({ item: malformed }));
+    }));
+    const draft = session();
+    draft.add(menu(), []); // op.quantity = 1, POST in flight
+    const id = draft.getSnapshot().order!.items[0].id;
+    draft.changePending(id, 2); // desired quantity changes WHILE the create is still in flight (the real race)
+    pending.resolve(response({ item: withModifiers })); // create resolves with server quantity 1 -> triggers the confirming PATCH above
+    await draft.flush();
+    const finalItem = draft.getSnapshot().order!.items[0];
+    expect(finalItem.quantity).toBe(2); // quantity still tracked correctly...
+    expect(Array.isArray(finalItem.modifiers)).toBe(true); // ...but modifiers was never overwritten with undefined.
+    expect(finalItem.modifiers).toEqual(withModifiers.modifiers);
+  });
+
   it("failure reconciliation of a confirmed line preserves queued temporary lines", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     const draft = session(); draft.setOrder(previous => ({ ...previous!, items: [item("water", "water", 2)] }));
