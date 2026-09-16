@@ -116,6 +116,21 @@ export async function fetchPendingStationPrintJobs(station: "KITCHEN" | "BAR", l
   };
 }
 
+/**
+ * Primarna "Štampaj račun" akcija (konobarski /bill ekran) — Print Agent
+ * fizička QA ispravka. Server garantuje da autoritativan RECEIPT PrintJob
+ * postoji (idempotentno, isti dispatchKey kao automatski dispatch pri
+ * naplati — vidi printReceipt u print-service.ts); Windows Print Agent
+ * (potpuno nezavisna poll/claim petlja, drugi računar) ga preuzima i
+ * fizički štampa. NAMERNO ne poziva printAndConfirm/beginPrintJob/
+ * defaultPrintTransport — ovaj poziv NIKAD ne otvara browser print dijalog
+ * i NIKAD ne čeka fizičku štampu (samo dispatch, ne ACK).
+ */
+export async function printReceipt(orderId: string): Promise<PrintJob> {
+  const body = await apiFetch(`/api/pos/orders/${orderId}/receipt/print`, { method: "POST" });
+  return body.printJob as PrintJob;
+}
+
 export async function reprintReceipt(orderId: string): Promise<PrintJob> {
   const body = await apiFetch(`/api/pos/orders/${orderId}/receipt/reprint`, {
     method: "POST",

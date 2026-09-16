@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
 import { TicketPrintPanel, type TicketContent } from "../../../../../components/printing/TicketPrintPanel";
-import { fetchPrintJobs, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
+import { fetchPrintJobs, printReceipt, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
 
 interface BillItem {
   id: string;
@@ -62,6 +62,8 @@ export function BillClient({ tableId }: { tableId: string }) {
   const [printJob, setPrintJob] = useState<PrintJob | null>(null);
   const [printBusy, setPrintBusy] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
+  const [printFeedback, setPrintFeedback] = useState<string | null>(null);
+  const [browserPrintBusy, setBrowserPrintBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -109,13 +111,25 @@ export function BillClient({ tableId }: { tableId: string }) {
       .catch(() => {});
   }, [result, orderId]);
 
+  // Print Agent physical QA fix — the primary action must NEVER open the
+  // browser's own print dialog (window.print()/BrowserPrintTransport). It
+  // only asks the server to guarantee the authoritative RECEIPT PrintJob
+  // exists (idempotent — safe to call even if payment already auto-dispatched
+  // it, and safe to retry/double-click); the already-running Windows Print
+  // Agent claims and physically prints it independently, on its own poll
+  // loop, on whatever computer its RECEIPT route points to. This call never
+  // waits for that physical print to finish — only for the dispatch itself.
   async function handlePrint() {
-    if (!orderId || !printJob || printBusy) return;
+    if (!orderId || printBusy) return;
     setPrintBusy(true);
     setPrintError(null);
+    setPrintFeedback("Šaljem na štampač…");
     try {
-      await printAndConfirm(orderId, printJob.id);
+      const job = await printReceipt(orderId);
+      setPrintJob(job);
+      setPrintFeedback("Račun poslat na štampu");
     } catch (e) {
+      setPrintFeedback(null);
       setPrintError(e instanceof Error ? e.message : "Greška pri štampi");
     } finally {
       setPrintBusy(false);
@@ -126,14 +140,33 @@ export function BillClient({ tableId }: { tableId: string }) {
     if (!orderId || printBusy) return;
     setPrintBusy(true);
     setPrintError(null);
+    setPrintFeedback("Šaljem na štampač…");
     try {
       const job = await reprintReceipt(orderId);
       setPrintJob(job);
-      await printAndConfirm(orderId, job.id);
+      setPrintFeedback("Račun poslat na štampu");
     } catch (e) {
+      setPrintFeedback(null);
       setPrintError(e instanceof Error ? e.message : "Greška pri ponovnoj štampi");
     } finally {
       setPrintBusy(false);
+    }
+  }
+
+  // Emergency/manual fallback ONLY — kept for a computer without a paired
+  // Print Agent, opens the actual browser print dialog on THIS device.
+  // Deliberately secondary: never the default action, never triggered
+  // automatically, and only usable once a PrintJob is already known.
+  async function handleBrowserPrintFallback() {
+    if (!orderId || !printJob || browserPrintBusy) return;
+    setBrowserPrintBusy(true);
+    setPrintError(null);
+    try {
+      await printAndConfirm(orderId, printJob.id);
+    } catch (e) {
+      setPrintError(e instanceof Error ? e.message : "Greška pri štampi preko browsera");
+    } finally {
+      setBrowserPrintBusy(false);
     }
   }
 
@@ -221,13 +254,16 @@ export function BillClient({ tableId }: { tableId: string }) {
             </div>
           </div>
 
+          {printFeedback && !printError && (
+            <div className="mt-3 rounded-md bg-success-soft px-3 py-2 text-center text-sm text-success">{printFeedback}</div>
+          )}
           {printError && <div className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{printError}</div>}
 
           <div className="mt-4 grid grid-cols-2 gap-2">
             <button
               type="button"
               onClick={handlePrint}
-              disabled={!printJob || printBusy}
+              disabled={printBusy}
               className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
             >
               {printBusy ? "…" : "Štampaj račun"}
@@ -241,6 +277,17 @@ export function BillClient({ tableId }: { tableId: string }) {
               Ponovo štampaj
             </button>
           </div>
+
+          {printJob && (
+            <button
+              type="button"
+              onClick={handleBrowserPrintFallback}
+              disabled={browserPrintBusy}
+              className="mt-2 w-full text-center text-xs font-medium text-inkSoft underline decoration-line underline-offset-4 disabled:opacity-40"
+            >
+              {browserPrintBusy ? "…" : "Štampaj preko browsera (rezervna opcija)"}
+            </button>
+          )}
 
           <button
             onClick={() => router.push("/waiter/tables")}

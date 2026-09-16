@@ -670,6 +670,42 @@ export async function requestStationPrint(ctx: AuthContext, orderId: string, sta
 }
 
 /**
+ * Primarna "Štampaj račun" akcija na konobarskom /bill ekranu — Print Agent
+ * fizička QA ispravka (Chrome Print Preview root cause). Konobar/telefon
+ * NIKAD sam fizički ne štampa (window.print()/BrowserPrintTransport); ova
+ * funkcija samo garantuje da autoritativan RECEIPT PrintJob postoji, tačno
+ * onaj koji Windows Print Agent (agentPrinting.pollAndClaim, potpuno
+ * nezavisna petlja na drugom računaru) preuzima i fizički štampa na
+ * WorkstationPrintRoute RECEIPT-a — bez ijednog browser print dijaloga.
+ *
+ * NAMERNO isti `dispatchKey = receipt:${paymentId}` kao automatski dispatch
+ * pri naplati (billing-service.ts/split-bill-service.ts) — isti @@unique
+ * upsert red, NIKAD nova fizička kopija. Ovo pokriva TRI slučaja jednim
+ * kodom: (1) automatski dispatch pri naplati je već uspeo — ovaj poziv je
+ * bezopasan no-op koji vraća POSTOJEĆI red; (2) automatski dispatch je pao
+ * (try/catch u billing-service.ts namerno nikad ne obara samo plaćanje) —
+ * ovo je PRVA prilika da red uopšte nastane; (3) dupli klik/mrežni retry na
+ * OVO dugme — isti ključ, isti red, nikad drugi fizički otisak. `isReprint:
+ * false` — ovo NIJE reprint (nema receipt.reprinted audit zapis); svesna,
+ * eksplicitna reštampa i dalje ide isključivo kroz reprintReceipt ispod.
+ */
+export async function printReceipt(ctx: AuthContext, orderId: string) {
+  requirePermission(ctx, ORDERS_PRINT);
+  await loadOwnedOrder(ctx, orderId);
+
+  const receipt = await prisma.receipt.findFirst({
+    where: { orderId, ...scopeToRestaurant(ctx) },
+    orderBy: [{ issuedAt: "desc" }, { sequenceNumber: "desc" }],
+  });
+  if (!receipt) throw new Error("Račun nije pronađen — porudžbina još nije naplaćena");
+
+  const dispatchKey = `receipt:${receipt.paymentId}`;
+  await dispatchReceiptPrintJob(ctx, receipt.paymentId, { isReprint: false, dispatchKey, requestedBy: ctx.employeeId });
+
+  return prisma.printJob.findFirstOrThrow({ where: { orderId, dispatchKey } });
+}
+
+/**
  * Reprint kupčevog računa — NIKAD ne menja Order/Payment/Receipt niti bilo
  * koju prodajnu sumu (zahtev #6), samo ponovo generiše/vraća PrintJob za
  * ISTI zamrznuti Receipt. `idempotencyKey` generiše klijent po kliku (isti

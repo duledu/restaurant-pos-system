@@ -160,3 +160,100 @@ describe("receipt reprint: never mutates the order/payment/receipt it reprints",
     expect(content.total).toBe(receipt.total.toString());
   });
 });
+
+// Print Agent physical QA fix — waiter /bill "Štampaj račun" primary action
+// now calls printing.printReceipt (idempotent dispatch for the Windows Print
+// Agent to claim), never window.print()/BrowserPrintTransport. These tests
+// cover the server side of that fix: reuse of the SAME authoritative
+// pipeline as the automatic payment-time dispatch, RECEIPT type, no printer
+// hardcoded, permission/tenant isolation, and that this is NEVER treated as
+// (or audited as) a reprint.
+describe("primary waiter print dispatch (printReceipt): reuses the authoritative RECEIPT pipeline, never a reprint", () => {
+  it("returns the SAME PrintJob row the automatic payment-time dispatch already created — never a duplicate physical print", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order, payment } = await payOrder(fixture, waiter);
+
+    const autoDispatched = await prisma.printJob.findFirstOrThrow({ where: { orderId: order.id, type: "RECEIPT" } });
+    const clicked = await printing.printReceipt(waiter, order.id);
+
+    expect(clicked.id).toBe(autoDispatched.id);
+    expect(clicked.dispatchKey).toBe(`receipt:${payment.id}`);
+    expect(await prisma.printJob.count({ where: { orderId: order.id, type: "RECEIPT" } })).toBe(1);
+  });
+
+  it("uses type RECEIPT, is never marked/audited as a reprint, and preserves authoritative payment/receipt data", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order, receipt } = await payOrder(fixture, waiter);
+
+    const job = await printing.printReceipt(waiter, order.id);
+    expect(job.type).toBe("RECEIPT");
+    expect(job.isReprint).toBe(false);
+
+    const reprintAudit = await prisma.auditLog.findFirst({ where: { entityId: receipt.id, action: "receipt.reprinted" } });
+    expect(reprintAudit).toBeNull();
+
+    const content = job.content as { total: string; paymentMethod: string; items: { name: string }[] };
+    expect(content.total).toBe(receipt.total.toString());
+    expect(content.paymentMethod).toBe(receipt.paymentMethod);
+    expect(content.items[0].name).toBe("Burger");
+  });
+
+  it("does not hardcode a printer — content carries whatever paperWidthMm the RECEIPT route/printer config resolves to", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+
+    const job = await printing.printReceipt(waiter, order.id);
+    const content = job.content as { paperWidthMm?: number };
+    // No fixture-configured RECEIPT printer -> falls through to the existing
+    // default (80mm), proving the value is COMPUTED (getPrinterConfigForDispatch),
+    // never a literal printer name/width baked into printReceipt/print-client.
+    expect(content.paperWidthMm).toBe(80);
+  });
+
+  it("double-click / network retry never creates a second RECEIPT PrintJob", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+
+    const first = await printing.printReceipt(waiter, order.id);
+    const retry = await printing.printReceipt(waiter, order.id);
+    expect(retry.id).toBe(first.id);
+    expect(await prisma.printJob.count({ where: { orderId: order.id, type: "RECEIPT" } })).toBe(1);
+  });
+
+  it("an explicit reprint AFTER printReceipt still creates its own distinct, audited row", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order, receipt } = await payOrder(fixture, waiter);
+
+    const primary = await printing.printReceipt(waiter, order.id);
+    const reprint = await printing.reprintReceipt(waiter, order.id, randomUUID());
+
+    expect(reprint.id).not.toBe(primary.id);
+    expect(reprint.isReprint).toBe(true);
+    const reprintAudit = await prisma.auditLog.findFirst({ where: { entityId: receipt.id, action: "receipt.reprinted" } });
+    expect(reprintAudit).toBeTruthy();
+  });
+
+  it("rejects printReceipt from a caller without orders.print permission", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+
+    const kitchenCtx = context(fixture, "KITCHEN", "kitchen-1", ["production.view", "production.manage"]);
+    await expect(printing.printReceipt(kitchenCtx, order.id)).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects printReceipt for an order belonging to another restaurant", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+
+    const outsider = context(fixture, "MANAGER", "outsider");
+    outsider.restaurantId = fixture.otherRestaurantId;
+    await expect(printing.printReceipt(outsider, order.id)).rejects.toThrow("nije pronađena");
+  });
+});
