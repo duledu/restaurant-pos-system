@@ -116,24 +116,26 @@ export function RestaurantSettingsClient() {
                 />
               </div>
             ))}
-            <div className="flex items-start justify-between gap-4 rounded-md border border-line px-3 py-3">
-              <div>
+            <div className="flex items-start justify-between gap-4 rounded-md border border-line py-3 pl-3 pr-4">
+              <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-inkSoft">PDV rekapitulacija na računu</p>
                 <p className="mt-0.5 text-xs text-inkSoft">
                   Kad je isključeno, račun ne prikazuje Osnovica/PDV stavke — samo ukupan iznos i plaćanje.
                 </p>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={values.showTaxBreakdown}
-                onClick={() => setValues({ ...values, showTaxBreakdown: !values.showTaxBreakdown })}
-                className={`relative min-h-6 w-11 shrink-0 rounded-full transition-colors ${values.showTaxBreakdown ? "bg-graphite" : "bg-line"}`}
-              >
-                <span
-                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${values.showTaxBreakdown ? "translate-x-5" : "translate-x-0.5"}`}
-                />
-              </button>
+              <div className="shrink-0">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={values.showTaxBreakdown}
+                  onClick={() => setValues({ ...values, showTaxBreakdown: !values.showTaxBreakdown })}
+                  className={`relative min-h-6 w-11 shrink-0 rounded-full transition-colors ${values.showTaxBreakdown ? "bg-graphite" : "bg-line"}`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${values.showTaxBreakdown ? "translate-x-5" : "translate-x-0.5"}`}
+                  />
+                </button>
+              </div>
             </div>
             <button
               type="button"
