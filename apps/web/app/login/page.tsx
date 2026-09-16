@@ -95,7 +95,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={() => setMode("admin")}
-              className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+              className="block w-full px-2 text-xs font-medium leading-5 text-cream-300/60 hover:text-cream-300/90"
             >
               Administratorska prijava
             </button>
@@ -125,12 +125,12 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={() => setMode("admin")}
-              className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90"
+              className="block w-full px-2 text-xs font-medium leading-5 text-cream-300/60 hover:text-cream-300/90"
             >
               ← Administratorska prijava
             </button>
           )}
-          <InstallAppButton className="text-xs font-medium text-cream-300/60 hover:text-cream-300/90" />
+          <InstallAppButton className="block w-full px-2 text-xs font-medium leading-5 text-cream-300/60 hover:text-cream-300/90" />
         </div>
       </div>
     </main>
