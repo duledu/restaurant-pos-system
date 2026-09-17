@@ -739,7 +739,7 @@ describe("mounted persistent waiter shell", () => {
   it("does not render the menu grid while opening a confirmed-empty table's first order", async () => {
     custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ table: { id: "5", locationId: "l1" }, order: null }) : undefined;
     await render(h(OrderClient, { tableId: "5" }));
-    expect(host.textContent).toContain("Sto nema aktivnu porudžbinu");
+    expect(host.textContent).toContain("Sto je slobodno");
     expect(host.querySelector("input")).not.toBeNull(); // confirmed-empty: menu visible immediately, no fetch pending
     const opening = deferred<Response>();
     custom = (url, options) => url === "/api/pos/orders" && options?.method === "POST" ? opening.promise : undefined;

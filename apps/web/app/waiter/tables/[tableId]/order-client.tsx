@@ -335,6 +335,29 @@ function ModifierSelectionModal({
   );
 }
 
+// UI POLISH — one consistent sticky header treatment for every state of this
+// screen (initial load, free table, active order) instead of the free-table
+// states using a bare, unstyled fallback that read as a half-loaded/broken
+// page next to the fully-styled active-order header. Presentational only —
+// no behavior, no new controls (QuickLockButton/LogoutButton stay exactly
+// where they already were, only in the active-order state).
+function TableHeader({ eyebrow, title, onBack, right }: { eyebrow: string; title: string; onBack: () => void; right?: React.ReactNode }) {
+  return (
+    <div className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
+      <button onClick={onBack} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark transition-colors hover:text-gold">
+        ← Stolovi
+      </button>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">{eyebrow}</p>
+          <h1 className="text-xl font-bold tracking-tight text-ink">{title}</h1>
+        </div>
+        {right && <div className="flex items-center gap-1">{right}</div>}
+      </div>
+    </div>
+  );
+}
+
 export function OrderClient({ tableId }: { tableId: string }) {
   return <TableOrderClient key={tableId} tableId={tableId} />;
 }
@@ -809,32 +832,72 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const updateQuantity = useCommittedCallback(changeQuantity);
   const deleteItem = useCommittedCallback(removeItem);
 
+  const tableLabel = shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina";
+  const goToTables = () => { waiterNavigationStart(); router.push("/waiter/tables"); };
+
   if (!order && !inspected) return (
-    <div className="min-h-screen bg-cream-200 p-3" aria-busy={loading}>
-      <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
-      <h1 className="text-xl font-bold">{shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina"}</h1>
-      <div className="mx-auto flex min-h-[60vh] w-full max-w-5xl items-center justify-center">
-        <div role="status" className="rounded-lg border border-line bg-white p-6 text-center text-inkSoft">
-          <p>{loading ? "Pripremamo sto i porudžbinu…" : error ?? "Porudžbina nije dostupna"}</p>
-          {!loading && <button type="button" className="mt-3 min-h-12 rounded-md bg-gold-soft px-4 font-semibold text-gold-dark"
-            onClick={() => { loadRequest.current = null; setError(null); setLoading(true); setInspectionAttempt(value => value + 1); }}>Pokušaj ponovo</button>}
+    <div className="flex min-h-screen flex-col bg-cream-200" aria-busy={loading}>
+      <TableHeader eyebrow={loading ? "Priprema stola" : "Greška"} title={tableLabel} onBack={goToTables} />
+      <div className="mx-auto flex w-full max-w-5xl flex-1 items-center justify-center p-3">
+        <div role="status" className="w-full max-w-sm rounded-lg border border-line bg-white p-6 text-center shadow-card">
+          {loading ? (
+            <>
+              <span className="mx-auto mb-3 block h-2 w-2 animate-pulse-soft rounded-full bg-gold" aria-hidden="true" />
+              <p className="text-sm text-inkSoft">Pripremamo sto i porudžbinu…</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-inkSoft">{error ?? "Porudžbina nije dostupna"}</p>
+              <button type="button" className="mt-4 min-h-11 w-full rounded-md bg-gold-soft px-4 font-semibold text-gold-dark transition-colors hover:bg-gold/20"
+                onClick={() => { loadRequest.current = null; setError(null); setLoading(true); setInspectionAttempt(value => value + 1); }}>Pokušaj ponovo</button>
+            </>
+          )}
         </div>
       </div>
     </div>
   );
 
   if (!order) return (
-    <div className="min-h-screen bg-cream-200 p-3">
-      <div>
-      <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="min-h-11 text-gold-dark">← Stolovi</button>
-      <h1 className="text-xl font-bold">{shell.floors.flatMap(f => f.tables).find(t => t.id === tableId)?.label ?? "Porudžbina"}</h1>
-      </div>
-      <div className="mx-auto w-full max-w-5xl">
-      <p role="status" className="py-3">{loading ? "Otvaramo porudžbinu…" : error ?? "Sto nema aktivnu porudžbinu."}</p>
-      {!loading && !error && <button type="button" onClick={startOrder} className="min-h-12 rounded-md bg-gold px-5 py-3 font-semibold text-white">Započni porudžbinu</button>}
-      {/* Otvaranje porudžbine (loading) ne sme prikazati napola inicijalizovan
-          meni ispod statusa — isti princip kao "Pripremamo sto..." ranu grananje. */}
-      {!loading && <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />}
+    <div className="flex min-h-screen flex-col bg-cream-200">
+      <TableHeader eyebrow={loading ? "Provera stola" : error ? "Greška" : "Sto slobodno"} title={tableLabel} onBack={goToTables} />
+      <div className="mx-auto w-full max-w-5xl px-3">
+        {loading ? (
+          <p role="status" className="py-8 text-center text-sm text-inkSoft">Otvaramo porudžbinu…</p>
+        ) : error ? (
+          <div role="status" className="my-3 rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>
+        ) : (
+          // Compact, intentional POS empty state — never a giant marketing-style
+          // empty card. Communicates: table is free, no active order, waiter can
+          // start immediately. "Započni porudžbinu" keeps its exact existing
+          // onClick/behavior — visual styling only (see task boundary: its
+          // server flow is audited separately).
+          <div role="status" className="my-3 flex flex-col items-start gap-3 rounded-lg border border-line bg-white p-4 shadow-card sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-ink">Sto je slobodno</p>
+              <p className="mt-0.5 text-sm text-inkSoft">Nema aktivne porudžbine — počnite kad gost bude spreman.</p>
+            </div>
+            <button type="button" onClick={startOrder} className="min-h-12 w-full shrink-0 rounded-md bg-gold px-5 text-sm font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px sm:w-auto">
+              Započni porudžbinu
+            </button>
+          </div>
+        )}
+        {/* Otvaranje porudžbine (loading) ne sme prikazati napola inicijalizovan
+            meni ispod statusa — isti princip kao "Pripremamo sto..." ranu grananje.
+            UI POLISH: labeled as an explicit, dimmed PREVIEW (never clickable —
+            already disabled via submitting=true below, pointer-events-none here
+            is a purely visual reinforcement of that same existing state, not a
+            new restriction) so an inactive menu reads as deliberate, not broken. */}
+        {!loading && (
+          <>
+            <div className="mb-2 mt-1 flex items-center gap-2">
+              <p className="shrink-0 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Meni</p>
+              <div className="h-px flex-1 bg-line" aria-hidden="true" />
+            </div>
+            <div className="pointer-events-none -mx-3 opacity-50">
+              <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -851,7 +914,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   return (
     <div ref={rootRef} className="flex min-h-screen flex-col bg-cream-200 pb-[28rem] xl:pb-0">
       <div ref={headerRef} className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
-        <button onClick={() => { waiterNavigationStart(); router.push("/waiter/tables"); }} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark">
+        <button onClick={goToTables} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark transition-colors hover:text-gold">
           ← Stolovi
         </button>
         <div className="flex items-center justify-between gap-3">
@@ -886,8 +949,13 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           Below xl: this is an inert wrapper (no flex/height/etc. applied),
           so tablet/mobile keep the exact existing stacked/fixed-panel,
           whole-page-scrolls layout. */}
-      <div className="xl:mx-auto xl:flex xl:h-[calc(100dvh-var(--waiter-header-h))] xl:w-full xl:max-w-[1600px] xl:gap-4 xl:overflow-hidden xl:px-4 xl:pb-4">
-      <div className="mx-auto w-full max-w-5xl xl:mx-0 xl:h-full xl:min-w-0 xl:max-w-none xl:flex-[68] xl:overflow-y-auto xl:overscroll-contain">
+      <div className="xl:mx-auto xl:flex xl:h-[calc(100dvh-var(--waiter-header-h))] xl:w-full xl:max-w-[1600px] xl:gap-4 xl:overflow-hidden xl:px-4 xl:pb-4 xl:pt-4">
+      {/* UI POLISH — on xl: desktop, frame the menu column as the same kind
+          of white card/surface as the order panel to its right (border/
+          radius/shadow all reused from the SAME tokens), so the two columns
+          read as one coherent workspace instead of one "boxed" panel next
+          to loose, unframed content directly on the page background. */}
+      <div className="mx-auto w-full max-w-5xl xl:mx-0 xl:h-full xl:min-w-0 xl:max-w-none xl:flex-[68] xl:overflow-y-auto xl:overscroll-contain xl:rounded-lg xl:border xl:border-line xl:bg-white xl:shadow-card">
         {(error || draft.retryable) && <div className="mx-3 mt-3 rounded-md bg-danger/5 px-3 py-2 text-sm text-danger">{error ?? "Izmena nije potvrđena."}{draft.retryable && <button onClick={draft.retry} className="ml-3 min-h-11 underline">Pokušaj ponovo</button>}</div>}
 
         {/* FAZA 10: najistaknutija sekcija na ekranu kad postoji bar jedna
@@ -895,7 +963,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             Svaka stavka se potvrđuje NEZAVISNO (sopstveno dugme), nikad
             čekanje da CEO sto/porudžbina bude spremna odjednom. */}
         {readyItems.length > 0 && (
-          <div className="m-3 rounded-md border-2 border-gold bg-gold-soft p-3">
+          <div className="m-3 rounded-lg border-2 border-gold bg-gold-soft p-3">
             <p className="mb-2 text-[10px] font-bold uppercase tracking-[.16em] text-gold-dark">Spremno za preuzimanje</p>
             <div className="space-y-2">
               {readyItems.map((item) => (
@@ -931,7 +999,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
                 na mobilnom sa otvorenom tastaturom dok konobar kuca pretragu),
                 što je izgledalo kao da pretraga "ne vraća ništa" iako je meni
                 bio ispravno učitan — samo nedostupan bez dužeg skrolovanja. */}
-            <div className="max-h-[24dvh] space-y-2 overflow-y-auto rounded-md border border-line bg-white p-3">
+            <div className="max-h-[24dvh] space-y-2 overflow-y-auto rounded-lg border border-line bg-white p-3">
               {sentItems.map(item => <HistoryRow key={item.id} item={item} canVoid={canVoid} setVoidingItem={setVoidingItem} />)}
             </div>
 
@@ -992,12 +1060,12 @@ function TableOrderClient({ tableId }: { tableId: string }) {
               searchInputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
               searchInputRef.current?.focus();
             }}
-            className="mx-3 mt-2 flex min-h-14 w-[calc(100%-1.5rem)] items-center justify-center gap-2 rounded-md bg-gold text-base font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px"
+            className="mx-3 mt-2 flex min-h-14 w-[calc(100%-1.5rem)] items-center justify-center gap-2 rounded-md bg-gold text-base font-bold text-white shadow-sm transition-colors hover:bg-gold-dark active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-dark/60 focus-visible:ring-offset-2"
           >
             + Dodaj još u porudžbinu
           </button>
         ) : (
-          <p className="mx-3 mt-1 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Izaberi artikle</p>
+          <p className="mx-3 mb-1 mt-3 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Izaberi artikle</p>
         )}
 
         <MenuBrowser key="menu" items={items} categories={categories} submitting={submitting} tapMenu={tapMenu} searchInputRef={searchInputRef} />
@@ -1034,7 +1102,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           (naziv/količina/cena/total) na bilo kojoj desktop rezoluciji —
           nikad se ne skuplja ispod min-w bez obzira na flex-shrink. */}
       <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:static xl:inset-auto xl:h-full xl:max-h-none xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line/70 px-3 py-2 xl:mx-0 xl:max-w-none"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-md bg-ink/[.06] px-2 py-1 text-xs font-semibold tabular-nums">{draftCount} stavki</span></div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line bg-cream-200/70 px-3 py-2.5 xl:mx-0 xl:max-w-none xl:rounded-t-lg"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-full bg-ink/[.07] px-2.5 py-1 text-xs font-semibold tabular-nums text-ink/80">{draftCount} stavki</span></div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
@@ -1055,16 +1123,16 @@ function TableOrderClient({ tableId }: { tableId: string }) {
               every submitted/served row underneath itself. */}
           {draftItems.map(item => <DraftRow key={item.id} item={item} canEditModifiers={(itemById.get(item.menuItemId ?? "")?.modifierGroups.length ?? 0) > 0} cartBusy={cartBusy} submitting={submitting} hasEverSubmitted={hasEverSubmitted} setEditingModifiersFor={setEditingModifiersFor} changeQuantity={updateQuantity} removeItem={deleteItem} />)}
         </div>
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line px-3 py-2.5">
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line bg-cream-200/70 px-3 py-3">
           <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno (novo)</span>
           <span className="text-2xl font-bold tabular-nums tracking-tight text-ink">{draftTotal.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
           </span>
         </div>
-        <div className="mx-auto w-full max-w-5xl shrink-0 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))]">
+        <div className="mx-auto w-full max-w-5xl shrink-0 bg-cream-200/70 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] xl:rounded-b-lg xl:pb-3">
           <button
             onClick={submit}
             disabled={submitting || draftItems.length === 0}
-            className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
+            className="min-h-14 w-full rounded-md bg-gold py-3 text-lg font-bold text-white shadow-sm transition-colors active:translate-y-px disabled:opacity-40 enabled:hover:bg-gold-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-dark/60 focus-visible:ring-offset-2"
           >
             {submitting ? "Slanje…" : hasEverSubmitted ? "Pošalji nove stavke" : "Pošalji porudžbinu"}
           </button>
@@ -1126,7 +1194,7 @@ const QuickActionSlider = memo(function QuickActionSlider({ title, selections, i
         const label = [menu.name, ...names].join(" · ");
         return <button key={JSON.stringify([selection.menuItemId, [...selection.options].sort()])} type="button" aria-label={`Brzo dodaj — ${label}`} disabled={submitting}
           onClick={() => add(selection.menuItemId, selection.options)}
-          className="min-h-12 shrink-0 rounded-md border border-line px-4 text-sm font-semibold text-ink disabled:opacity-50">
+          className="min-h-12 shrink-0 rounded-md border border-line bg-cream-200/60 px-4 text-sm font-semibold text-ink transition-colors enabled:hover:border-gold/50 enabled:hover:bg-white disabled:opacity-50">
           {label} <span className="text-gold-dark">+1</span>{selection.source === "favorite" && <span className="ml-1 text-xs text-inkSoft">★</span>}
         </button>;
       })}
@@ -1169,7 +1237,7 @@ const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMen
                 onClick={() => handleTapMenuItem(item)}
                 disabled={submitting || isBlocked}
                 aria-disabled={isBlocked}
-                className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-all active:translate-y-px active:scale-[.98] disabled:opacity-60 ${
+                className={`flex min-h-[104px] flex-col justify-between rounded-lg border p-4 text-left shadow-sm transition-[border-color,box-shadow,transform] duration-150 active:translate-y-px active:scale-[.98] disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold/50 focus-visible:ring-offset-1 ${
                   isUnavailable
                     ? "border-danger/50 bg-danger-soft"
                     : notConfigured
@@ -1212,18 +1280,31 @@ const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMen
               </button>
             );
           })}
-          {visibleItems.length === 0 && <div className="col-span-full py-8 text-center text-ink/55">Nema artikala.</div>}
+          {visibleItems.length === 0 && (
+            <div className="col-span-full rounded-lg border border-dashed border-line py-10 text-center text-sm text-ink/50">Nema artikala.</div>
+          )}
         </div>
   );
 });
 
-const CategoryNavigation = memo(function CategoryNavigation({ categories, activeCategoryId, setActiveCategoryId }: { categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; activeCategoryId: string | null; setActiveCategoryId: (id: string) => void }) { return (<div className="sticky top-[73px] z-10 flex gap-2 overflow-x-auto border-y border-line/70 bg-cream-200/95 px-3 py-2 backdrop-blur">
+const CategoryNavigation = memo(function CategoryNavigation({ categories, activeCategoryId, setActiveCategoryId }: { categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; activeCategoryId: string | null; setActiveCategoryId: (id: string) => void }) { return (
+        // UI POLISH — the offset used to be a guessed top-[73px], which
+        // silently drifted out of sync with the header's real height (a
+        // hardcoded copy of the exact class of bug --waiter-header-h was
+        // introduced to fix, see the split-view height calc above). On
+        // mobile/tablet this bar sticks within the whole PAGE's own scroll
+        // (the header is a real sibling above it, so it needs the header's
+        // measured height as its offset); on xl: desktop this same bar
+        // sticks within the MENU COLUMN's own independent scroll box
+        // instead (see the split-view wrapper above) — the global header
+        // isn't part of that box at all, so the correct offset there is 0.
+        <div className="sticky top-[var(--waiter-header-h)] z-10 flex gap-2 overflow-x-auto border-y border-line/70 bg-cream-200/95 px-3 py-2 backdrop-blur xl:top-0">
             {categories.map((c) => (
               <button
                 key={c.id}
                 onClick={() => setActiveCategoryId(c.id)}
-                className={`min-h-11 whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-semibold transition-all ${
-                  activeCategoryId === c.id ? "bg-graphite text-white shadow-card" : "border border-line bg-white text-ink/75 hover:border-gold/50"
+                className={`min-h-11 shrink-0 whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-semibold transition-colors ${
+                  activeCategoryId === c.id ? "bg-graphite text-white shadow-card" : "border border-line bg-white text-ink/70 hover:border-gold/50 hover:text-ink"
                 }`}
               >
                 {c.name}
@@ -1231,15 +1312,17 @@ const CategoryNavigation = memo(function CategoryNavigation({ categories, active
           ))}
         </div>); });
 
-const HistoryRow = memo(function HistoryRow({ item, canVoid, setVoidingItem }: { item: OrderItem; canVoid: boolean; setVoidingItem: (item: OrderItem) => void }) { return (<div className="flex items-center justify-between border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
-                  <div>
+const HistoryRow = memo(function HistoryRow({ item, canVoid, setVoidingItem }: { item: OrderItem; canVoid: boolean; setVoidingItem: (item: OrderItem) => void }) { return (<div className="flex items-start justify-between gap-2 border-b border-line/50 pb-2 text-sm last:border-0 last:pb-0">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-ink">
                       {item.quantity}× {item.name}
                     </div>
                     {item.modifiers.length > 0 && (
                       <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
                     )}
-                    {item.note && <div className="text-xs text-inkSoft italic">„{item.note}“</div>}
+                    {/* Long waiter notes must wrap within their own column,
+                        never force the row to overflow horizontally. */}
+                    {item.note && <div className="break-words text-xs italic text-inkSoft">„{item.note}“</div>}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${ITEM_STATUS_TONE[item.status]}`}>
@@ -1284,23 +1367,26 @@ const DraftRow = memo(function DraftRow({ item, canEditModifiers, cartBusy, subm
                 </span>
               </div>
               <div className="mt-1.5 flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
+                {/* Grouped as one stepper (shared border, no gap) but each
+                    hit target stays the full 44px minimum — grouping must
+                    never come at the cost of touch-target size. */}
+                <div className="flex items-center rounded-md border border-line bg-cream-200">
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity - 1)}
                     disabled={submitting}
                     aria-label={`Umanji količinu — ${item.name}`}
-                    className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
+                    className="flex h-11 w-11 items-center justify-center rounded-l-md text-base font-semibold text-ink transition-colors active:translate-y-px enabled:hover:bg-white disabled:opacity-40"
                   >
                     −
                   </button>
-                  <span className="w-6 text-center font-medium text-ink">{item.quantity}</span>
+                  <span className="w-7 text-center font-semibold tabular-nums text-ink">{item.quantity}</span>
                   <button
                     type="button"
                     onClick={() => changeQuantity(item, item.quantity + 1)}
                     disabled={submitting || item.quantity >= 50}
                     aria-label={`Povećaj količinu — ${item.name}`}
-                    className="flex h-11 w-11 items-center justify-center rounded-md border border-line bg-cream-200 text-base font-semibold text-ink active:translate-y-px disabled:opacity-40"
+                    className="flex h-11 w-11 items-center justify-center rounded-r-md text-base font-semibold text-ink transition-colors active:translate-y-px enabled:hover:bg-white disabled:opacity-40"
                   >
                     +
                   </button>
@@ -1309,7 +1395,7 @@ const DraftRow = memo(function DraftRow({ item, canEditModifiers, cartBusy, subm
                   onClick={() => removeItem(item.id)}
                   disabled={submitting}
                   aria-label={`Ukloni — ${item.name}`}
-                  className="px-2 py-2 text-xs text-danger/55 disabled:opacity-40"
+                  className="rounded-md px-2.5 py-2 text-xs font-medium text-danger/70 transition-colors enabled:hover:bg-danger-soft disabled:opacity-40"
                 >
                   Ukloni
                 </button>
@@ -1335,8 +1421,8 @@ const SectionSwitch = memo(function SectionSwitch({ section, setSection }: { sec
           role="tab"
           aria-selected={section === value}
           onClick={() => setSection(value)}
-          className={`min-h-9 rounded px-5 text-sm font-bold transition-all ${
-            section === value ? "bg-graphite text-white shadow-card" : "text-ink/60"
+          className={`min-h-9 rounded-sm px-5 text-sm font-bold transition-colors ${
+            section === value ? "bg-graphite text-white shadow-card" : "text-ink/55 hover:text-ink"
           }`}
         >
           {SECTION_LABEL[value]}
@@ -1370,14 +1456,20 @@ const MenuBrowser = memo(function MenuBrowser({ items, categories, submitting, t
   );
   const visibleItems = useMemo(() => search.trim() ? matches.slice(0, resultLimit) : matches, [matches, resultLimit, search]);
 return (<>
-        <input
-          ref={searchInputRef}
-          onFocus={(e) => e.currentTarget.scrollIntoView({ behavior: "smooth", block: "start" })}
-          className="m-3 h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 text-base shadow-sm focus:border-gold focus:outline-none"
-          placeholder="Pretraga menija…"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setResultLimit(60); }}
-        />
+        <div className="relative m-3">
+          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink/35">
+            <circle cx="8.5" cy="8.5" r="6" stroke="currentColor" strokeWidth="1.6" />
+            <path d="M13 13L17.5 17.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+          <input
+            ref={searchInputRef}
+            onFocus={(e) => e.currentTarget.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="h-12 w-full rounded-md border border-line bg-white pl-10 pr-4 text-base text-ink shadow-sm transition-shadow placeholder:text-ink/35 focus:border-gold focus:shadow-[0_0_0_3px_theme(colors.gold.soft)] focus:outline-none"
+            placeholder="Pretraga menija…"
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setResultLimit(60); }}
+          />
+        </div>
 
         {/* Section switch stays visible during search too, so switching
             KUHINJA<->ŠANK never requires clearing an in-progress search. */}
@@ -1386,6 +1478,6 @@ return (<>
         {!search && <CategoryNavigation categories={sectionCategories} activeCategoryId={activeCategoryId} setActiveCategoryId={setActiveCategoryId} />}
 
         <MenuGrid visibleItems={visibleItems} submitting={submitting} handleTapMenuItem={tapMenu} />
-        {visibleItems.length < matches.length && <button type="button" onClick={() => setResultLimit(limit => limit + 60)} className="mx-3 mb-3 min-h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 py-3 font-semibold text-gold-dark">Prikaži još · {visibleItems.length} od {matches.length}</button>}
+        {visibleItems.length < matches.length && <button type="button" onClick={() => setResultLimit(limit => limit + 60)} className="mx-3 mb-3 min-h-12 w-[calc(100%-1.5rem)] rounded-md border border-line bg-white px-4 py-3 font-semibold text-gold-dark transition-colors hover:bg-gold-soft/40">Prikaži još · {visibleItems.length} od {matches.length}</button>}
 </>);
 });
