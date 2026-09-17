@@ -85,6 +85,25 @@ export const workstationHeartbeatRouteSchema = z.object({
   printerAvailable: z.boolean(),
 });
 
+// PRINTING P0 — Service-side visibility probe. The Agent runs locally as
+// NT SERVICE\TableCorePrintAgent (per-service virtual account) and
+// enumerates printers under that identity — distinct from what the
+// interactive Setup (logged-in user) sees. Per-user installs are the
+// most common silent failure mode (paper comes out for "Test Print" from
+// Setup, real orders fail because the Service cannot see the printer).
+// The Agent probes on every heartbeat via the `visible` field on each
+// route entry; the server persists the latest result per route so the
+// Setup wizard can surface a human-friendly error before declaring READY.
+// `visible` is OPTIONAL for backward compatibility with older agent
+// builds that only knew about `printerAvailable` (the post-attempt
+// result). New agent builds always send both. The route schema is
+// defined inline here so the heartbeat schema below can reference it
+// without circular-import gymnastics with workstation-service.ts.
+export const workstationHeartbeatRouteV2Schema = workstationHeartbeatRouteSchema.extend({
+  visible: z.boolean().nullable().optional(),
+});
+export type WorkstationHeartbeatRouteV2 = z.infer<typeof workstationHeartbeatRouteV2Schema>;
+
 export const workstationHeartbeatSchema = z.object({
   agentVersion: z.string().trim().min(1).max(50).optional(),
   osDescription: z.string().trim().min(1).max(200).optional(),
@@ -100,8 +119,13 @@ export const workstationHeartbeatSchema = z.object({
   // Printing V2 — pun spisak Windows štampača (WindowsPrinter.Enumerate())
   // da bi Admin birao štampač iz stvarne liste te mašine.
   availablePrinters: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
-  // Printing V2 — po-ruti dostupnost konfigurisanog štampača te rute.
-  routes: z.array(workstationHeartbeatRouteSchema).max(10).optional(),
+  // PRINTING V2 + P0 — po-ruti dostupnost konfigurisanog štampača te rute.
+  // Accepts the v2 (extended with `visible`) shape so the server can
+  // distinguish "Agent just confirmed this route's printer is visible to
+  // the Service identity" (pre-attempt probe, written to
+  // visibleToService) from "the last print attempt for this route
+  // succeeded/failed" (post-attempt, written to printerAvailable).
+  routes: z.array(workstationHeartbeatRouteV2Schema).max(10).optional(),
 });
 export type WorkstationHeartbeatInput = z.infer<typeof workstationHeartbeatSchema>;
 
@@ -132,3 +156,31 @@ export const agentTestPrintResultSchema = z.object({
   errorMessage: z.string().trim().max(500).optional(),
 });
 export type AgentTestPrintResultInput = z.infer<typeof agentTestPrintResultSchema>;
+
+// PRINTING P0 — Setup wizard's HUMAN CONFIRMATION step. The Setup runs
+// unauthenticated (the user has not yet bound an employee session to the
+// freshly-paired Agent); the only actor it can prove is the workstation
+// itself. The wizard's "Da, test tiket je uspešno odštampan" button POSTs
+// here through the agent (which already authenticates via the Agent's
+// bearer credential — not via an employee ctx), and the server marks the
+// route physically-confirmed. Re-saving a route from Admin later resets
+// this flag (workstation-service.upsertPrintRoute).
+export const agentPhysicalConfirmationSchema = z.object({
+  type: printRouteTypeSchema,
+});
+export type AgentPhysicalConfirmationInput = z.infer<typeof agentPhysicalConfirmationSchema>;
+
+// PRINTING P0 — operator reconciliation surface for SUBMISSION_UNKNOWN
+// PrintJob. The Agent poll query already filters status='PENDING', so
+// a SUBMISSION_UNKNOWN job is structurally never auto-reclaimed by any
+// future Agent poll. These two endpoints are the ONLY way out of that
+// terminal state, both audited, both idempotent.
+export const acknowledgePrintAmbiguitySchema = z.object({
+  // What the operator saw at the printer:
+  //   "PRINTED" = operator confirms the ticket did come out (status -> PRINTED)
+  //   "REPRINT" = operator wants another physical copy (creates a NEW
+  //               PrintJob row marked isReprint=true pointing here; the
+  //               original stays SUBMISSION_UNKNOWN, audited)
+  decision: z.enum(["PRINTED", "REPRINT"]),
+});
+export type AcknowledgePrintAmbiguityInput = z.infer<typeof acknowledgePrintAmbiguitySchema>;

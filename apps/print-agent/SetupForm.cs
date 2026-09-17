@@ -71,8 +71,8 @@ public sealed class SetupForm : Form
     // meri STVARNU visinu teksta pri TRENUTNOM DPI/font skaliranju i uvek
     // ostavlja Padding oko nje — ispravno na 100/125/150% bez potrebe da se
     // cela forma uveličava.
-    private readonly Button _testPrintButton = new() { Text = "Test štampa", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
-    private readonly Button _saveButton = new() { Text = "Sačuvaj podešavanja", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
+    private readonly Button _testPrintButton = new() { Text = "Probna štampa (dijagnostika)", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
+    private readonly Button _saveButton = new() { Text = "Testiraj i završi podešavanje", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
     // PREPROD physical QA follow-up (Part A1) — isti "rezervisan prostor,
     // fiksna visina" obrazac kao _pairFeedbackLabel iznad (namerno
     // ODVOJENO od njega: ovo je povratna informacija za Sačuvaj, ne za
@@ -436,20 +436,38 @@ public sealed class SetupForm : Form
     }
 
     /// <summary>
-    /// Printing V2 — routes are server-authoritative and no longer chosen in
-    /// Setup at all (see WorkstationsPanel.tsx "Rute štampe"). This button's
-    /// job shrinks to: confirm pairing actually works end-to-end by doing a
-    /// REAL heartbeat (reporting this machine's full printer list) and
-    /// pulling down whatever routes the server currently has for this
-    /// workstation, persisting them locally exactly like the running
-    /// service would (AgentRunner.ApplyServerRoutes) — so Setup can show a
-    /// real, proven "N rute učitane" confirmation instead of just "file
-    /// written to disk". Zero routes configured yet is NOT an error (Admin
-    /// may not have set any up); Setup still closes, and the background
-    /// service will pick up routes automatically the moment Admin adds one
-    /// — see PREPROD physical QA follow-up (Part A1) note below for why
-    /// this only closes on a CONFIRMED server round-trip, never a bare local
-    /// write.
+    /// PRINTING P0 — the wizard's main entry point. After pairing is
+    /// confirmed, this drives:
+    ///
+    ///   DETECT      → heartbeat pulls (a) the server's authoritative route
+    ///                 list for this workstation AND (b) per-route readiness
+    ///                 (visibleToService, physicalTestConfirmed) in a single
+    ///                 round-trip.
+    ///   CONFIGURE   → routes are server-authoritative (chosen in Admin),
+    ///                 NOT in this wizard. The wizard only VERIFIES them.
+    ///   PHYSICAL    → for each enabled route, runs the EXACT same
+    ///   TEST          WindowsPrinter.Print physical layer used by real
+    ///                 jobs (Ticket.TestPrint per type), one route at a time.
+    ///   HUMAN       → after every successful physical test, asks the
+    ///   CONFIRMATION  operator "Da li je test tiket uspešno odštampan?"
+    ///                 — spooler success alone is NEVER sufficient. The
+    ///                 operator's YES is forwarded to the server via
+    ///                 /api/agent/routes/{type}/confirm-physical and
+    ///                 persisted as physicalTestConfirmed=true.
+    ///   READY       → only declared when EVERY enabled route has
+    ///                 visibleToService=true AND physicalTestConfirmed=true.
+    ///                 Until then, Setup stays open and surfaces the next
+    ///                 step the operator must take.
+    ///
+    /// The Service-side visibility check is enforced HERE, before any
+    /// physical test. If Setup enumerates a printer (logged-in user
+    /// context) but the running Service identity (NT SERVICE\
+    /// TableCorePrintAgent) cannot, the wizard blocks with a clear,
+    /// actionable Serbian error — NO mention of "service identity",
+    /// "per-user install", or PowerShell. The next step is "odštampaj ovaj
+    /// tiket sa bilo kog drugog uređaja da potvrdiš da štampač radi,
+    /// pa ponovo pokreni podešavanje posle reinstalacije drajvera za
+    /// sve korisnike".
     /// </summary>
     private async Task OnSave()
     {
@@ -463,8 +481,8 @@ public sealed class SetupForm : Form
 
         _saveButton.Enabled = false;
         var previousSaveText = _saveButton.Text;
-        _saveButton.Text = "Povezivanje…";
-        _saveFeedbackLabel.Text = "Preuzimanje ruta štampe sa servera…";
+        _saveButton.Text = "DETEKCIJA…";
+        _saveFeedbackLabel.Text = "Preuzimanje ruta štampe sa servera i provera dostupnosti…";
         _saveFeedbackLabel.ForeColor = SystemColors.GrayText;
         try
         {
@@ -479,11 +497,6 @@ public sealed class SetupForm : Form
 
             if (!outcome.Success)
             {
-                // PREPROD physical QA follow-up (Part A1) — "Do NOT close on
-                // failure": server nije potvrdio povezivanje, prozor ostaje
-                // otvoren. Professional error UX audit — poruka ostaje
-                // kategorična bez nagađanja uzroka (stvaran slučaj koji je
-                // ovo otkrio bio je nedostajuće propusno zaglavlje, ne mreža).
                 _saveFeedbackLabel.Text = "Server trenutno nije potvrdio povezivanje. Pokušajte ponovo za par trenutaka pre zatvaranja.";
                 _saveFeedbackLabel.ForeColor = Color.Firebrick;
                 _saveButton.Enabled = true;
@@ -491,6 +504,7 @@ public sealed class SetupForm : Form
                 return;
             }
 
+            // Persist routes locally — same as the running Service would.
             if (outcome.Routes.Count > 0)
             {
                 var config = new AgentConfig([.. outcome.Routes.Select(r => new PrintRoute(r.Type, r.PrinterName, r.PaperWidthMm))]);
@@ -498,26 +512,137 @@ public sealed class SetupForm : Form
                 File.WriteAllText(tempPath, config.ToJson());
                 File.Move(tempPath, AgentPaths.ConfigFilePath, overwrite: true);
                 _configuredRouteCount = outcome.Routes.Count;
-                _saveFeedbackLabel.Text = $"✓ Povezano — {outcome.Routes.Count} {(outcome.Routes.Count == 1 ? "ruta štampe učitana" : "rute štampe učitane")}.";
             }
             else
             {
                 _configuredRouteCount = 0;
-                _saveFeedbackLabel.Text = "✓ Povezano. Rute štampe još nisu podešene — podesi ih u Admin panelu, servis će ih automatski preuzeti.";
+                _saveFeedbackLabel.Text = "✓ Povezano. Rute štampe još nisu podešene — podesi ih u Admin panelu (Podešavanja → Štampači), pa ponovo pokreni podešavanje na ovom računaru.";
+                _saveFeedbackLabel.ForeColor = Color.FromArgb(0x1E, 0x7A, 0x3C);
+                RefreshStatus(paired: true);
+                _saveButton.Enabled = true;
+                _saveButton.Text = previousSaveText;
+                return;
             }
+
+            // ─────────────────────────────────────────────────────────────
+            // PRINTING P0 — wizard steps.
+            // ─────────────────────────────────────────────────────────────
+
+            // ── STEP 1: Service-side visibility ─────────────────────────
+            var invisible = outcome.RouteReadiness
+                .Where(r => r.Readiness == "AGENT_CANNOT_SEE")
+                .ToList();
+            if (invisible.Count > 0)
+            {
+                var list = string.Join("\n", invisible.Select(r => $"  • {r.Type}: štampač {r.PrinterName} (Setup ga vidi, ali servis ga ne vidi)"));
+                var msg =
+                    "TableCore servis ne može da pristupi izabranom štampaču.\n\n" +
+                    "Servis koji štampa tikete radi u pozadini i nema pristup štampačima koji su instalirani samo za jednog korisnika. " +
+                    "Ovo je najčešći razlog zašto štampa radi iz ovog prozora, ali ne i za stvarne porudžbine.\n\n" +
+                    "Šta da uradite:\n" +
+                    "  1. Ponovo instalirajte drajver štampača i izaberite opciju \"Za sve korisnike\" (ili \"Everyone\").\n" +
+                    "  2. Restartujte ovaj računar.\n" +
+                    "  3. Pokrenite TableCore Print Agent ponovo.\n\n" +
+                    "Štampači na kojima servis ne vidi izabrano:\n" + list + "\n\n" +
+                    "Podešavanje se ne može završiti dok se ovo ne reši.";
+                MessageBox.Show(this, msg, "TableCore — štampač nije dostupan servisu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _saveFeedbackLabel.Text = "✗ Nije moguće završiti podešavanje — servis ne vidi izabrane štampače. Ponovo instalirajte drajvere i restartujte računar.";
+                _saveFeedbackLabel.ForeColor = Color.Firebrick;
+                _saveButton.Enabled = true;
+                _saveButton.Text = previousSaveText;
+                return;
+            }
+
+            // ── STEP 2 + 3: Physical test + human confirmation, per route ──
+            foreach (var readiness in outcome.RouteReadiness)
+            {
+                if (readiness.PhysicalTestConfirmed) continue; // already confirmed by a previous run — skip
+                if (readiness.Readiness == "PENDING_PROBE")
+                {
+                    // Server hasn't run the visibility probe yet (very
+                    // first heartbeat after route configuration). The next
+                    // heartbeat (which the running Service performs every
+                    // ~25s) will fill this in; for the wizard's purposes
+                    // we treat this as "not yet visible" and refuse to
+                    // run a test that could mislead the operator.
+                    _saveFeedbackLabel.Text =
+                        $"Ruta {readiness.Type} još nije proverena. Sačekajte par sekundi i kliknite ponovo.";
+                    _saveFeedbackLabel.ForeColor = Color.FromArgb(0xC0, 0x6A, 0x00);
+                    _saveButton.Enabled = true;
+                    _saveButton.Text = previousSaveText;
+                    return;
+                }
+
+                // FIZIČKI TEST ŠTAMPE — through the SAME WindowsPrinter.Print
+                // path used by real PrintJobs (Ticket.TestPrint per type,
+                // identical printer enumeration + page sizing + retry loop).
+                _saveButton.Text = $"TEST ŠTAMPE — {readiness.Type}";
+                _saveFeedbackLabel.Text = $"Štampam test tiket za {readiness.Type} ({readiness.PrinterName}, {readiness.PaperWidthMm}mm)…";
+                _saveFeedbackLabel.ForeColor = SystemColors.GrayText;
+                var route = new PrintRoute(readiness.Type, readiness.PrinterName, readiness.PaperWidthMm);
+                var ticket = Ticket.TestPrint(Environment.MachineName, readiness.Type, readiness.PrinterName, readiness.PaperWidthMm, AgentVersion.Current);
+                var outcome2 = WindowsPrinter.Print(route, ticket, "wizard-" + Guid.NewGuid().ToString("N"));
+
+                if (outcome2.Status != "SUBMITTED_TO_SPOOLER")
+                {
+                    var msg =
+                        $"Test štampa za rutu {readiness.Type} NIJE uspela.\n\n" +
+                        $"Štampač: {readiness.PrinterName}\n" +
+                        $"Windows poruka: {outcome2.Error ?? "(nema dodatnih detalja)"}\n\n" +
+                        $"Proverite da je štampač uključen i da ima papira, pa kliknite \"{previousSaveText}\" ponovo.";
+                    MessageBox.Show(this, msg, "TableCore — test štampa neuspešna", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    _saveFeedbackLabel.Text = $"✗ Test štampa za {readiness.Type} neuspešna — {outcome2.Error}";
+                    _saveFeedbackLabel.ForeColor = Color.Firebrick;
+                    _saveButton.Enabled = true;
+                    _saveButton.Text = previousSaveText;
+                    return;
+                }
+
+                // HUMAN CONFIRMATION — the gate that distinguishes "spooler
+                // accepted" from "physical paper came out correctly". Only
+                // an explicit YES flips physicalTestConfirmed on the server.
+                var askMsg =
+                    $"TEST ŠTAMPE — RUTA {readiness.Type}\n\n" +
+                    $"Štampač: {readiness.PrinterName}\n" +
+                    $"Širina papira: {readiness.PaperWidthMm} mm\n\n" +
+                    $"Test tiket je upravo poslat na štampač.\n\n" +
+                    $"Da li je test tiket fizički izašao iz štampača i da li je čitljiv?";
+                var ask = MessageBox.Show(this, askMsg, $"TableCore — potvrda za {readiness.Type}", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (ask != DialogResult.Yes)
+                {
+                    _saveFeedbackLabel.Text =
+                        $"Ruta {readiness.Type} NIJE fizički potvrđena. " +
+                        "Proverite štampač, pa kliknite dugme ponovo.";
+                    _saveFeedbackLabel.ForeColor = Color.FromArgb(0xC0, 0x6A, 0x00);
+                    _saveButton.Enabled = true;
+                    _saveButton.Text = previousSaveText;
+                    return;
+                }
+
+                var confirmed = await DeliveryClient.ConfirmPhysicalTest(_endpoint.BaseUrl, credential, readiness.Type);
+                if (!confirmed)
+                {
+                    _saveFeedbackLabel.Text = $"Nije moguće zabeležiti fizičku potvrdu za {readiness.Type}. Pokušajte ponovo.";
+                    _saveFeedbackLabel.ForeColor = Color.Firebrick;
+                    _saveButton.Enabled = true;
+                    _saveButton.Text = previousSaveText;
+                    return;
+                }
+            }
+
+            // ── STEP 4: READY ─────────────────────────────────────────────
+            _saveButton.Text = "✓ SPREMAN";
+            _saveFeedbackLabel.Text =
+                $"✓ Sve rute štampe su fizički proverene i potvrđene.\n" +
+                $"TableCore Print Agent je spreman za rad.";
             _saveFeedbackLabel.ForeColor = Color.FromArgb(0x1E, 0x7A, 0x3C);
             RefreshStatus(paired: true);
-            // Kratka, čitljiva potvrda pre automatskog zatvaranja — ne
-            // trenutni nestanak prozora (korisnik mora videti da je uspelo).
-            // NAMERNO ne re-enable-ovati dugme ovde niti u finally ispod —
-            // prozor se zatvara, dodirivanje kontrola posle Close() je
-            // nepotrebno i izbegava se u potpunosti.
-            await Task.Delay(1200);
+            await Task.Delay(1500);
             Close();
         }
         catch (Exception ex)
         {
-            _saveFeedbackLabel.Text = $"Povezivanje nije uspelo: {ex.Message}";
+            _saveFeedbackLabel.Text = $"Podešavanje nije moglo da se završi: {ex.Message}";
             _saveFeedbackLabel.ForeColor = Color.Firebrick;
             _saveButton.Enabled = true;
             _saveButton.Text = previousSaveText;

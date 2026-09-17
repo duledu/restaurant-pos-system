@@ -254,8 +254,25 @@ public static class AgentRunner
     private static async Task<DeliveryClient.HeartbeatOutcome?> SendHeartbeat(string baseUrl, string credential, AgentConfig? config)
     {
         var installedPrinters = WindowsPrinter.Enumerate();
+        // PRINTING P0 — `visible` is the pre-attempt Service-side
+        // visibility probe (currently identical to `printerAvailable`
+        // because both are computed by the same WindowsPrinter.Enumerate()
+        // check, but the two columns travel separately so future Agent
+        // builds can keep them distinct — e.g. a future agent could probe
+        // before Print() using a stricter access check than Print() itself
+        // uses). The `null` case below is "printerName not configured
+        // yet, nothing to probe against" — server keeps the previous
+        // value rather than overwriting with `false`.
         var routeAvailability = (config?.Routes ?? [])
-            .Select(r => new RoutePrinterAvailability(r.Type, installedPrinters.Contains(r.PrinterName, StringComparer.Ordinal)))
+            .Select(r =>
+            {
+                bool installed = installedPrinters.Contains(r.PrinterName, StringComparer.Ordinal);
+                return new RoutePrinterAvailability(
+                    Type: r.Type,
+                    PrinterAvailable: installed,
+                    VisibleToService: string.IsNullOrEmpty(r.PrinterName) ? (bool?)null : installed
+                );
+            })
             .ToArray();
         foreach (var r in routeAvailability.Where(r => !r.PrinterAvailable))
             LogWarn($"Konfigurisan štampač za rutu {r.Type} trenutno nije dostupan na ovom računaru.");

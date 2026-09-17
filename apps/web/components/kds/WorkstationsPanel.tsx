@@ -14,6 +14,23 @@ interface PrintRoute {
   printerName: string | null;
   paperWidthMm: number | null;
   printerAvailable: boolean | null;
+  // PRINTING P0 — operator-pressed "Da, test tiket je uspešno odštampan"
+  // on the Setup wizard (or Admin equivalent) for this exact
+  // (printerName, paperWidthMm) combination. FALSE means the printer
+  // hasn't been physically confirmed yet — Admin surfaces this as a
+  // clear "needs confirmation" pill on each route row, and the Admin
+  // "Test Print" button now drives both the technical test AND the
+  // human confirmation in a single flow.
+  physicalTestConfirmed: boolean;
+  physicalTestConfirmedAt: string | null;
+  // PRINTING P0 — Service-side visibility probe. NULL = "not yet
+  // probed" (the very first heartbeat after route configuration).
+  // FALSE = "the running Agent SERVICE cannot see this printer" —
+  // the most common per-user-vs-per-machine driver install failure
+  // mode. Surfaces as a dedicated warning that names the failure and
+  // the actionable fix without exposing infrastructure terminology.
+  visibleToService: boolean | null;
+  visibleToServiceAt: string | null;
   isEnabled: boolean;
   isPrimary: boolean;
   updatedAt: string;
@@ -109,10 +126,36 @@ function routeOf(w: Workstation, type: RouteType): PrintRoute | undefined {
  * pojedinačno iz podataka koje /api/admin/workstations već vratio, bez
  * dodatnog upita po ruti. Ako se ijedan uslov ikad promeni, MORA se
  * promeniti na oba mesta da Admin i KDS nikad ne prikažu suprotstavljene
- * odgovore za isti server podatak. */
-function routeReadiness(w: Workstation, route: PrintRoute | undefined): "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" {
+ * odgovore za isti server podatak.
+ *
+ * PRINTING P0 — adds two new states:
+ *   AGENT_CANNOT_SEE — Service identity cannot enumerate this route's
+ *     printer (visibleToService === false on the route). Distinct from
+ *     PRINTER_UNAVAILABLE (which is the printerAvailable === false
+ *     post-attempt signal). Triggers a dedicated human-friendly
+ *     "TableCore servis ne može da pristupi štampaču" banner.
+ *   NEEDS_CONFIRMATION — printer is configured and visible to the
+ *     Service, but the operator has not yet pressed "Da, test tiket
+ *     je uspešno odštampan" on the Setup wizard for this exact
+ *     (printerName, paperWidthMm) combination. The Admin "Test Print"
+ *     button drives both the technical test AND the human confirmation
+ *     in a single flow.
+ * The legacy "READY" state is now STRICTLY the conjunction of:
+ *   isEnabled + printerName + paperWidthMm + isOnline + printerReady +
+ *   visibleToService (true) + physicalTestConfirmed (true).
+ * Any silent weakening of that conjunction here would defeat the entire
+ * P0 fix; see SETUP-form OnSave for the matching wizard-side check.
+ */
+function routeReadiness(
+  w: Workstation,
+  route: PrintRoute | undefined
+): "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" | "AGENT_CANNOT_SEE" | "NEEDS_CONFIRMATION" {
   if (!route || !route.isEnabled || w.revokedAt || !w.isEnabled) return "NOT_CONFIGURED";
   if (!isOnline(w.lastSeenAt)) return "AGENT_OFFLINE";
+  // Service-side visibility probe — distinct from post-attempt
+  // printerAvailable, evaluated before we trust any "Test Print"
+  // output the operator might already have on the table.
+  if (route.visibleToService === false) return "AGENT_CANNOT_SEE";
   // False-"Štampač nedostupan" root cause (Part B, mirrors
   // agent-print-service.ts stationPrinterStatus) — printerAvailable===false
   // is a proven signal, trust it. printerAvailable===null only means "not
@@ -123,6 +166,7 @@ function routeReadiness(w: Workstation, route: PrintRoute | undefined): "READY" 
   const listedAsAvailable = route.printerName != null && (w.availablePrinters?.includes(route.printerName) ?? false);
   const printerReady = route.printerAvailable === true || (route.printerAvailable === null && listedAsAvailable);
   if (!route.printerName || !printerReady) return "PRINTER_UNAVAILABLE";
+  if (!route.physicalTestConfirmed) return "NEEDS_CONFIRMATION";
   return "READY";
 }
 
@@ -131,6 +175,8 @@ const READINESS_LABEL: Record<ReturnType<typeof routeReadiness>, string> = {
   AGENT_OFFLINE: "Računar nije povezan",
   PRINTER_UNAVAILABLE: "Štampač nedostupan",
   NOT_CONFIGURED: "Nije podešeno",
+  AGENT_CANNOT_SEE: "Servis ne vidi štampač",
+  NEEDS_CONFIRMATION: "Čeka fizičku potvrdu",
 };
 
 /**
@@ -175,6 +221,22 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [testingRoute, setTestingRoute] = useState<string | null>(null);
   const [printingMode, setPrintingModeState] = useState<PrintingMode>("CENTRAL_ROUTING");
   const [savingMode, setSavingMode] = useState(false);
+  // PRINTING P0 — operator reconciliation surface. The list is populated
+  // by the load() poll (filtered to SUBMISSION_UNKNOWN jobs in the
+  // current shift) so the Admin sees a dedicated banner with
+  // per-job CONFIRM PRINTED / REPRINT buttons. Each action POSTs to
+  // /api/admin/print-jobs/{id}/acknowledge-ambiguity with the
+  // operator's decision; the server handles audit + state transition.
+  const [ambiguityJobs, setAmbiguityJobs] = useState<AmbiguityJob[]>([]);
+  const [resolvingJobId, setResolvingJobId] = useState<string | null>(null);
+
+  interface AmbiguityJob {
+    id: string;
+    type: "KITCHEN" | "BAR" | "RECEIPT";
+    orderId: string;
+    createdAt: string;
+    failureReason: string | null;
+  }
 
   // PREPROD physical QA follow-up (Part A2) — ranije se ovo učitavalo TAČNO
   // JEDNOM pri montiranju, pa je Admin morao da se ručno F5-uje da vidi
@@ -205,6 +267,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       // page refresh or manual dismissal needed; the newly connected
       // computer already appears in workstationList from this SAME poll.
       setJustCreatedCode((prev) => (prev && !pending.some((p) => p.id === prev.pairingId) ? null : prev));
+      // PRINTING P0 — refresh the SUBMISSION_UNKNOWN reconciliation
+      // banner. Fetched in parallel via a non-blocking call so a
+      // transient failure here does not delay the main workstation list.
+      // Errors are intentionally swallowed into console — the banner
+      // only hides if the endpoint is down, and the next poll re-tries.
+      apiFetch("/api/admin/print-jobs/submission-unknown")
+        .then((r) => setAmbiguityJobs(r.jobs ?? []))
+        .catch(() => {/* noop; banner quietly hides until next successful poll */});
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri učitavanju radnih stanica");
     } finally {
@@ -212,6 +282,27 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       loadInFlightRef.current = false;
     }
   }, []);
+
+  // PRINTING P0 — operator reconciliation actions on a
+  // SUBMISSION_UNKNOWN PrintJob. `decision` mirrors the server schema
+  // ("PRINTED" | "REPRINT"); the server is the single source of truth
+  // for the resulting state transition and audit entry. UI just sends
+  // the decision and refreshes the list.
+  async function acknowledgeAmbiguity(jobId: string, decision: "PRINTED" | "REPRINT") {
+    setResolvingJobId(jobId);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/print-jobs/${jobId}/acknowledge-ambiguity`, {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri potvrdi štampe");
+    } finally {
+      setResolvingJobId(null);
+    }
+  }
 
   useEffect(() => {
     load();
@@ -560,6 +651,26 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           Glavna ruta za {ROUTE_LABEL[type].toLowerCase()} na ovoj lokaciji (kad više računara ima ovu rutu, samo glavni je preuzima)
         </label>
       )}
+      {readiness === "AGENT_CANNOT_SEE" && (
+        // PRINTING P0 — Service-side visibility probe surfaced here as
+        // a dedicated, human-friendly warning. No mention of service
+        // identity, per-user installs, or infrastructure. Actionable
+        // next step is the same as the Setup wizard's error message.
+        <p className="mt-1.5 rounded-md border border-danger/40 bg-danger-soft px-2 py-1.5 text-[11px] text-danger">
+          TableCore servis ne može da pristupi štampaču <strong>{route?.printerName}</strong> —
+          ponovo instalirajte drajver štampača sa opcijom „Za sve korisnike“ i restartujte računar.
+        </p>
+      )}
+      {readiness === "NEEDS_CONFIRMATION" && (
+        // PRINTING P0 — operator has not yet pressed "Da, test tiket
+        // je uspešno odštampan" on the Setup wizard. The Admin "Test"
+        // button above triggers BOTH the technical test AND the human
+        // confirmation in one flow (see submitTestPrintAndConfirm),
+        // closing the "spooler-success-is-READY" loophole.
+        <p className="mt-1.5 rounded-md border border-warn/40 bg-warn-soft px-2 py-1.5 text-[11px] text-ink">
+          Štampač je podešen ali čeka fizičku potvrdu — kliknite „Test {ROUTE_LABEL[type].toLowerCase()}“ i potvrdite da je tiket izašao.
+        </p>
+      )}
       </div>
     );
   }
@@ -794,6 +905,64 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       </div>
 
       {error && <div className="mb-3 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</div>}
+
+      {/* PRINTING P0 — operator reconciliation surface. When ANY job is in
+          SUBMISSION_UNKNOWN, the banner surfaces a plain-language
+          explanation ("Status štampe nije moguće potvrditi"), the printer
+          target (route type + orderId), and two SAFE actions: confirm the
+          ticket printed, or request a fresh reprint. We do NOT offer a
+          "retry" action that would silently re-print — every reprint is
+          an explicit operator decision, audited under
+          printjob.ambiguity_reprint_requested, and idempotent under
+          repeat clicks (server-generated unique dispatchKey). */}
+      {ambiguityJobs.length > 0 && (
+        <div className="mb-4 rounded-md border border-warn/40 bg-warn-soft px-3 py-2.5">
+          <p className="text-xs font-semibold text-ink">
+            Status štampe nije moguće potvrditi ({ambiguityJobs.length})
+          </p>
+          <p className="mt-1 text-[11px] text-inkSoft">
+            TableCore servis je izgubio kontakt sa štampačem u trenutku slanja. Tiket je MOGUĆE već fizički
+            izašao. Za svaki tiket ispod izaberite jednu opciju:
+          </p>
+          <ul className="mt-2 space-y-1.5">
+            {ambiguityJobs.map((j) => (
+              <li key={j.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warn/30 bg-cream-100 px-2.5 py-1.5 text-xs">
+                <div className="min-w-0">
+                  <span className="font-semibold text-ink">
+                    {ROUTE_LABEL[j.type]} · Porudžbina #{j.orderId.slice(-6)}
+                  </span>
+                  <span className="ml-2 text-inkSoft">
+                    {new Date(j.createdAt).toLocaleString("sr-Latn-RS")}
+                  </span>
+                  {j.failureReason && (
+                    <span className="ml-2 text-inkSoft">— {j.failureReason}</span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => acknowledgeAmbiguity(j.id, "PRINTED")}
+                    disabled={resolvingJobId === j.id}
+                    className="rounded-md border border-success/40 bg-success-soft px-2.5 py-1 text-[11px] font-semibold text-success disabled:opacity-40"
+                    title="Potvrđujem da je tiket fizički izašao iz štampača"
+                  >
+                    Da, tiket je odštampan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => acknowledgeAmbiguity(j.id, "REPRINT")}
+                    disabled={resolvingJobId === j.id}
+                    className="rounded-md border border-gold/40 bg-gold-soft px-2.5 py-1 text-[11px] font-semibold text-ink disabled:opacity-40"
+                    title="Pošalji ponovo — kreira novi, odvojen tiket i stavlja ga u red za štampu"
+                  >
+                    Pošalji ponovo
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {justCreatedCode && (
         <div className="mb-4 rounded-md border border-gold/40 bg-gold-soft p-3">

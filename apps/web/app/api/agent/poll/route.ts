@@ -22,5 +22,12 @@ export const POST = withWorkstationAuth(async (wsCtx) => {
     workstations.isTestPrintPending(wsCtx),
     workstations.getAgentRoutes(wsCtx),
   ]);
+  // PRINTING P0 — poll response carries route readiness too so the
+  // running Agent can log / react to a degraded Service-side visibility
+  // (e.g. a per-user printer install discovered at runtime) without an
+  // extra round-trip. The Agent does NOT use this to gate physical
+  // printing (the existing WindowsPrinter.Print guard already throws on
+  // a missing printer); it is purely for diagnostic visibility into the
+  // Admin UI surfaces that consume the same readiness state.
   return NextResponse.json({ job, testPrintRequested: testPrint.pending, testPrintRoute: testPrint.route, routes });
 });

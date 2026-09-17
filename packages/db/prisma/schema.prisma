@@ -1205,34 +1205,47 @@ enum PrintJobStatus {
 }
 
 model PrintJob {
-  id                  String             @id @default(uuid())
-  restaurantId        String
-  locationId          String
-  orderId             String
-  type                PrintJobType
+  id                         String             @id @default(uuid())
+  restaurantId               String
+  locationId                 String
+  orderId                    String
+  type                       PrintJobType
   // KITCHEN | BAR za tiket-tipove; null za RECEIPT (račun nije vezan za
   // pojedinačnu stanicu).
-  station             ProductionStation?
-  dispatchKey         String
-  status              PrintJobStatus     @default(PENDING)
-  attemptCount        Int                @default(0)
-  attemptId           String?
-  claimedBy           String?
-  claimedAt           DateTime?
-  submissionStartedAt DateTime?
-  resultOutcome       String?
-  isAutomatic         Boolean            @default(false)
+  station                    ProductionStation?
+  dispatchKey                String
+  status                     PrintJobStatus     @default(PENDING)
+  attemptCount               Int                @default(0)
+  attemptId                  String?
+  claimedBy                  String?
+  claimedAt                  DateTime?
+  submissionStartedAt        DateTime?
+  resultOutcome              String?
+  isAutomatic                Boolean            @default(false)
   // Renderovani sadržaj tiketa/računa u trenutku dispatch-a — zamrznut
   // snapshot, ista konvencija kao Receipt: reprint NIKAD ne preračunava
   // iz Order/OrderItem, samo ponovo ispisuje ovaj JSON.
-  content             Json
-  isReprint           Boolean            @default(false)
-  reprintOfId         String?
-  requestedBy         String // employeeId, bez FK — ista konvencija kao Order.openedBy
-  failureReason       String?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
-  printedAt           DateTime?
+  content                    Json
+  isReprint                  Boolean            @default(false)
+  reprintOfId                String?
+  requestedBy                String // employeeId, bez FK — ista konvencija kao Order.openedBy
+  failureReason              String?
+  // PRINTING P0 — operator reconciliation surface for SUBMISSION_UNKNOWN.
+  // The status enum already supports SUBMISSION_UNKNOWN; the agent poll
+  // claim query already filters status='PENDING', so a SUBMISSION_UNKNOWN
+  // job is structurally never auto-reclaimed. These columns record the
+  // explicit human decision that resolves the ambiguity — "Yes, the
+  // ticket printed" or "Reprint this ticket". Every resolution is audited
+  // through recordAuditEntry in print-service.ts. Either column being
+  // non-null flips status to PRINTED and freezes the outcome; the job is
+  // then terminal.
+  operatorConfirmedPrintedAt DateTime?
+  operatorConfirmedPrintedBy String?
+  operatorReprintRequestedAt DateTime?
+  operatorReprintRequestedBy String?
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
+  printedAt                  DateTime?
 
   order     Order      @relation(fields: [orderId], references: [id])
   reprintOf PrintJob?  @relation("PrintJobReprints", fields: [reprintOfId], references: [id])
@@ -1276,7 +1289,7 @@ model RestaurantSettings {
   // rather than adding a new Receipt column — the toggle only affects
   // DISPLAY, never the underlying tax VALUES, which were already frozen on
   // Receipt.taxTotal/taxBreakdown long before this field existed.
-  showTaxBreakdown Boolean @default(true)
+  showTaxBreakdown  Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -1390,7 +1403,7 @@ model WorkstationPairing {
 // ne potvrdi na fizičkom uređaju. Planirano uklanjanje u posebnoj kasnijoj
 // migraciji.
 model Workstation {
-  id                            String            @id @default(uuid())
+  id                            String             @id @default(uuid())
   restaurantId                  String
   locationId                    String
   name                          String
@@ -1409,7 +1422,7 @@ model Workstation {
   printersReportedAt            DateTime?
   agentVersion                  String?
   osDescription                 String?
-  isEnabled                     Boolean           @default(true)
+  isEnabled                     Boolean            @default(true)
   lastSeenAt                    DateTime?
   lastSuccessfulCommunicationAt DateTime?
   lastPrintAt                   DateTime?
@@ -1432,17 +1445,17 @@ model Workstation {
   testPrintStatus               String?
   testPrintCompletedAt          DateTime?
   testPrintError                String?
-  credentialHash                String            @unique
-  credentialVersion             Int               @default(1)
-  pairedAt                      DateTime          @default(now())
+  credentialHash                String             @unique
+  credentialVersion             Int                @default(1)
+  pairedAt                      DateTime           @default(now())
   revokedAt                     DateTime?
-  createdAt                     DateTime          @default(now())
-  updatedAt                     DateTime          @updatedAt
+  createdAt                     DateTime           @default(now())
+  updatedAt                     DateTime           @updatedAt
 
-  restaurant Restaurant               @relation(fields: [restaurantId], references: [id])
-  location   Location                 @relation(fields: [locationId], references: [id])
-  pairings   WorkstationPairing[]
-  printRoutes WorkstationPrintRoute[]
+  restaurant      Restaurant                  @relation(fields: [restaurantId], references: [id])
+  location        Location                    @relation(fields: [locationId], references: [id])
+  pairings        WorkstationPairing[]
+  printRoutes     WorkstationPrintRoute[]
   // PRINTING V2 FINAL — LOGIN_AWARE only: at most ONE currently-authenticated
   // operational TableCore session bound to this physical computer at a time
   // (see WorkstationTerminalSession). Always null under CENTRAL_ROUTING.
@@ -1465,15 +1478,37 @@ model Workstation {
 // rešava se "poslednji aktivan pobeđuje", namerno ne redizajnirano ovde,
 // vidi print-policy.ts).
 model WorkstationPrintRoute {
-  id               String       @id @default(uuid())
-  restaurantId     String
-  locationId       String
-  workstationId    String
-  type             PrintJobType // KITCHEN | BAR | RECEIPT
-  printerName      String?
-  paperWidthMm     Int?
-  printerAvailable Boolean?
-  isEnabled        Boolean      @default(true)
+  id                      String       @id @default(uuid())
+  restaurantId            String
+  locationId              String
+  workstationId           String
+  type                    PrintJobType // KITCHEN | BAR | RECEIPT
+  printerName             String?
+  paperWidthMm            Int?
+  printerAvailable        Boolean?
+  // PRINTING P0 — operator-pressed "Da, test tiket je uspešno odštampan"
+  // on the Setup wizard's HUMAN CONFIRMATION step, for THIS exact
+  // printerName + paperWidthMm combination. False (the default) means the
+  // route is configured but the physical printer has not yet been
+  // operator-confirmed. Combined with the existing printerAvailable +
+  // isEnabled flags, this is the single readiness state the Agent and Admin
+  // UI surface as "READY" — spooler-success alone is necessary but no
+  // longer sufficient. Re-evaluated on every route save (any change to
+  // printerName or paperWidthMm resets this to false — see workstation-service).
+  physicalTestConfirmed   Boolean      @default(false)
+  physicalTestConfirmedAt DateTime?
+  physicalTestConfirmedBy String?
+  // PRINTING P0 — Service-side visibility probe. NULL = not yet probed;
+  // false = the running Agent Service (NT SERVICE\TableCorePrintAgent)
+  // confirmed it CANNOT see the configured printerName on its Windows
+  // enumeration — i.e. Setup (logged-in user context) saw it, but the
+  // Service identity does not. This is the most common per-user-vs-per-
+  // machine driver install failure mode; the Setup wizard reads this back
+  // and shows a human-friendly error + actionable next step (no print-
+  // management.msc, no PowerShell, no service-identity terminology).
+  visibleToService        Boolean?
+  visibleToServiceAt      DateTime?
+  isEnabled               Boolean      @default(true)
   // PRINTING V2 FINAL — CENTRAL_ROUTING deterministic multi-agent routing
   // (never "whichever Agent polls first"): when more than one workstation
   // in the same location has an enabled route of this same type, Admin may
@@ -1482,9 +1517,9 @@ model WorkstationPrintRoute {
   // marked (the common single-workstation case, or an admin hasn't chosen
   // yet), it falls back to the lowest workstationId — deterministic and
   // stable either way, never dependent on poll timing.
-  isPrimary        Boolean      @default(false)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  isPrimary               Boolean      @default(false)
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
 
   workstation Workstation @relation(fields: [workstationId], references: [id])
 

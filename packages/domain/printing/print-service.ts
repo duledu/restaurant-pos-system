@@ -808,4 +808,211 @@ export async function reprintReceipt(ctx: AuthContext, orderId: string, idempote
   return prisma.printJob.findFirstOrThrow({ where: { orderId, dispatchKey } });
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// PRINTING P0 — operator reconciliation surface for SUBMISSION_UNKNOWN
+// ─────────────────────────────────────────────────────────────────────────
+
+import { acknowledgePrintAmbiguitySchema, type AcknowledgePrintAmbiguityInput } from "@rcs/shared";
+
+/**
+ * PRINTING P0 — list PrintJobs currently in SUBMISSION_UNKNOWN that need
+ * an operator decision. Drives the Admin WorkstationsPanel banner. Scoped
+ * to the current shift window (default: 12 hours) — older rows are still
+ * queryable via the audit log but are not surfaced as "needs decision"
+ * because the operator would be drowning in ancient history.
+ *
+ * The list is intentionally compact (id, type, orderId, createdAt,
+ * failureReason) — enough for the banner to render "Porudžbina #1234 —
+ * Kuhinja — čeka potvrdu od 17:42" with one button each. Full job
+ * details (content, attempts, audit trail) are available in the dedicated
+ * printJob detail page; we do NOT couple them here to keep the polling
+ * cost negligible on the Admin's regular 5s poll loop.
+ */
+export async function listSubmissionUnknownJobs(ctx: AuthContext) {
+  requirePermission(ctx, ORDERS_PRINT);
+  const since = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const rows = await prisma.printJob.findMany({
+    where: {
+      ...scopeToRestaurant(ctx),
+      status: "SUBMISSION_UNKNOWN",
+      createdAt: { gte: since },
+    },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      type: true,
+      orderId: true,
+      createdAt: true,
+      failureReason: true,
+    },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    orderId: r.orderId,
+    createdAt: r.createdAt.toISOString(),
+    failureReason: r.failureReason,
+  }));
+}
+
+/**
+ * PRINTING P0 — the ONE operator-only exit from SUBMISSION_UNKNOWN. The
+ * Agent poll claim query (agent-print-service.pollAndClaim) is hard-coded
+ * to filter `status = "PENDING"` — a SUBMISSION_UNKNOWN job is therefore
+ * structurally un-reclaimable by any future Agent poll, regardless of
+ * Service restart / network reconnect / Admin reconfiguration. This
+ * function is the ONLY way to move such a job out of that terminal
+ * state, and it is idempotent: calling it twice with the same decision
+ * on the same job returns the existing record (no second audit entry,
+ * no second timestamp bump).
+ *
+ * Two valid decisions:
+ *
+ *   "PRINTED" — operator confirmed at the printer that the ticket did
+ *               physically come out (or is willing to accept that they
+ *               cannot rule it out). Job becomes PRINTED with
+ *               printedAt = now and `operatorConfirmedPrintedAt` set;
+ *               failureReason cleared. Server-side `status` is now
+ *               terminal — no further poll claim, no further
+ *               reconciliation possible from any caller.
+ *
+ *   "REPRINT" — operator wants another physical copy. Job stays
+ *               SUBMISSION_UNKNOWN (the ambiguity is preserved as the
+ *               authoritative record of what happened on the original
+ *               attempt), and a NEW PrintJob is created with
+ *               `isReprint = true` and `reprintOfId = this.id`, reusing
+ *               the existing reprint pipeline so audit + receipt
+ *               semantics are identical to a manual reprint. Idempotent
+ *               on repeated REPRINT calls: a fresh dispatchKey is
+ *               generated each time so each click produces exactly one
+ *               new PrintJob — but the @@unique([orderId, dispatchKey])
+ *               constraint makes double-click-within-the-same-ms safe
+ *               even at the SQL boundary.
+ *
+ * Anything else (job not found, job in a different status, employee
+ * without the right permission) throws — no silent success.
+ */
+export async function acknowledgePrintAmbiguity(
+  ctx: AuthContext,
+  printJobId: string,
+  rawInput: AcknowledgePrintAmbiguityInput
+) {
+  requirePermission(ctx, ORDERS_PRINT);
+  const input = acknowledgePrintAmbiguitySchema.parse(rawInput);
+
+  const job = await prisma.printJob.findFirst({
+    where: { id: printJobId, ...scopeToRestaurant(ctx) },
+    select: {
+      id: true,
+      orderId: true,
+      restaurantId: true,
+      locationId: true,
+      type: true,
+      station: true,
+      status: true,
+      dispatchKey: true,
+      attemptId: true,
+      content: true,
+      isReprint: true,
+      reprintOfId: true,
+      operatorConfirmedPrintedAt: true,
+      operatorReprintRequestedAt: true,
+      requestedBy: true,
+    },
+  });
+  if (!job) throw new Error("PrintJob nije pronađen");
+  if (job.status !== "SUBMISSION_UNKNOWN") {
+    throw new Error(`PrintJob nije u SUBMISSION_UNKNOWN stanju (trenutno: ${job.status})`);
+  }
+
+  if (input.decision === "PRINTED") {
+    if (job.operatorConfirmedPrintedAt) return job; // idempotent
+    const now = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const j = await tx.printJob.update({
+        where: { id: job.id },
+        data: {
+          status: "PRINTED",
+          printedAt: now,
+          operatorConfirmedPrintedAt: now,
+          operatorConfirmedPrintedBy: ctx.employeeId,
+          failureReason: null,
+          // resultOutcome was previously "SUBMISSION_UNKNOWN"; flip to a
+          // permanent terminal value that downstream KDS / audit
+          // surfaces treat as "the ticket was successfully produced".
+          resultOutcome: "SUBMITTED_TO_SPOOLER",
+        },
+        select: { id: true, status: true, printedAt: true },
+      });
+      await recordAuditEntry(ctx, {
+        entityType: "PrintJob",
+        entityId: job.id,
+        action: "printjob.ambiguity_confirmed_printed",
+        previousValue: { status: "SUBMISSION_UNKNOWN" },
+        newValue: { status: "PRINTED", at: now.toISOString(), operatorId: ctx.employeeId },
+        locationId: job.locationId,
+      });
+      return j;
+    });
+    return updated;
+  }
+
+  // decision === "REPRINT"
+  if (job.operatorReprintRequestedAt) return job; // idempotent
+  const now = new Date();
+  // Build a UNIQUE dispatchKey per call so the @@unique([orderId,
+  // dispatchKey]) constraint guarantees each click produces exactly one
+  // new PrintJob (no double physical printing under rapid clicks).
+  const dispatchKey = `reprint-ambiguity:${job.id}:${now.getTime()}`;
+  const newJob = await prisma.$transaction(async (tx) => {
+    const created = await tx.printJob.create({
+      data: {
+        restaurantId: job.restaurantId,
+        locationId: job.locationId,
+        orderId: job.orderId,
+        type: job.type,
+        station: job.station,
+        // REPRINT carries the ORIGINAL frozen content (the ambiguity
+        // does not invalidate what was about to print) so audit history
+        // matches the visible ticket byte-for-byte.
+        content: job.content as object,
+        dispatchKey,
+        status: "PENDING",
+        isAutomatic: true,
+        isReprint: true,
+        reprintOfId: job.id,
+        requestedBy: ctx.employeeId,
+        resultOutcome: null,
+        // Mark the ORIGINAL as operator-reprint-requested; this both
+        // surfaces the recovery action on the Admin's "PrintJobs in
+        // SUBMISSION_UNKNOWN" panel and prevents a second reprint click
+        // from triggering two new rows.
+      },
+      select: { id: true, dispatchKey: true, status: true, reprintOfId: true },
+    });
+    await tx.printJob.update({
+      where: { id: job.id },
+      data: {
+        operatorReprintRequestedAt: now,
+        operatorReprintRequestedBy: ctx.employeeId,
+      },
+    });
+    await recordAuditEntry(ctx, {
+      entityType: "PrintJob",
+      entityId: job.id,
+      action: "printjob.ambiguity_reprint_requested",
+      previousValue: { operatorReprintRequestedAt: null },
+      newValue: {
+        at: now.toISOString(),
+        operatorId: ctx.employeeId,
+        newPrintJobId: created.id,
+        newDispatchKey: created.dispatchKey,
+      },
+      locationId: job.locationId,
+    });
+    return created;
+  });
+  return newJob;
+}
+
 export { stationLabelFor };

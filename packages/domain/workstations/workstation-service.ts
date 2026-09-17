@@ -319,6 +319,17 @@ const PRINT_ROUTE_SELECT = {
   printerName: true,
   paperWidthMm: true,
   printerAvailable: true,
+  // PRINTING P0 — readiness fields consumed by the Admin UI's
+  // silentPrintReady aggregation AND the Setup wizard's READY gate.
+  // Both the Setup wizard and Admin UI must surface these, not just the
+  // legacy printerAvailable (which only proves the Agent process
+  // enumerated the printer, not that the operator physically confirmed
+  // a ticket).
+  physicalTestConfirmed: true,
+  physicalTestConfirmedAt: true,
+  physicalTestConfirmedBy: true,
+  visibleToService: true,
+  visibleToServiceAt: true,
   isEnabled: true,
   isPrimary: true,
   createdAt: true,
@@ -382,6 +393,17 @@ export async function upsertPrintRoute(
   // resave (or a change to paperWidthMm/isEnabled alone) leaves the last
   // agent-confirmed availability intact.
   const printerNameChanging = data.printerName !== undefined && data.printerName !== (previous?.printerName ?? null);
+  // PRINTING P0 — physicalTestConfirmed represents an operator pressing
+  // "Da, test tiket je uspešno odštampan" against THIS exact
+  // (printerName, paperWidthMm) combination. Changing either physical
+  // output config invalidates that confirmation — the previous physical
+  // ticket was printed on a DIFFERENT printer/widht, so it does NOT prove
+  // the new configuration works. A no-op resave (same printerName,
+  // same paperWidthMm) leaves the confirmation intact.
+  const paperWidthChanging =
+    data.paperWidthMm !== undefined && data.paperWidthMm !== (previous?.paperWidthMm ?? null);
+  const physicalConfigChanging = printerNameChanging || paperWidthChanging;
+  const resettingPhysicalConfirmation = physicalConfigChanging && previous?.physicalTestConfirmed === true;
 
   const route = await prisma.$transaction(async (tx) => {
     // PRINTING V2 FINAL — deterministic CENTRAL_ROUTING multi-agent routing:
@@ -414,6 +436,13 @@ export async function upsertPrintRoute(
         ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
         ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
         ...(data.isPrimary !== undefined ? { isPrimary: data.isPrimary } : {}),
+        // PRINTING P0 — physical confirmation travels with the physical
+        // config. Reset it whenever the physical config actually changes
+        // (audit-recorded below); the next Setup wizard run will require a
+        // fresh operator confirmation before READY.
+        ...(resettingPhysicalConfirmation
+          ? { physicalTestConfirmed: false, physicalTestConfirmedAt: null, physicalTestConfirmedBy: null }
+          : {}),
       },
       select: PRINT_ROUTE_SELECT,
     });
@@ -424,9 +453,28 @@ export async function upsertPrintRoute(
     entityId: route.id,
     action: "workstation.route_updated",
     previousValue: previous
-      ? { printerName: previous.printerName, paperWidthMm: previous.paperWidthMm, isEnabled: previous.isEnabled, isPrimary: previous.isPrimary }
+      ? {
+          printerName: previous.printerName,
+          paperWidthMm: previous.paperWidthMm,
+          isEnabled: previous.isEnabled,
+          isPrimary: previous.isPrimary,
+          physicalTestConfirmed: previous.physicalTestConfirmed,
+        }
       : null,
-    newValue: { workstationId, type: routeType, printerName: route.printerName, paperWidthMm: route.paperWidthMm, isEnabled: route.isEnabled, isPrimary: route.isPrimary },
+    newValue: {
+      workstationId,
+      type: routeType,
+      printerName: route.printerName,
+      paperWidthMm: route.paperWidthMm,
+      isEnabled: route.isEnabled,
+      isPrimary: route.isPrimary,
+      physicalTestConfirmed: route.physicalTestConfirmed,
+    },
+    // PRINTING P0 — when a physical-config change resets the prior operator
+    // confirmation, mark this as WARNING severity so the audit stream
+    // surfaces a re-confirmation requirement rather than treating it as
+    // a routine config tweak.
+    ...(resettingPhysicalConfirmation ? { severity: "WARNING" as const } : {}),
     locationId: workstation.locationId,
   });
 
@@ -747,12 +795,29 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
   // Best-effort, one small update per reported route; never blocks the
   // heartbeat's own success on a route that doesn't exist (e.g. Admin
   // removed it between polls).
+  //
+  // PRINTING P0 — also persist the pre-attempt visibility probe
+  // (`visible` field) to a SEPARATE column. The reason these are
+  // different columns even though they sound similar:
+  //   printerAvailable     = result of the last PrintDocument.Print call
+  //                          (post-attempt; null until first attempt)
+  //   visibleToService     = result of the current enumeration probe
+  //                          (pre-attempt; refreshed every heartbeat)
+  // The Setup wizard needs the pre-attempt signal — otherwise the user
+  // would have to send a real order to discover the Service can't see
+  // their printer. Both writes go to the same route row so a stale
+  // printerAvailable never bleeds across to mask a missing probe.
   if (parsed.routes?.length) {
     for (const route of parsed.routes) {
       await prisma.workstationPrintRoute
         .updateMany({
           where: { workstationId: wsCtx.workstationId, type: route.type },
-          data: { printerAvailable: route.printerAvailable },
+          data: {
+            printerAvailable: route.printerAvailable,
+            ...(route.visible !== undefined
+              ? { visibleToService: route.visible, visibleToServiceAt: now }
+              : {}),
+          },
         })
         .catch(() => {});
     }
@@ -810,3 +875,175 @@ export async function getAgentRoutes(wsCtx: WorkstationAuthContext): Promise<Age
   });
   return routes.map((r) => ({ type: r.type as PrintRouteType, printerName: r.printerName!, paperWidthMm: r.paperWidthMm! }));
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// PRINTING P0 — operator-confirmed physical print state
+// ─────────────────────────────────────────────────────────────────────────
+
+import type { AgentPhysicalConfirmationInput } from "@rcs/shared";
+// The visibility probe (`route.visible` per heartbeat entry) is folded
+// into the existing `routes` array on the heartbeat payload and handled
+// inline inside recordHeartbeat above — no separate endpoint or schema
+// shape needed. This keeps the heartbeat protocol the single source of
+// truth for everything the Agent reports about its environment.
+
+/**
+ * PRINTING P0 — Setup wizard's HUMAN CONFIRMATION step. Called by the
+ * Agent when the operator presses "Da, test tiket je uspešno
+ * odštampan" on a particular route inside the Setup wizard. The Agent
+ * authenticates via its own bearer credential (WorkstationAuthContext),
+ * so the actor here is the workstation, not an employee — this is the
+ * single piece of state the Setup wizard is allowed to write without
+ * being bound to an employee session.
+ *
+ * Preconditions (all server-enforced, fail with a clear error):
+ *  - The route must already be configured (printerName + paperWidthMm
+ *    set + isEnabled) — confirming a half-configured route would not
+ *    represent a real physical ticket.
+ *  - The route must NOT be revoked/disabled.
+ * Idempotent: pressing the button twice is a no-op (no second audit
+ * entry, no timestamp bump).
+ */
+export async function confirmPhysicalTestByAgent(wsCtx: WorkstationAuthContext, input: AgentPhysicalConfirmationInput) {
+  const parsed = printRouteTypeSchema.parse(input.type);
+  const route = await prisma.workstationPrintRoute.findUnique({
+    where: { workstationId_type: { workstationId: wsCtx.workstationId, type: parsed } },
+    select: {
+      id: true,
+      printerName: true,
+      paperWidthMm: true,
+      isEnabled: true,
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: true,
+      locationId: true,
+      workstation: { select: { revokedAt: true, isEnabled: true } },
+    },
+  });
+  if (!route) throw new Error("Ruta štampe ne postoji za ovaj računar.");
+  if (route.workstation.revokedAt) throw new Error("Radna stanica je opozvana — potrebno je novo uparivanje.");
+  if (!route.workstation.isEnabled) throw new Error("Radna stanica je privremeno onemogućena.");
+  if (!route.isEnabled) throw new Error("Ruta štampe je onemogućena.");
+  if (!route.printerName || !route.paperWidthMm) {
+    throw new Error("Ruta štampe nije potpuno konfigurisana (štampač/širina papira).");
+  }
+  if (route.physicalTestConfirmed) return route;
+
+  const now = new Date();
+  const updated = await prisma.workstationPrintRoute.update({
+    where: { id: route.id },
+    data: {
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: now,
+      // Setup runs unauthenticated; we record the workstation identity
+      // as the actor (consistent with how the Agent authenticates) —
+      // better than NULL/UNKNOWN, never confused with an employeeId.
+      physicalTestConfirmedBy: `workstation:${wsCtx.workstationId}`,
+    },
+    select: PRINT_ROUTE_SELECT,
+  });
+
+  await recordAuditEntry(
+    {
+      // Minimal AuthContext-shaped actor; the workstation bearer
+      // proves identity, no employee session is required.
+      userId: `workstation:${wsCtx.workstationId}`,
+      employeeId: `workstation:${wsCtx.workstationId}`,
+      restaurantId: wsCtx.restaurantId,
+      locationIds: [route.locationId],
+      roles: ["workstation"],
+      permissions: new Set(["workstations.manage"]),
+    },
+    {
+      entityType: "WorkstationPrintRoute",
+      entityId: route.id,
+      action: "workstation.route_physically_confirmed",
+      previousValue: { physicalTestConfirmed: false },
+      newValue: { physicalTestConfirmed: true, at: now.toISOString() },
+      locationId: route.locationId,
+    }
+  );
+
+  return updated;
+}
+
+/**
+ * PRINTING P0 — Admin UI/Setup wizard can READ the Service-side
+ * visibility state for all enabled routes on this workstation without
+ * authenticating as the Agent (the Admin route is employee-authenticated,
+ * and the Setup wizard reads it via the same API). Best-effort probe
+ * history — if visibleToServiceAt is older than the latest heartbeat
+ * window (AGENT_ACTIVE_WINDOW_MS × 2), the consumer should treat the
+ * probe as stale and not rely on it for the READY gate.
+ */
+export async function getRouteVisibilityForWorkstation(workstationId: string) {
+  return prisma.workstationPrintRoute.findMany({
+    where: { workstationId, isEnabled: true },
+    select: { type: true, visibleToService: true, visibleToServiceAt: true, printerName: true, paperWidthMm: true, physicalTestConfirmed: true },
+    orderBy: { type: "asc" },
+  });
+}
+
+/**
+ * PRINTING P0 — the Agent's own heartbeat/poll responses carry this
+ * aggregated readiness view so the Setup wizard can decide whether to
+ * declare READY in a single round-trip. Compact shape (only what the
+ * wizard needs), typed for the Agent endpoint.
+ *
+ * Aggregation rules:
+ *  - `visibleToService === false` => `readiness = "AGENT_CANNOT_SEE"` —
+ *    the running Service process cannot enumerate this route's
+ *    configured printer. The wizard MUST refuse to declare READY on
+ *    this route until the operator fixes the driver install scope.
+ *  - `visibleToService === null` (no probe yet) => `readiness =
+ *    "PENDING_PROBE"` — the very first heartbeat usually returns this
+ *    for freshly configured routes. The wizard runs the probe loop
+ *    inside the same heartbeat and waits one more cycle for a real
+ *    answer before declaring READY.
+ *  - `physicalTestConfirmed === false` => `readiness = "NEEDS_CONFIRM"` —
+ *    the operator has not yet pressed the wizard's "Da, test tiket je
+ *    uspešno odštampan" button for this exact (printer, paperWidth).
+ *  - everything aligned => `readiness = "READY"`.
+ * The wizard's own loop (SetupForm.cs) drives the transitions; this
+ * helper is the SINGLE source of truth for the displayed state.
+ */
+export interface AgentRouteReadiness {
+  type: PrintRouteType;
+  printerName: string;
+  paperWidthMm: number;
+  visibleToService: boolean | null;
+  visibleToServiceAt: Date | null;
+  physicalTestConfirmed: boolean;
+  readiness: "READY" | "AGENT_CANNOT_SEE" | "PENDING_PROBE" | "NEEDS_CONFIRM";
+}
+
+export async function getRouteReadinessForAgent(wsCtx: WorkstationAuthContext): Promise<AgentRouteReadiness[]> {
+  const rows = await prisma.workstationPrintRoute.findMany({
+    where: { workstationId: wsCtx.workstationId, isEnabled: true, printerName: { not: null }, paperWidthMm: { not: null } },
+    select: {
+      type: true,
+      printerName: true,
+      paperWidthMm: true,
+      visibleToService: true,
+      visibleToServiceAt: true,
+      physicalTestConfirmed: true,
+    },
+    orderBy: { type: "asc" },
+  });
+  return rows.map((r) => {
+    let readiness: AgentRouteReadiness["readiness"];
+    if (r.visibleToService === false) readiness = "AGENT_CANNOT_SEE";
+    else if (r.visibleToService === null) readiness = "PENDING_PROBE";
+    else if (!r.physicalTestConfirmed) readiness = "NEEDS_CONFIRM";
+    else readiness = "READY";
+    return {
+      type: r.type as PrintRouteType,
+      printerName: r.printerName!,
+      paperWidthMm: r.paperWidthMm!,
+      visibleToService: r.visibleToService,
+      visibleToServiceAt: r.visibleToServiceAt,
+      physicalTestConfirmed: r.physicalTestConfirmed,
+      readiness,
+    };
+  });
+}
+
