@@ -182,5 +182,18 @@ export const acknowledgePrintAmbiguitySchema = z.object({
   //               PrintJob row marked isReprint=true pointing here; the
   //               original stays SUBMISSION_UNKNOWN, audited)
   decision: z.enum(["PRINTED", "REPRINT"]),
+  // PRINTING P0 — client-supplied idempotency key (UUID). The server treats
+  // an identical (jobId, idempotencyKey) pair as the SAME operator action:
+  // the first call performs the work and audits it, every subsequent call
+  // with the same key returns the same record WITHOUT creating a new
+  // PrintJob row, WITHOUT bumping the operator-decision timestamp, and
+  // WITHOUT a duplicate audit entry. This is the ONLY thing standing
+  // between an operator double-clicking "Pošalji ponovo" and two physical
+  // tickets coming out of the printer — the UI disables the button after
+  // the first click, but a slow network, a stuck modal, or a browser
+  // re-submit can all re-fire the same click. Without idempotencyKey the
+  // server creates a new PrintJob per click (current behaviour, verified
+  // by tests/integration/printing-p0.test.ts "double-click protection").
+  idempotencyKey: z.string().trim().min(8).max(64),
 });
 export type AcknowledgePrintAmbiguityInput = z.infer<typeof acknowledgePrintAmbiguitySchema>;

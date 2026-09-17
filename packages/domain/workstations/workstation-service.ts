@@ -967,6 +967,78 @@ export async function confirmPhysicalTestByAgent(wsCtx: WorkstationAuthContext, 
 }
 
 /**
+ * PRINTING P0 — Admin counterpart to confirmPhysicalTestByAgent. Same
+ * effect on the row, same audit entry name, but authenticated as an
+ * Admin employee (ctx.employeeId) instead of the workstation itself.
+ *
+ * Used by the Admin WorkstationsPanel's "Test" button to bring a
+ * just-upgraded workstation's routes into the new "READY" state
+ * WITHOUT requiring the operator to re-open the Setup wizard. The
+ * Setup wizard's HUMAN CONFIRMATION step and the Admin's Test button
+ * converge on this single server-side transition, so the operator
+ * can pick whichever path fits the moment — same effect either way.
+ *
+ * Idempotent: a re-click after success returns the existing record
+ * with the same timestamp (no double audit).
+ */
+export async function confirmPhysicalTestByAdmin(
+  ctx: AuthContext,
+  workstationId: string,
+  type: "KITCHEN" | "BAR" | "RECEIPT"
+) {
+  requirePermission(ctx, WORKSTATIONS_MANAGE);
+  const parsed = printRouteTypeSchema.parse(type);
+  const route = await prisma.workstationPrintRoute.findUnique({
+    where: { workstationId_type: { workstationId, type: parsed } },
+    select: {
+      id: true,
+      printerName: true,
+      paperWidthMm: true,
+      isEnabled: true,
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: true,
+      locationId: true,
+      restaurantId: true,
+      workstation: { select: { revokedAt: true, isEnabled: true } },
+    },
+  });
+  if (!route) throw new Error("Ruta štampe ne postoji za ovaj računar.");
+  // Tenant + location scoping — Manager in one location cannot confirm
+  // physical printing for a workstation in another location.
+  if (route.restaurantId !== ctx.restaurantId) throw new Error("Radna stanica nije u tvojoj restoranu.");
+  requireLocationAccess(ctx, route.locationId);
+  if (route.workstation.revokedAt) throw new Error("Radna stanica je opozvana — potrebno je novo uparivanje.");
+  if (!route.workstation.isEnabled) throw new Error("Radna stanica je privremeno onemogućena.");
+  if (!route.isEnabled) throw new Error("Ruta štampe je onemogućena.");
+  if (!route.printerName || !route.paperWidthMm) {
+    throw new Error("Ruta štampe nije potpuno konfigurisana (štampač/širina papira).");
+  }
+  if (route.physicalTestConfirmed) return route;
+
+  const now = new Date();
+  const updated = await prisma.workstationPrintRoute.update({
+    where: { id: route.id },
+    data: {
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: now,
+      physicalTestConfirmedBy: `admin:${ctx.employeeId}`,
+    },
+    select: PRINT_ROUTE_SELECT,
+  });
+
+  await recordAuditEntry(ctx, {
+    entityType: "WorkstationPrintRoute",
+    entityId: route.id,
+    action: "workstation.route_physically_confirmed",
+    previousValue: { physicalTestConfirmed: false },
+    newValue: { physicalTestConfirmed: true, at: now.toISOString(), actor: `admin:${ctx.employeeId}` },
+    locationId: route.locationId,
+  });
+
+  return updated;
+}
+
+/**
  * PRINTING P0 — Admin UI/Setup wizard can READ the Service-side
  * visibility state for all enabled routes on this workstation without
  * authenticating as the Agent (the Admin route is employee-authenticated,

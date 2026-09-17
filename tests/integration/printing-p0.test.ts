@@ -13,7 +13,9 @@ import { resetPrismaTestTables } from "../setup/reset-test-db";
  *  2. acknowledgePrintAmbiguity(decision="REPRINT")
  *     SUBMISSION_UNKNOWN stays; a NEW PrintJob row is created with
  *     isReprint=true, reprintOfId=this.id, audited. The new row goes
- *     through the normal claim flow.
+ *     through the normal claim flow. Requires an idempotencyKey from
+ *     the client; same (jobId, idempotencyKey) returns the same row
+ *     without creating duplicates.
  *  3. confirmPhysicalTestByAgent
  *     physicalTestConfirmed flips to true on a configured+enabled route,
  *     audited as workstation.route_physically_confirmed. A subsequent
@@ -115,8 +117,9 @@ async function makeSubmissionUnknownJob(type: "KITCHEN" | "BAR" | "RECEIPT" = "K
 describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(PRINTED)", () => {
   it("flips SUBMISSION_UNKNOWN to PRINTED and stamps operator columns", async () => {
     const jobId = await makeSubmissionUnknownJob();
+    const idempotencyKey = `idem-printed-${jobId}`;
 
-    const result = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED" });
+    const result = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED", idempotencyKey });
 
     expect(result).toMatchObject({ id: jobId, status: "PRINTED" });
     expect((result as { printedAt: Date | null }).printedAt).toBeInstanceOf(Date);
@@ -129,14 +132,15 @@ describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(PRI
     expect(reloaded.failureReason).toBeNull();
   });
 
-  it("is idempotent — a second PRINTED click is a no-op (no second audit row, no timestamp bump)", async () => {
+  it("is idempotent — a second PRINTED click with the SAME idempotencyKey is a no-op (no second audit row, no timestamp bump)", async () => {
     const jobId = await makeSubmissionUnknownJob();
+    const idempotencyKey = `idem-printed-${jobId}`;
 
-    await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED" });
+    await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED", idempotencyKey });
     const first = await prisma.printJob.findUniqueOrThrow({ where: { id: jobId } });
 
     await new Promise((r) => setTimeout(r, 5));
-    const again = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED" });
+    const again = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED", idempotencyKey });
 
     expect(again).toMatchObject({ id: jobId, status: "PRINTED" });
     const reloaded = await prisma.printJob.findUniqueOrThrow({ where: { id: jobId } });
@@ -151,7 +155,7 @@ describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(PRI
     await prisma.printJob.update({ where: { id: jobId }, data: { status: "PRINTED" } });
 
     await expect(
-      printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED" })
+      printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "PRINTED", idempotencyKey: `k-${jobId}` })
     ).rejects.toThrow(/SUBMISSION_UNKNOWN/);
   });
 });
@@ -159,8 +163,9 @@ describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(PRI
 describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(REPRINT)", () => {
   it("creates a fresh PrintJob with isReprint=true and reprintOfId pointing at the original; original stays SUBMISSION_UNKNOWN", async () => {
     const jobId = await makeSubmissionUnknownJob("RECEIPT");
+    const idempotencyKey = `idem-reprint-${jobId}`;
 
-    const result = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT" });
+    const result = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT", idempotencyKey });
     expect(result).toMatchObject({ status: "PENDING" });
     expect((result as { reprintOfId: string | null }).reprintOfId).toBe(jobId);
 
@@ -174,22 +179,39 @@ describe("PRINTING P0 — operator reconciliation: acknowledgePrintAmbiguity(REP
     expect(reprint.reprintOfId).toBe(jobId);
     expect(reprint.type).toBe("RECEIPT");
     expect(reprint.dispatchKey.startsWith("reprint-ambiguity:")).toBe(true);
+    // The dispatchKey is now derived from (jobId, idempotencyKey).
+    expect(reprint.dispatchKey).toContain(idempotencyKey);
     // New row must go through the normal claim flow — never auto-claimed
     // by the original SUBMISSION_UNKNOWN status.
     expect(reprint.status).toBe("PENDING");
   });
 
-  it("double-click protection — two REPRINT clicks produce two distinct new PrintJob rows, NOT duplicates", async () => {
+  it("DOUBLE-CLICK PROTECTION — two REPRINT calls with the SAME idempotencyKey return the SAME row (no duplicate physical tickets)", async () => {
     const jobId = await makeSubmissionUnknownJob();
+    const idempotencyKey = `idem-double-${jobId}`;
 
-    const r1 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT" });
-    const r2 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT" });
+    const r1 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT", idempotencyKey });
+    const r2 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT", idempotencyKey });
 
-    expect((r1 as { id: string }).id).not.toBe((r2 as { id: string }).id);
-    expect((r1 as { dispatchKey: string }).dispatchKey).not.toBe((r2 as { dispatchKey: string }).dispatchKey);
+    // CRITICAL: same jobId + same idempotencyKey = same row, no duplicate.
+    // This is the property the restaurant double-click safety hinges on.
+    expect((r1 as { id: string }).id).toBe((r2 as { id: string }).id);
+    expect((r1 as { dispatchKey: string }).dispatchKey).toBe((r2 as { dispatchKey: string }).dispatchKey);
+    expect((r2 as { idempotentReplay?: boolean }).idempotentReplay).toBe(true);
 
     const all = await prisma.printJob.findMany({ where: { reprintOfId: jobId } });
-    expect(all).toHaveLength(2);
+    expect(all).toHaveLength(1); // EXACTLY ONE child PrintJob row, not two.
+  });
+
+  it("INTENTIONAL LATER REPRINT — a fresh idempotencyKey produces a fresh child row", async () => {
+    const jobId = await makeSubmissionUnknownJob();
+
+    const r1 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT", idempotencyKey: "first-click" });
+    const r2 = await printing.acknowledgePrintAmbiguity(ctx, jobId, { decision: "REPRINT", idempotencyKey: "later-click" });
+
+    expect((r1 as { id: string }).id).not.toBe((r2 as { id: string }).id);
+    const all = await prisma.printJob.findMany({ where: { reprintOfId: jobId } });
+    expect(all).toHaveLength(2); // Two distinct rows because the keys differ.
   });
 });
 
@@ -336,6 +358,35 @@ describe("PRINTING P0 — heartbeat writes visibleToService per route (Service-s
     expect(byType2.RECEIPT).toBe("READY");
     // KITCHEN unchanged
     expect(byType2.KITCHEN).toBe("AGENT_CANNOT_SEE");
+  });
+});
+
+describe("PRINTING P0 — Admin-side confirmPhysicalTestByAdmin converges with the Agent path", () => {
+  it("flips physicalTestConfirmed=true from an Admin ctx (same column, audit-able)", async () => {
+    const { workstationId } = await pairWorkstation();
+
+    const route = await workstations.confirmPhysicalTestByAdmin(ctx, workstationId, "KITCHEN");
+    expect(route.physicalTestConfirmed).toBe(true);
+
+    const reloaded = await prisma.workstationPrintRoute.findFirstOrThrow({
+      where: { workstationId, type: "KITCHEN" },
+    });
+    expect(reloaded.physicalTestConfirmedBy).toBe(`admin:${ctx.employeeId}`);
+  });
+
+  it("refuses to confirm a route on a workstation belonging to a different restaurant", async () => {
+    const { workstationId } = await pairWorkstation();
+    // Create a different restaurant's ctx
+    const otherTenant = await prisma.tenant.create({ data: { name: "Other", slug: randomUUID() } });
+    const otherRestaurant = await prisma.restaurant.create({ data: { tenantId: otherTenant.id, name: "B", currency: "RSD" } });
+    const otherCtx = {
+      ...ctx,
+      restaurantId: otherRestaurant.id,
+    };
+
+    await expect(
+      workstations.confirmPhysicalTestByAdmin(otherCtx, workstationId, "KITCHEN")
+    ).rejects.toThrow();
   });
 });
 

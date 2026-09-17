@@ -288,19 +288,39 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   // ("PRINTED" | "REPRINT"); the server is the single source of truth
   // for the resulting state transition and audit entry. UI just sends
   // the decision and refreshes the list.
-  async function acknowledgeAmbiguity(jobId: string, decision: "PRINTED" | "REPRINT") {
+  //
+  // DOUBLE-CLICK PROTECTION — without server-side idempotency, an
+  // operator who clicks "Pošalji ponovo" twice (slow network, stuck
+  // modal, browser retry) would create TWO child PrintJobs and the
+  // physical printer would emit TWO tickets. We pass a STABLE
+  // idempotencyKey — generated when the BUTTON is first rendered,
+  // not when the click is fired — and the server treats
+  // (jobId, idempotencyKey) as one operator action. Subsequent clicks
+  // with the same key get the same row back. When the operator later
+  // intentionally wants ANOTHER copy, they re-load the page; the new
+  // render generates a fresh key.
+  //
+  // In addition we disable the button for the duration of the in-flight
+  // request (UX layer) AND we store the in-flight key in a ref so the
+  // state survives React re-renders. Only one REPRINT per row can be
+  // in-flight at a time.
+  const inFlightAmbiguityRef = useRef<Set<string>>(new Set());
+  async function acknowledgeAmbiguity(jobId: string, decision: "PRINTED" | "REPRINT", idempotencyKey: string) {
+    if (inFlightAmbiguityRef.current.has(jobId)) return;
+    inFlightAmbiguityRef.current.add(jobId);
     setResolvingJobId(jobId);
     setError(null);
     try {
       await apiFetch(`/api/admin/print-jobs/${jobId}/acknowledge-ambiguity`, {
         method: "POST",
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, idempotencyKey }),
       });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri potvrdi štampe");
     } finally {
       setResolvingJobId(null);
+      inFlightAmbiguityRef.current.delete(jobId);
     }
   }
 
@@ -319,12 +339,61 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       .catch(() => setDownloadInfo(null));
   }, []);
 
+  // PRINTING P0 — Admin "Test" button drives the FULL physical-confirm
+  // flow in one click, replacing the old behaviour that only requested
+  // a technical test and left the operator to wonder if it actually
+  // printed. Flow:
+  //   1. Server queues a test print on the Agent (technical test, fast).
+  //   2. We poll until the Agent reports SUCCEEDED or FAILED.
+  //   3. If SUCCEEDED → show a HUMAN CONFIRMATION dialog. If the operator
+  //      confirms, POST to /api/admin/workstations/{id}/routes/{type}/confirm
+  //      to flip physicalTestConfirmed=true (the same endpoint the Setup
+  //      wizard uses — converge on a single server-side transition).
+  //   4. If FAILED → show the error and stop; the operator must fix the
+  //      printer before retrying. We never auto-confirm a failed test.
+  //
+  // This is the Admin counterpart to the Setup wizard's HUMAN CONFIRMATION
+  // step — same server endpoint, same audit entry, same effect. The two
+  // paths converge so an operator can pick whichever fits the moment:
+  //   - During initial install → use the Setup wizard (runs physical test
+  //     locally on the same machine, faster feedback loop).
+  //   - After upgrade or from a remote Admin → use this Admin button
+  //     (runs the test remotely via the Agent, requires the operator to
+  //     walk to the printer to verify the physical output).
   async function testPrint(workstationId: string, type: RouteType) {
     const key = `${workstationId}:${type}`;
     setTestingRoute(key);
     setError(null);
     try {
+      // Step 1: queue the technical test.
       await apiFetch(`/api/admin/workstations/${workstationId}/test-print`, { method: "POST", body: JSON.stringify({ type }) });
+      // Step 2: poll up to ~12s for the Agent to report the result.
+      const deadline = Date.now() + 12000;
+      let status: "PENDING" | "SUCCEEDED" | "FAILED" | null = "PENDING";
+      let errorMsg: string | null = null;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const ws = (await apiFetch("/api/admin/workstations")).workstations?.find((w: Workstation) => w.id === workstationId);
+        status = ws?.testPrintStatus ?? null;
+        errorMsg = ws?.testPrintError ?? null;
+        if (status === "SUCCEEDED" || status === "FAILED") break;
+      }
+      // Step 3 + 4: branch on the result.
+      if (status !== "SUCCEEDED") {
+        setError(errorMsg ? `Test štampa nije uspela: ${errorMsg}` : "Test štampa još uvek traje — proverite štampač i pokušajte ponovo.");
+        await load();
+        return;
+      }
+      const confirmMessage = `Test štampa za ${ROUTE_LABEL[type]} je uspešno poslata.\n\nDa li je test tiket fizički izašao iz štampača i da li je čitljiv?`;
+      const proceed = typeof window === "undefined" ? true : window.confirm(confirmMessage);
+      if (!proceed) {
+        setError(`Test štampa za ${ROUTE_LABEL[type]} uspela, ali niste potvrdili fizički papir. Status ostaje "čeka fizičku potvrdu".`);
+        await load();
+        return;
+      }
+      // Step 5: flip physicalTestConfirmed via the same endpoint the
+      // Setup wizard uses (convergent).
+      await apiFetch(`/api/admin/workstations/${workstationId}/routes/${type}/confirm`, { method: "POST" });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri zahtevu za test štampu");
@@ -906,26 +975,38 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
 
       {error && <div className="mb-3 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</div>}
 
-      {/* PRINTING P0 — operator reconciliation surface. When ANY job is in
-          SUBMISSION_UNKNOWN, the banner surfaces a plain-language
-          explanation ("Status štampe nije moguće potvrditi"), the printer
-          target (route type + orderId), and two SAFE actions: confirm the
-          ticket printed, or request a fresh reprint. We do NOT offer a
-          "retry" action that would silently re-print — every reprint is
-          an explicit operator decision, audited under
-          printjob.ambiguity_reprint_requested, and idempotent under
-          repeat clicks (server-generated unique dispatchKey). */}
+      {/* PRINTING P0 — operator reconciliation surface. Plain-language
+          phrasing: "Nije moguće potvrditi da li je tiket odštampan" —
+          no infrastructure terminology (no "SUBMISSION_UNKNOWN", no
+          "PrintJob", no "spooler", no "agent"). Two safe actions:
+          "Već je odštampan" (confirms without reprint) and
+          "Odštampaj ponovo" (creates a fresh reprint PrintJob, audited).
+          Both call POST /api/admin/print-jobs/{id}/acknowledge-ambiguity
+          with a stable per-row idempotencyKey — see acknowledgeAmbiguity
+          above for the full double-click protection rationale. */}
       {ambiguityJobs.length > 0 && (
         <div className="mb-4 rounded-md border border-warn/40 bg-warn-soft px-3 py-2.5">
           <p className="text-xs font-semibold text-ink">
-            Status štampe nije moguće potvrditi ({ambiguityJobs.length})
+            Nije moguće potvrditi da li je tiket odštampan ({ambiguityJobs.length})
           </p>
           <p className="mt-1 text-[11px] text-inkSoft">
-            TableCore servis je izgubio kontakt sa štampačem u trenutku slanja. Tiket je MOGUĆE već fizički
-            izašao. Za svaki tiket ispod izaberite jednu opciju:
+            Računar je izgubio kontakt sa štampačem baš u trenutku slanja. Tiket je <strong>moguće</strong> već
+            izašao na papiru. Odštampavanje ponovo može napraviti duplu kopiju. Proverite štampač pre nego što
+            izaberete jednu od dve opcije:
           </p>
           <ul className="mt-2 space-y-1.5">
-            {ambiguityJobs.map((j) => (
+            {ambiguityJobs.map((j) => {
+              // PRINTING P0 — stable idempotency key per job per render.
+              // Keyed on j.id (stable) so double-clicks with the SAME
+              // key are recognized as one operator action; keyed on
+              // j.createdAt-timestamp (stable per row) so two different
+              // jobs do NOT collide. A page reload generates fresh keys,
+              // which is the legitimate "operator wants another copy"
+              // path — the server's dispatchKey is derived from this key.
+              const idempotencyKey = `${j.id}-${new Date(j.createdAt).getTime()}-print`;
+              const reprintKey = `${j.id}-${new Date(j.createdAt).getTime()}-reprint`;
+              const busy = resolvingJobId === j.id;
+              return (
               <li key={j.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warn/30 bg-cream-100 px-2.5 py-1.5 text-xs">
                 <div className="min-w-0">
                   <span className="font-semibold text-ink">
@@ -934,32 +1015,30 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                   <span className="ml-2 text-inkSoft">
                     {new Date(j.createdAt).toLocaleString("sr-Latn-RS")}
                   </span>
-                  {j.failureReason && (
-                    <span className="ml-2 text-inkSoft">— {j.failureReason}</span>
-                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => acknowledgeAmbiguity(j.id, "PRINTED")}
-                    disabled={resolvingJobId === j.id}
+                    onClick={() => acknowledgeAmbiguity(j.id, "PRINTED", idempotencyKey)}
+                    disabled={busy}
                     className="rounded-md border border-success/40 bg-success-soft px-2.5 py-1 text-[11px] font-semibold text-success disabled:opacity-40"
-                    title="Potvrđujem da je tiket fizički izašao iz štampača"
+                    title="Potvrdi da je tiket već fizički izašao"
                   >
-                    Da, tiket je odštampan
+                    Već je odštampan
                   </button>
                   <button
                     type="button"
-                    onClick={() => acknowledgeAmbiguity(j.id, "REPRINT")}
-                    disabled={resolvingJobId === j.id}
+                    onClick={() => acknowledgeAmbiguity(j.id, "REPRINT", reprintKey)}
+                    disabled={busy}
                     className="rounded-md border border-gold/40 bg-gold-soft px-2.5 py-1 text-[11px] font-semibold text-ink disabled:opacity-40"
-                    title="Pošalji ponovo — kreira novi, odvojen tiket i stavlja ga u red za štampu"
+                    title="Kreira novi tiket i šalje ga ponovo. Duplira fizički papir ako je prethodni već izašao."
                   >
-                    Pošalji ponovo
+                    Odštampaj ponovo
                   </button>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}

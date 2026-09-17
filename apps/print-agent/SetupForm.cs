@@ -47,7 +47,10 @@ public sealed class SetupForm : Form
     // fizičkog test računara (donja dugmad su nestajala/sekla se kad bi se
     // ova poruka pojavila, jer je ranije bila AutoSize+Visible=false, što
     // MENJA ukupnu visinu sadržaja u trenutku kad ekran ima fiksnu visinu).
-    private readonly Label _pairFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 32), TextAlign = ContentAlignment.TopLeft };
+    // Word-wrap via MaximumSize+AutoSize keeps the form from clipping long
+    // Serbian messages at 125 %/150 % DPI on Windows 11 where font ascent
+    // pushes past the original fixed 32 px height.
+    private readonly Label _pairFeedbackLabel = new() { AutoSize = true, MaximumSize = new Size(440, 0), TextAlign = ContentAlignment.TopLeft };
     // Physical QA follow-up — explicit re-pair confirmation. Reserved-space,
     // always-visible-when-active label (same "never Visible=false toggling
     // that changes layout height mid-flow" convention as _pairFeedbackLabel)
@@ -546,6 +549,8 @@ public sealed class SetupForm : Form
                     "Štampači na kojima servis ne vidi izabrano:\n" + list + "\n\n" +
                     "Podešavanje se ne može završiti dok se ovo ne reši.";
                 MessageBox.Show(this, msg, "TableCore — štampač nije dostupan servisu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // (see MessageBox above — left in place for the rare service-cannot-see failure;
+                // the wizard's HUD label below carries the operator-facing message)
                 _saveFeedbackLabel.Text = "✗ Nije moguće završiti podešavanje — servis ne vidi izabrane štampače. Ponovo instalirajte drajvere i restartujte računar.";
                 _saveFeedbackLabel.ForeColor = Color.Firebrick;
                 _saveButton.Enabled = true;
@@ -601,22 +606,30 @@ public sealed class SetupForm : Form
                 // HUMAN CONFIRMATION — the gate that distinguishes "spooler
                 // accepted" from "physical paper came out correctly". Only
                 // an explicit YES flips physicalTestConfirmed on the server.
-                var askMsg =
-                    $"TEST ŠTAMPE — RUTA {readiness.Type}\n\n" +
+                // TableCore-styled native confirmation dialog (NOT a system
+                // MessageBox) — same cream palette + DPI-safe layout as
+                // SetupForm. The setup wizard has exactly one human
+                // confirmation point per route; this is it. The dialog
+                // accepts Enter (YES = default) and Escape (NO).
+                using (var dlg = new WizardConfirmationForm(
+                    $"Test štampe za {readiness.Type}",
+                    $"Test tiket je upravo poslat na štampač.\n\n" +
                     $"Štampač: {readiness.PrinterName}\n" +
                     $"Širina papira: {readiness.PaperWidthMm} mm\n\n" +
-                    $"Test tiket je upravo poslat na štampač.\n\n" +
-                    $"Da li je test tiket fizički izašao iz štampača i da li je čitljiv?";
-                var ask = MessageBox.Show(this, askMsg, $"TableCore — potvrda za {readiness.Type}", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (ask != DialogResult.Yes)
+                    $"Da li je test tiket fizički izašao iz štampača i da li je čitljiv?"
+                ))
                 {
-                    _saveFeedbackLabel.Text =
-                        $"Ruta {readiness.Type} NIJE fizički potvrđena. " +
-                        "Proverite štampač, pa kliknite dugme ponovo.";
-                    _saveFeedbackLabel.ForeColor = Color.FromArgb(0xC0, 0x6A, 0x00);
-                    _saveButton.Enabled = true;
-                    _saveButton.Text = previousSaveText;
-                    return;
+                    var ask = dlg.ShowDialog(this);
+                    if (ask != DialogResult.Yes)
+                    {
+                        _saveFeedbackLabel.Text =
+                            $"Ruta {readiness.Type} NIJE fizički potvrđena. " +
+                            "Proverite štampač, pa kliknite dugme ponovo.";
+                        _saveFeedbackLabel.ForeColor = Color.FromArgb(0xC0, 0x6A, 0x00);
+                        _saveButton.Enabled = true;
+                        _saveButton.Text = previousSaveText;
+                        return;
+                    }
                 }
 
                 var confirmed = await DeliveryClient.ConfirmPhysicalTest(_endpoint.BaseUrl, credential, readiness.Type);

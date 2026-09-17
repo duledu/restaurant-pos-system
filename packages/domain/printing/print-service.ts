@@ -863,8 +863,9 @@ export async function listSubmissionUnknownJobs(ctx: AuthContext) {
  * Service restart / network reconnect / Admin reconfiguration. This
  * function is the ONLY way to move such a job out of that terminal
  * state, and it is idempotent: calling it twice with the same decision
- * on the same job returns the existing record (no second audit entry,
- * no second timestamp bump).
+ * AND the same idempotencyKey on the same job returns the existing
+ * record (no second audit entry, no second timestamp bump, no second
+ * physical reprint PrintJob).
  *
  * Two valid decisions:
  *
@@ -882,12 +883,26 @@ export async function listSubmissionUnknownJobs(ctx: AuthContext) {
  *               attempt), and a NEW PrintJob is created with
  *               `isReprint = true` and `reprintOfId = this.id`, reusing
  *               the existing reprint pipeline so audit + receipt
- *               semantics are identical to a manual reprint. Idempotent
- *               on repeated REPRINT calls: a fresh dispatchKey is
- *               generated each time so each click produces exactly one
- *               new PrintJob — but the @@unique([orderId, dispatchKey])
- *               constraint makes double-click-within-the-same-ms safe
- *               even at the SQL boundary.
+ *               semantics are identical to a manual reprint. The
+ *               child PrintJob's dispatchKey is DETERMINISTICALLY
+ *               derived from `(parentJobId, idempotencyKey)` so a
+ *               double-click with the SAME idempotencyKey hits the
+ *               @@unique([orderId, dispatchKey]) constraint and
+ *               returns the existing child without creating a second
+ *               one. INTENTIONAL later reprints are still possible by
+ *               generating a fresh idempotencyKey — the Admin UI does
+ *               this automatically when the user clicks the button
+ *               again after the request completes.
+ *
+ * Idempotency:
+ *   The CALLER supplies an idempotencyKey (UUID) generated at the moment
+ *   of click. It is NOT derived server-side. This is the standard
+ *   pattern (Stripe, PayPal, etc.) — a slow network, stuck modal, or
+ *   browser retry can all re-fire the SAME user intent, and the
+ *   idempotencyKey is what makes "the same intent" recognizable. The
+ *   UI keeps the idempotencyKey in a ref (not a fresh UUID per click)
+ *   for the entire duration of the request and ignores subsequent
+ *   clicks until the request resolves.
  *
  * Anything else (job not found, job in a different status, employee
  * without the right permission) throws — no silent success.
@@ -926,7 +941,13 @@ export async function acknowledgePrintAmbiguity(
   }
 
   if (input.decision === "PRINTED") {
-    if (job.operatorConfirmedPrintedAt) return job; // idempotent
+    // PRINTED idempotency: operatorConfirmedPrintedAt is the truth source.
+    // Once set, this PrintJob is terminal — every subsequent call (with
+    // ANY idempotencyKey, intentional or accidental) returns the same
+    // record without re-writing the audit log.
+    if (job.operatorConfirmedPrintedAt) {
+      return { id: job.id, status: "PRINTED", printedAt: job.operatorConfirmedPrintedAt, idempotentReplay: true };
+    }
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const j = await tx.printJob.update({
@@ -937,9 +958,6 @@ export async function acknowledgePrintAmbiguity(
           operatorConfirmedPrintedAt: now,
           operatorConfirmedPrintedBy: ctx.employeeId,
           failureReason: null,
-          // resultOutcome was previously "SUBMISSION_UNKNOWN"; flip to a
-          // permanent terminal value that downstream KDS / audit
-          // surfaces treat as "the ticket was successfully produced".
           resultOutcome: "SUBMITTED_TO_SPOOLER",
         },
         select: { id: true, status: true, printedAt: true },
@@ -949,7 +967,7 @@ export async function acknowledgePrintAmbiguity(
         entityId: job.id,
         action: "printjob.ambiguity_confirmed_printed",
         previousValue: { status: "SUBMISSION_UNKNOWN" },
-        newValue: { status: "PRINTED", at: now.toISOString(), operatorId: ctx.employeeId },
+        newValue: { status: "PRINTED", at: now.toISOString(), operatorId: ctx.employeeId, idempotencyKey: input.idempotencyKey },
         locationId: job.locationId,
       });
       return j;
@@ -958,61 +976,81 @@ export async function acknowledgePrintAmbiguity(
   }
 
   // decision === "REPRINT"
-  if (job.operatorReprintRequestedAt) return job; // idempotent
-  const now = new Date();
-  // Build a UNIQUE dispatchKey per call so the @@unique([orderId,
-  // dispatchKey]) constraint guarantees each click produces exactly one
-  // new PrintJob (no double physical printing under rapid clicks).
-  const dispatchKey = `reprint-ambiguity:${job.id}:${now.getTime()}`;
-  const newJob = await prisma.$transaction(async (tx) => {
-    const created = await tx.printJob.create({
-      data: {
-        restaurantId: job.restaurantId,
-        locationId: job.locationId,
-        orderId: job.orderId,
-        type: job.type,
-        station: job.station,
-        // REPRINT carries the ORIGINAL frozen content (the ambiguity
-        // does not invalidate what was about to print) so audit history
-        // matches the visible ticket byte-for-byte.
-        content: job.content as object,
-        dispatchKey,
-        status: "PENDING",
-        isAutomatic: true,
-        isReprint: true,
-        reprintOfId: job.id,
-        requestedBy: ctx.employeeId,
-        resultOutcome: null,
-        // Mark the ORIGINAL as operator-reprint-requested; this both
-        // surfaces the recovery action on the Admin's "PrintJobs in
-        // SUBMISSION_UNKNOWN" panel and prevents a second reprint click
-        // from triggering two new rows.
-      },
-      select: { id: true, dispatchKey: true, status: true, reprintOfId: true },
-    });
-    await tx.printJob.update({
-      where: { id: job.id },
-      data: {
-        operatorReprintRequestedAt: now,
-        operatorReprintRequestedBy: ctx.employeeId,
-      },
-    });
-    await recordAuditEntry(ctx, {
-      entityType: "PrintJob",
-      entityId: job.id,
-      action: "printjob.ambiguity_reprint_requested",
-      previousValue: { operatorReprintRequestedAt: null },
-      newValue: {
-        at: now.toISOString(),
-        operatorId: ctx.employeeId,
-        newPrintJobId: created.id,
-        newDispatchKey: created.dispatchKey,
-      },
-      locationId: job.locationId,
-    });
-    return created;
+  // REPRINT idempotency: derive the child PrintJob's dispatchKey
+  // DETERMINISTICALLY from (parentJobId, idempotencyKey). The
+  // @@unique([orderId, dispatchKey]) constraint guarantees that the
+  // second click with the SAME idempotencyKey either:
+  //   (a) returns the existing child via findUnique, or
+  //   (b) trips a unique-violation on insert which we catch and
+  //       recover from by re-reading the existing row.
+  // A fresh idempotencyKey (Admin re-clicks after the request resolves)
+  // produces a fresh dispatchKey and a fresh child PrintJob — this is
+  // the legitimate "operator wants ANOTHER copy" path.
+  const childDispatchKey = `reprint-ambiguity:${job.id}:${input.idempotencyKey}`;
+  const existingChild = await prisma.printJob.findUnique({
+    where: { orderId_dispatchKey: { orderId: job.orderId, dispatchKey: childDispatchKey } },
+    select: { id: true, dispatchKey: true, status: true, reprintOfId: true, createdAt: true },
   });
-  return newJob;
+  if (existingChild) {
+    return { ...existingChild, idempotentReplay: true };
+  }
+  const now = new Date();
+  try {
+    const newJob = await prisma.$transaction(async (tx) => {
+      const created = await tx.printJob.create({
+        data: {
+          restaurantId: job.restaurantId,
+          locationId: job.locationId,
+          orderId: job.orderId,
+          type: job.type,
+          station: job.station,
+          content: job.content as object,
+          dispatchKey: childDispatchKey,
+          status: "PENDING",
+          isAutomatic: true,
+          isReprint: true,
+          reprintOfId: job.id,
+          requestedBy: ctx.employeeId,
+          resultOutcome: null,
+        },
+        select: { id: true, dispatchKey: true, status: true, reprintOfId: true, createdAt: true },
+      });
+      await tx.printJob.update({
+        where: { id: job.id },
+        data: {
+          operatorReprintRequestedAt: now,
+          operatorReprintRequestedBy: ctx.employeeId,
+        },
+      });
+      await recordAuditEntry(ctx, {
+        entityType: "PrintJob",
+        entityId: job.id,
+        action: "printjob.ambiguity_reprint_requested",
+        previousValue: { operatorReprintRequestedAt: null },
+        newValue: {
+          at: now.toISOString(),
+          operatorId: ctx.employeeId,
+          idempotencyKey: input.idempotencyKey,
+          newPrintJobId: created.id,
+          newDispatchKey: created.dispatchKey,
+        },
+        locationId: job.locationId,
+      });
+      return created;
+    });
+    return newJob;
+  } catch (err: any) {
+    // Race: a concurrent request with the same idempotencyKey won the
+    // insert. Recover by re-reading the existing child.
+    if (err?.code === "P2002" || /unique/i.test(String(err?.message ?? ""))) {
+      const recovered = await prisma.printJob.findUnique({
+        where: { orderId_dispatchKey: { orderId: job.orderId, dispatchKey: childDispatchKey } },
+        select: { id: true, dispatchKey: true, status: true, reprintOfId: true, createdAt: true },
+      });
+      if (recovered) return { ...recovered, idempotentReplay: true };
+    }
+    throw err;
+  }
 }
 
 export { stationLabelFor };
