@@ -16,7 +16,22 @@ namespace TableCore.PrintAgent;
 /// </summary>
 public static class PairingClient
 {
-    private static readonly HttpClient Http = new();
+    // PRINTING P0 — static HttpClient built with a custom handler that
+    // DISABLES automatic cross-origin redirects. The Vercel Deployment
+    // Protection bypass header is added as a DefaultRequestHeader (see
+    // AgentEndpoint.ConfigureHttpClientDefaults / ConfigureBypassHeader
+    // below). With HttpClient's default AllowAutoRedirect=true, the bypass
+    // header is forwarded to the redirect target — and if the bypass is ever
+    // wrong/expired, Vercel redirects to vercel.com/sso-api, which would leak
+    // the secret to a third-party host. Disabling auto-redirect forces the
+    // bypass to ONLY reach the explicitly-configured PREPROD origin; any 3xx
+    // response surfaces as a non-2xx, the operator sees it, and the secret
+    // never travels anywhere else. PairingClient and DeliveryClient share the
+    // SAME redirect-handling rule — they cannot diverge.
+    private static readonly HttpClient Http = new(new HttpClientHandler
+    {
+        AllowAutoRedirect = false,
+    });
 
     /// <summary>
     /// Pozvano TAČNO JEDNOM, odmah posle AgentEndpoint.Resolve — vidi

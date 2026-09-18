@@ -67,7 +67,16 @@ public sealed record AgentRouteReadiness(
 /// </summary>
 public static class DeliveryClient
 {
-    private static readonly HttpClient Http = new();
+    // PRINTING P0 — see PairingClient.cs for the same reasoning. Static
+    // HttpClient built with AllowAutoRedirect=false so the Vercel bypass
+    // header cannot be forwarded to vercel.com or any other host via an
+    // automatic redirect. PairingClient and DeliveryClient MUST use the
+    // same redirect rule so the security guarantee is uniform across
+    // both Agent subsystems.
+    private static readonly HttpClient Http = new(new HttpClientHandler
+    {
+        AllowAutoRedirect = false,
+    });
 
     /// <summary>
     /// Pozvano TAČNO JEDNOM, odmah posle AgentEndpoint.Resolve — vidi
