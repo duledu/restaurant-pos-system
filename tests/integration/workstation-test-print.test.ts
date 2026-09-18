@@ -133,7 +133,7 @@ describe("agent download info — no binary in the database", () => {
     const info = workstations.getAgentDownloadInfo(ctx);
     expect(info.available).toBe(false);
     expect(info.url).toBeNull();
-    expect(info.version).toBe("1.0.0-pilot.2");
+    expect(info.version).toBe("1.0.0-rc.2");
   });
 
   it("reports the configured URL when PRINT_AGENT_INSTALLER_URL is set, without ever touching the database", () => {

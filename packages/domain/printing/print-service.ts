@@ -398,7 +398,17 @@ export async function dispatchReceiptPrintJob(
       // the waiter UI correctly reported "sent" (the job genuinely exists),
       // but no Agent ever printed it. RECEIPT now dispatches automatic
       // exactly like KITCHEN/BAR.
-      isAutomatic: true,
+      // A user-initiated reprint is NOT automatic: it must NOT be picked
+      // up by the Print Agent's automatic poll/claim loop, otherwise
+      // clicking "Reprint" silently produces a duplicate physical print
+      // (the operator triggered the click AND the agent polls and grabs
+      // it within seconds). The same separation applies to KITCHEN/BAR
+      // manual prints (see requestStationPrint); this brings RECEIPT into
+      // parity. The original "RECEIPT physical-failure root cause" fix
+      // intentionally made the AUTOMATIC payment-time RECEIPT dispatch
+      // agent-claimable — that path calls this function with
+      // isReprint: false, so isAutomatic stays true there.
+      isAutomatic: !opts.isReprint,
       isReprint: opts.isReprint,
       reprintOfId: original?.id ?? null,
       requestedBy: opts.requestedBy,

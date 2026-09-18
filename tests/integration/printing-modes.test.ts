@@ -23,13 +23,27 @@ interface Fixture {
 }
 
 function context(fixture: Fixture, roles: string[], employeeId: string, restaurantId = fixture.restaurantId): AuthContext {
+  // Permission Set mirrors the production RBAC catalog: roles with management
+  // authority get workstations.manage / settings.manage, floor roles get
+  // only orders.print / production. The pre-existing fixture granted
+  // workstations.manage to EVERY role, which made the
+  // "rejects an unauthorized mode change" test trivially pass before the
+  // requirePermission call was added — a fixture-only omission, NOT a
+  // production authorization regression. No real WAITER/KITCHEN/BAR has
+  // workstations.manage in production.
+  const isManagement = roles.some((r) => r === "OWNER" || r === "MANAGER" || r === "ADMIN");
+  const permissions = new Set<string>(["orders.print", "production.view", "production.manage"]);
+  if (isManagement) {
+    permissions.add("workstations.manage");
+    permissions.add("settings.manage");
+  }
   return {
     userId: employeeId,
     employeeId,
     restaurantId,
     locationIds: [fixture.locationId],
     roles,
-    permissions: new Set(["workstations.manage", "orders.print", "production.manage"]),
+    permissions,
   };
 }
 

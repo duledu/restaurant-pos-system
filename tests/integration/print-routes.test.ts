@@ -24,13 +24,25 @@ interface Fixture {
 }
 
 function context(fixture: Fixture, roles: string[], employeeId: string, restaurantId = fixture.restaurantId): AuthContext {
+  // Same role-aware permission split as printing-modes.test.ts (mirror
+  // production RBAC). Floor roles (WAITER/KITCHEN/BAR) get only
+  // orders.print / production permissions; management roles get
+  // workstations.manage + settings.manage. Previously the fixture
+  // granted workstations.manage to every role, which would hide any
+  // real authorization regression in the RECEIPT poll/claim path.
+  const isManagement = roles.some((r) => r === "OWNER" || r === "MANAGER" || r === "ADMIN");
+  const permissions = new Set<string>(["orders.print", "production.view", "production.manage"]);
+  if (isManagement) {
+    permissions.add("workstations.manage");
+    permissions.add("settings.manage");
+  }
   return {
     userId: employeeId,
     employeeId,
     restaurantId,
     locationIds: [fixture.locationId],
     roles,
-    permissions: new Set(["workstations.manage", "orders.print", "production.manage"]),
+    permissions,
   };
 }
 
@@ -131,6 +143,16 @@ describe("Printing V2 — one Agent, multiple print routes sharing one printer",
     const claimed = await agentPrinting.pollAndClaim(wsCtx);
     expect(claimed).not.toBeNull();
     expect(claimed?.documentType).toBe("RECEIPT");
+
+    // The full Print Agent flow is claim -> startSubmission -> submitResult.
+    // Tests in agent-print-delivery.test.ts that target KITCHEN/BAR call
+    // beginSubmission between these two; this RECEIPT-specific test was
+    // written before the 3-step flow was the only valid path and called
+    // submitResult directly, which trips the "Submission was not started"
+    // guard in confirmPrintResult. Add the missing step here (no
+    // production behavior is changed — the guard and the helper already
+    // exist and are used by every other Agent claim path).
+    await agentPrinting.beginSubmission(wsCtx, claimed!.jobId, claimed!.attemptId);
 
     // Confirming the outcome flows through the same PrintJob state machine
     // as KITCHEN/BAR — no separate RECEIPT lifecycle was invented.

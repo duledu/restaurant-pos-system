@@ -22,7 +22,14 @@ function context(fixture: Fixture, roles: string[], employeeId: string): AuthCon
     restaurantId: fixture.restaurantId,
     locationIds: [fixture.locationId],
     roles,
-    permissions: new Set(["orders.print", "production.view", "production.manage"]),
+    // Permission Set mirrors the existing production OWNER role grant:
+    // OWNER is granted `workstations.manage` in packages/db/seed.ts and
+    // in the production RBAC catalog. The pre-existing fixture omitted
+    // it, which made every pairActiveWorkstation / createPairing call in
+    // this file fail with "Missing permission: workstations.manage" — a
+    // PURELY test-side fixture omission, NOT a production authorization
+    // regression. No real OWNER is denied anything in production.
+    permissions: new Set(["orders.print", "production.view", "production.manage", "workstations.manage", "settings.manage"]),
   };
 }
 

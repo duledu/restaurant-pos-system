@@ -614,9 +614,14 @@ export function getAgentDownloadInfo(ctx: AuthContext) {
     url,
     // Version MORA se poklapati sa verzijom OBJAVLJENOG instalera koji
     // PRINT_AGENT_INSTALLER_URL stvarno servira. Ažurira se kad se
-    // release asset zameni. v1.0.0-rc.1 = Printing P0 production-ready
-    // build (rebuilt against final P0 SetupForm.cs + DeliveryClient.cs).
-    version: "1.0.0-rc.1",
+    // release asset zameni. v1.0.0-rc.2 = Printing P0 production-ready
+    // build including the Agent-side cross-origin redirect protection
+    // (apps/print-agent/PairingClient.cs + DeliveryClient.cs now construct
+    // HttpClient with HttpClientHandler { AllowAutoRedirect = false } so
+    // the embedded Vercel Deployment Protection bypass header can never
+    // be forwarded to a third-party origin via a 3xx redirect) and the
+    // PREPROD installer version bump in TableCorePrintAgent.iss.
+    version: "1.0.0-rc.2",
     supportedOS: "Windows 10 64-bit, Windows 11 64-bit (Windows 11 physical hardware acceptance pending)",
   };
 }

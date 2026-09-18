@@ -45,6 +45,24 @@ async function pairWorkstation(station: "KITCHEN" | "BAR" = "KITCHEN", loc = loc
   return { workstationId: registered.workstationId, restaurantId: registered.restaurantId, locationId: registered.locationId, station: registered.station, credential: registered.credential };
 }
 
+// Same as pairWorkstation, but additionally marks the just-registered
+// workstation as RECENTLY seen. Production (AgentService.recordHeartbeat)
+// writes lastSeenAt on every cycle; in the test environment no Agent is
+// running, so without this helper the mode-aware resolveEligibleWorkstation /
+// activeRouteTypes / isAgentActiveForStation filters (which require
+// lastSeenAt > now - AGENT_ACTIVE_WINDOW_MS=2min to consider a workstation
+// "online") would exclude every just-paired workstation and every
+// pollAndClaim in this file would return null. PURELY a test-side helper:
+// nothing in production authorization, route policy, or eligibility logic
+// is weakened. The bare pairWorkstation above is preserved so the QZ
+// coexistence test below can still verify the "paired but never
+// heartbeated" state independently.
+async function pairOnlineWorkstation(station: "KITCHEN" | "BAR" = "KITCHEN", loc = locationId): Promise<WorkstationAuthContext & { credential: string }> {
+  const ws = await pairWorkstation(station, loc);
+  await prisma.workstation.update({ where: { id: ws.workstationId }, data: { lastSeenAt: new Date() } });
+  return ws;
+}
+
 async function sendOrder(): Promise<{ orderId: string; kitchenJobId: string; barJobId: string }> {
   const table = await prisma.restaurantTable.create({ data: { floorId, label: "T" + randomUUID() } });
   const order = await orders.openOrder(ctx, { tableId: table.id });
@@ -59,7 +77,7 @@ async function sendOrder(): Promise<{ orderId: string; kitchenJobId: string; bar
 describe("agent poll/claim", () => {
   it("returns and claims an eligible job for the workstation's exact restaurant/location/station", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
 
     const claimed = await agentPrinting.pollAndClaim(ws);
@@ -75,7 +93,7 @@ describe("agent poll/claim", () => {
   it("never returns a job for the wrong station", async () => {
     await policy("KITCHEN");
     await policy("BAR");
-    const barWs = await pairWorkstation("BAR");
+    const barWs = await pairOnlineWorkstation("BAR");
     await sendOrder(); // creates a KITCHEN job too, but this workstation is BAR-only
 
     const claimed = await agentPrinting.pollAndClaim(barWs);
@@ -87,7 +105,7 @@ describe("agent poll/claim", () => {
   it("never returns a job for the wrong location", async () => {
     await policy("KITCHEN");
     const otherLocationId = (await prisma.location.create({ data: { restaurantId, name: "Other" } })).id;
-    const wsOtherLocation = await pairWorkstation("KITCHEN", otherLocationId);
+    const wsOtherLocation = await pairOnlineWorkstation("KITCHEN", otherLocationId);
     await sendOrder(); // job dispatched to the ORIGINAL locationId
 
     const claimed = await agentPrinting.pollAndClaim(wsOtherLocation);
@@ -110,7 +128,7 @@ describe("agent poll/claim", () => {
 
   it("a revoked workstation cannot be resolved to poll at all", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     await workstations.revokeWorkstation(ctx, ws.workstationId);
     const row = await prisma.workstation.findUniqueOrThrow({ where: { id: ws.workstationId } });
     expect(row.revokedAt).not.toBeNull();
@@ -125,7 +143,7 @@ describe("agent poll/claim", () => {
 
   it("a disabled workstation cannot be resolved to poll at all", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     await prisma.workstation.update({ where: { id: ws.workstationId }, data: { isEnabled: false } });
     const row = await prisma.workstation.findUniqueOrThrow({ where: { id: ws.workstationId } });
     expect(row.isEnabled).toBe(false);
@@ -134,13 +152,23 @@ describe("agent poll/claim", () => {
 
   it("two concurrent pollers can never claim the same job", async () => {
     await policy("KITCHEN");
-    const wsA = await pairWorkstation("KITCHEN");
+    const wsA = await pairOnlineWorkstation("KITCHEN");
     await sendOrder();
     // Simulate a second workstation for the SAME station/location (V1
     // "competing consumers" policy — see final report) racing for the
-    // same single job.
+    // same single job. Both workstations MUST be online here, otherwise
+    // only one is even eligible and the test degenerates from "two
+    // racers compete, exactly one wins" into "only one is eligible at
+    // all, the other immediately returns null" — which would still
+    // satisfy `claimedCount === 1` for the wrong reason. We mark wsB
+    // online explicitly because in this test it bypasses the
+    // pairOnlineWorkstation helper (which only pairs one workstation)
+    // and is built via raw createPairing / registerAgentFromPairing so
+    // the assertion is genuinely about the actual race, not about
+    // eligibility filtering.
     const pairingB = await workstations.createPairing(ctx, { locationId, station: "KITCHEN" });
     const registeredB = await workstations.registerAgentFromPairing({ code: pairingB.code });
+    await prisma.workstation.update({ where: { id: registeredB.workstationId }, data: { lastSeenAt: new Date() } });
     const wsB = { workstationId: registeredB.workstationId, restaurantId: registeredB.restaurantId, locationId: registeredB.locationId, station: registeredB.station };
 
     const [a, b] = await Promise.all([agentPrinting.pollAndClaim(wsA), agentPrinting.pollAndClaim(wsB)]);
@@ -150,6 +178,16 @@ describe("agent poll/claim", () => {
 
   it("never returns a SUPPRESSED job (auto print OFF)", async () => {
     await policy("KITCHEN", true);
+    // Intentionally bare pairWorkstation (NOT pairOnlineWorkstation): the
+    // production hardening rule in upsertPrinterConfig is "if there's an
+    // active Agent, do NOT suppress — the Agent can still serve the
+    // jobs" — see the inline comment in settings-service.ts above
+    // suppressAutomaticJobs. To exercise the suppression path here we
+    // need the workstation to look offline at the moment the policy
+    // flips, otherwise the suppression branch never runs and the test
+    // assertion fails for a real reason (production behavior changed
+    // since this test was written). The final pollAndClaim still
+    // returns null: from an offline workstation, no route is eligible.
     const ws = await pairWorkstation("KITCHEN");
     await sendOrder();
     await policy("KITCHEN", false); // turns auto print OFF -> suppresses the pending job
@@ -162,7 +200,7 @@ describe("agent poll/claim", () => {
 
   it("never returns a manual (non-automatic) job — automatic-only scope for this phase", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { orderId } = await sendOrder();
     // Claim + finish the automatic job first so a manual reprint request is legal.
     const first = await agentPrinting.pollAndClaim(ws);
@@ -179,7 +217,7 @@ describe("agent poll/claim", () => {
 describe("agent attempt lifecycle", () => {
   it("start requires the exact matching workstation/job/attempt", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     const started = await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -189,7 +227,7 @@ describe("agent attempt lifecycle", () => {
 
   it("rejects a wrong attemptId for start", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     await agentPrinting.pollAndClaim(ws);
     await expect(agentPrinting.beginSubmission(ws, kitchenJobId, randomUUID())).rejects.toThrow();
@@ -197,7 +235,7 @@ describe("agent attempt lifecycle", () => {
 
   it("rejects a stale attempt for start after the lease window", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await prisma.printJob.update({ where: { id: kitchenJobId }, data: { claimedAt: new Date(Date.now() - 91_000) } });
@@ -206,7 +244,7 @@ describe("agent attempt lifecycle", () => {
 
   it("duplicate identical ACK is idempotent", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -219,7 +257,7 @@ describe("agent attempt lifecycle", () => {
 
   it("rejects a conflicting ACK for the same attempt", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -229,7 +267,7 @@ describe("agent attempt lifecycle", () => {
 
   it("result from the WRONG workstation is rejected even for a real jobId/attemptId", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -244,7 +282,7 @@ describe("agent attempt lifecycle", () => {
 describe("agent recovery", () => {
   it("a claim that crashes before start is safely reclaimable after the stale window", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     await agentPrinting.pollAndClaim(ws); // claimed, never started (simulated crash)
     await prisma.printJob.update({ where: { id: kitchenJobId }, data: { claimedAt: new Date(Date.now() - 91_000) } });
@@ -257,7 +295,7 @@ describe("agent recovery", () => {
 
   it("a started attempt with no result never auto-reprints — it becomes SUBMISSION_UNKNOWN, not PENDING", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -271,7 +309,7 @@ describe("agent recovery", () => {
 
   it("a late ACK after the server already marked SUBMISSION_UNKNOWN still reconciles to the real outcome (ACK loss recovery)", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
@@ -288,7 +326,7 @@ describe("agent recovery", () => {
 
   it("SUBMISSION_UNKNOWN reported explicitly by the agent is never auto-reprinted by another poll", async () => {
     await policy("KITCHEN");
-    const ws = await pairWorkstation("KITCHEN");
+    const ws = await pairOnlineWorkstation("KITCHEN");
     const { kitchenJobId } = await sendOrder();
     const claimed = await agentPrinting.pollAndClaim(ws);
     await agentPrinting.beginSubmission(ws, kitchenJobId, claimed!.attemptId);
