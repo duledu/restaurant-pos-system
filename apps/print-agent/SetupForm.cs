@@ -59,14 +59,41 @@ public sealed class SetupForm : Form
     // URI's explicit re-pair intent while already paired.
     private readonly Label _repairWarningLabel = new() { AutoSize = false, Size = new Size(420, 34), TextAlign = ContentAlignment.TopLeft, ForeColor = Color.Firebrick, Visible = false };
     private readonly Button _repairCancelButton = new() { Text = "Otkaži", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6), Margin = new Padding(8, 0, 0, 0), Visible = false };
-    // Printing V2 — rute štampe (Kuhinja/Šank/Račun -> štampač) se BIRAJU u
-    // Admin panelu POSLE uparivanja, nikad ovde — ovi kontroli su SADA čisto
-    // lokalna dijagnostika ("probaj bilo koji instaliran štampač odmah"),
-    // potpuno odvojeni od stvarnog rutiranja. Vidi OnTestPrint/OnSave ispod.
+    // PRINTING P0 — "IZABERI NAMENU" step. Three route rows
+    // (KUHINJA / ŠANK / RAČUN) — each with its own printer + paper-width
+    // picker + clear button + per-route status text. The operator picks
+    // which Windows printer serves each destination type on THIS
+    // workstation. Picking is local (WindowsPrinter.Enumerate is purely
+    // in-process); persisting to the server happens on Sačuvaj namenu via
+    // DeliveryClient.UpsertRouteAssignment. The same printer may be picked
+    // for multiple routes (KUHINJA + ŠANK on a single POS-58 is a common
+    // small-restaurant setup).
+    private sealed class RouteDraftRow
+    {
+        public required string Type { get; init; }
+        public required string RestaurantLabel { get; init; }
+        public required ComboBox PrinterBox { get; init; }
+        public required ComboBox PaperWidthBox { get; init; }
+        public required Button ClearButton { get; init; }
+        public required Label StatusLabel { get; init; }
+    }
+    private readonly List<RouteDraftRow> _routeDrafts = new();
+    private readonly string[] _availablePrinters;
+    // PRINTING P0 — additional wizard feedback labels, separate from
+    // _pairFeedbackLabel (which is reserved for pairing) and
+    // _saveFeedbackLabel (which is reserved for the full
+    // test+confirm+close flow). Keeping them apart avoids the operator
+    // confusion of "did the just-clicked button succeed or fail".
+    private readonly Label _namenuFeedbackLabel = new() { AutoSize = false, Size = new Size(420, 32), TextAlign = ContentAlignment.TopLeft };
+    private readonly Label _discoveredPrintersLabel = new() { AutoSize = true, MaximumSize = new Size(420, 0) };
+    private readonly Button _saveNamenuButton = new() { Text = "Sačuvaj namenu", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 6) };
+    // PRINTING P0 — the "Napredno / dijagnostika" affordance kept ONLY
+    // for IT support who genuinely need to print to an arbitrary
+    // Windows printer regardless of server routing. Hidden in an
+    // Advanced section so normal restaurant staff never see it.
     private readonly ComboBox _testRouteTypeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _printerBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
     private readonly ComboBox _paperWidthBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
-    private readonly Label _autoPrintLabel = new() { AutoSize = true, Text = "Rute štampe: podešavaju se u Admin panelu (Podešavanja → Štampači) posle uparivanja." };
     // AutoSize + Padding umesto podrazumevane FIKSNE WinForms veličine
     // dugmeta (75x23 px na 96 DPI) — taj fiksni raster ne ostavlja dovoljno
     // vertikalnog prostora za tekst na 125%/150% Windows skaliranju (upravo
@@ -153,6 +180,14 @@ public sealed class SetupForm : Form
         _pairButton.FlatAppearance.MouseOverBackColor = BrandGraphiteHover;
         _pairButton.FlatAppearance.MouseDownBackColor = BrandGraphiteHover;
 
+        // Cached printer enumeration — used both to populate the
+        // IZABERI NAMENU combo boxes below AND to display the
+        // "discovered printers" count for the operator. Snapshot taken
+        // at form construction so the operator always sees what the
+        // wizard itself sees (matches what the running Service will
+        // see in AgentRunner).
+        _availablePrinters = WindowsPrinter.Enumerate();
+
         // Dock=Top (ne Fill) + AutoSize — panel zauzima tačno onoliko visine
         // koliko mu treba sadržaj, forma iznad raste da je isprati. Dodatan
         // razmak na dnu (Padding bottom 24 umesto 16) da donja dugmad nikad
@@ -178,14 +213,34 @@ public sealed class SetupForm : Form
         _repairWarningLabel.Margin = new Padding(0, 0, 0, 0);
         layout.Controls.Add(_repairWarningLabel);
 
-        layout.Controls.Add(new Label { Text = "Probna štampa — vrsta (oznaka na tiketu):", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
-        layout.Controls.Add(_testRouteTypeBox);
-        layout.Controls.Add(new Label { Text = "Probna štampa — štampač:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
-        layout.Controls.Add(_printerBox);
-        layout.Controls.Add(new Label { Text = "Probna štampa — širina papira:", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
-        layout.Controls.Add(_paperWidthBox);
-        _autoPrintLabel.Margin = new Padding(0, 12, 0, 0);
-        layout.Controls.Add(_autoPrintLabel);
+        // PRINTING P0 — IZABERI NAMENU step. The operator picks which
+        // Windows printer + paper width serves each route (KUHINJA /
+        // ŠANK / RAČUN) for THIS workstation. The same physical printer
+        // is allowed to serve multiple routes (KUHINJA + ŠANK on a
+        // single POS-58 is a common small-restaurant setup) — the UI
+        // deliberately does not prevent this.
+        _discoveredPrintersLabel.Margin = new Padding(0, 16, 0, 0);
+        _discoveredPrintersLabel.Text = _availablePrinters.Length switch
+        {
+            0 => "Nijedan štampač nije detektovan na ovom računaru.",
+            1 => "Detektovan 1 štampač na ovom računaru.",
+            _ => $"Detektovano {_availablePrinters.Length} štampača na ovom računaru.",
+        };
+        _discoveredPrintersLabel.ForeColor = _availablePrinters.Length == 0 ? Color.Firebrick : SystemColors.GrayText;
+        layout.Controls.Add(_discoveredPrintersLabel);
+        layout.Controls.Add(new Label { Text = "Rute štampe (izaberi za svaku namenu):", AutoSize = true, Margin = new Padding(0, 8, 0, 4) });
+        BuildRouteDraftRows();
+        foreach (var row in _routeDrafts)
+        {
+            var routeCard = BuildRouteCardPanel(row);
+            routeCard.Margin = new Padding(0, 0, 0, 6);
+            layout.Controls.Add(routeCard);
+        }
+        var namenuActionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
+        namenuActionRow.Controls.Add(_saveNamenuButton);
+        layout.Controls.Add(namenuActionRow);
+        _namenuFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
+        layout.Controls.Add(_namenuFeedbackLabel);
 
         var actionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 16, 0, 0) };
         actionRow.Controls.Add(_testPrintButton);
@@ -205,10 +260,15 @@ public sealed class SetupForm : Form
 
         Controls.Add(layout);
 
+        // Diagnostic OnTestPrint path — populate its combo boxes too
+        // so tech support can still print to any printer regardless
+        // of routing. Kept distinct from the IZABERI NAMENU rows
+        // (different layout, intentionally not shown by default in
+        // normal restaurant-staff flow).
         _testRouteTypeBox.Items.AddRange(["KITCHEN", "BAR", "RECEIPT"]);
         _testRouteTypeBox.SelectedIndex = 0;
         _paperWidthBox.Items.AddRange(["58", "80"]);
-        _printerBox.Items.AddRange(WindowsPrinter.Enumerate());
+        _printerBox.Items.AddRange(_availablePrinters);
 
         // Physical QA follow-up — clicking the primary button while ALREADY
         // paired must not immediately attempt to pair with whatever
@@ -230,6 +290,7 @@ public sealed class SetupForm : Form
         _repairCancelButton.Click += (_, _) => ExitRepairMode();
         _saveButton.Click += async (_, _) => await OnSave();
         _testPrintButton.Click += (_, _) => OnTestPrint();
+        _saveNamenuButton.Click += async (_, _) => await OnSaveNamenu();
 
         Load += (_, _) => Initialize();
     }
@@ -350,17 +411,251 @@ public sealed class SetupForm : Form
         {
             var config = AgentConfig.Parse(File.ReadAllText(AgentPaths.ConfigFilePath));
             _configuredRouteCount = config.Routes.Length;
+            // PRINTING P0 — populate the IZABERI NAMENU combo boxes from
+            // any locally-cached routes so a returning operator sees
+            // their last selection (still subject to the wizard's
+            // Sačuvaj namenu step before it reaches the server).
+            foreach (var route in config.Routes)
+            {
+                var draft = _routeDrafts.FirstOrDefault(r => r.Type == route.Type);
+                if (draft is null) continue;
+                draft.PrinterBox.SelectedItem = route.PrinterName;
+                draft.PaperWidthBox.SelectedItem = route.PaperWidthMm.ToString();
+            }
+            // Diagnostic combo boxes — populate from the FIRST route for
+            // backward-compat with the original "test any printer" use.
             var first = config.Routes.FirstOrDefault();
-            if (first is null) return;
-            _testRouteTypeBox.SelectedItem = first.Type;
-            _paperWidthBox.SelectedItem = first.PaperWidthMm.ToString();
-            if (_printerBox.Items.Contains(first.PrinterName)) _printerBox.SelectedItem = first.PrinterName;
+            if (first is not null)
+            {
+                _testRouteTypeBox.SelectedItem = first.Type;
+                _paperWidthBox.SelectedItem = first.PaperWidthMm.ToString();
+                if (_printerBox.Items.Contains(first.PrinterName)) _printerBox.SelectedItem = first.PrinterName;
+            }
         }
         catch
         {
             // Nepotpuna/oštećena konfiguracija — korisnik i dalje može
             // upariti/testirati ispod, ne blokiramo Setup ekran zbog toga.
         }
+    }
+
+    /// <summary>
+    /// PRINTING P0 — populates the three IZABERI NAMENU rows (KUHINJA /
+    /// ŠANK / RAČUN). Each row carries its own printer + paper-width
+    /// combo box + clear button + status label. Combo boxes are
+    /// DropDownList (not editable) so the operator cannot type a name
+    /// that doesn't exist on the machine — WindowsPrinter.Enumerate
+    /// already gave us the only valid set.
+    /// </summary>
+    private void BuildRouteDraftRows()
+    {
+        var routeSpecs = new (string Type, string Label)[]
+        {
+            ("KITCHEN", "Kuhinja"),
+            ("BAR", "Šank"),
+            ("RECEIPT", "Račun"),
+        };
+        foreach (var (type, label) in routeSpecs)
+        {
+            var printerBox = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 220,
+                Enabled = _availablePrinters.Length > 0,
+            };
+            foreach (var p in _availablePrinters) printerBox.Items.Add(p);
+            // Empty default — operator MUST explicitly pick a printer
+            // (no "first available" auto-pick: that would silently bind
+            // a route to the wrong printer, defeating the wizard).
+            if (printerBox.Items.Count > 0) printerBox.SelectedIndex = -1;
+
+            var paperWidthBox = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 100,
+            };
+            paperWidthBox.Items.AddRange(["58", "80"]);
+            paperWidthBox.SelectedIndex = 0;
+
+            var clearButton = new Button
+            {
+                Text = "Obriši",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10, 4, 10, 4),
+                Enabled = false, // enabled only when a printer is picked
+            };
+
+            var statusLabel = new Label
+            {
+                AutoSize = true,
+                MaximumSize = new Size(420, 0),
+                Text = "Izaberi štampač za ovu namenu (opciono — rute koje nisu podešene ne štampaju).",
+                ForeColor = SystemColors.GrayText,
+            };
+
+            // Enable "Obriši" only when a printer is chosen.
+            printerBox.SelectedIndexChanged += (_, _) =>
+            {
+                clearButton.Enabled = printerBox.SelectedItem is string;
+                if (printerBox.SelectedItem is null)
+                {
+                    statusLabel.Text = "Izaberi štampač za ovu namenu (opciono — rute koje nisu podešene ne štampaju).";
+                    statusLabel.ForeColor = SystemColors.GrayText;
+                }
+                else
+                {
+                    statusLabel.Text = $"Štampač: {printerBox.SelectedItem}. Klikni „Sačuvaj namenu“ da se primeni.";
+                    statusLabel.ForeColor = SystemColors.GrayText;
+                }
+            };
+            clearButton.Click += (_, _) =>
+            {
+                printerBox.SelectedIndex = -1;
+                statusLabel.Text = "Izaberi štampač za ovu namenu (opciono — rute koje nisu podešene ne štampaju).";
+                statusLabel.ForeColor = SystemColors.GrayText;
+            };
+
+            _routeDrafts.Add(new RouteDraftRow
+            {
+                Type = type,
+                RestaurantLabel = label,
+                PrinterBox = printerBox,
+                PaperWidthBox = paperWidthBox,
+                ClearButton = clearButton,
+                StatusLabel = statusLabel,
+            });
+        }
+    }
+
+    /// <summary>
+    /// PRINTING P0 — builds the inner panel for a single route row:
+    /// [Kuhinja] [Štampač combo] [Širina combo] [Obriši]
+    /// Below: per-row status label with word-wrap for long messages.
+    /// AutoSize on every control + flow panel that wraps on narrow
+    /// widths (DPI-safe at 100/125/150 %).
+    /// </summary>
+    private TableLayoutPanel BuildRouteCardPanel(RouteDraftRow row)
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            Dock = DockStyle.Top,
+            Padding = new Padding(8, 6, 8, 6),
+        };
+        var headerRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 0, 0, 4),
+        };
+        var typeLabel = new Label
+        {
+            Text = row.RestaurantLabel + ":",
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+            Margin = new Padding(0, 6, 8, 0),
+        };
+        headerRow.Controls.Add(typeLabel);
+        headerRow.Controls.Add(row.PrinterBox);
+        headerRow.Controls.Add(row.PaperWidthBox);
+        headerRow.Controls.Add(row.ClearButton);
+        card.Controls.Add(headerRow);
+        row.StatusLabel.Margin = new Padding(0, 2, 0, 0);
+        card.Controls.Add(row.StatusLabel);
+        return card;
+    }
+
+    /// <summary>
+    /// PRINTING P0 — IZABERI NAMENU save handler. Persists the
+    /// operator's per-route printer + paper-width picks to the server
+    /// via DeliveryClient.UpsertRouteAssignment, which calls
+    /// workstation-service.upsertPrintRouteByAgent under the Agent's
+    /// own bearer credential. Routes the operator left empty are
+    /// DELETED server-side (so they don't appear in heartbeat route
+    /// lists or Admin panels).
+    ///
+    /// Intended to be called BEFORE the OnSave() physical-test+confirm
+    /// flow — OnSave now requires the routes to already exist server-
+    /// side (otherwise it would just fall back to the old "set up
+    /// routes in Admin" message).
+    /// </summary>
+    private async Task OnSaveNamenu()
+    {
+        var credential = CredentialStore.Load();
+        if (credential is null)
+        {
+            ShowNamenuFeedback("Računar još nije uparen — prvo se poveži kodom iznad.", isError: true);
+            return;
+        }
+        if (_availablePrinters.Length == 0)
+        {
+            ShowNamenuFeedback("Nijedan štampač nije detektovan na ovom računaru — instaliraj drajver i pokreni podešavanje ponovo.", isError: true);
+            return;
+        }
+
+        _saveNamenuButton.Enabled = false;
+        var previousText = _saveNamenuButton.Text;
+        _saveNamenuButton.Text = "Čuvanje…";
+        ShowNamenuFeedback("Čuvanje namene štampača…", isError: false);
+        try
+        {
+            var anySaved = false;
+            foreach (var row in _routeDrafts)
+            {
+                if (row.PrinterBox.SelectedItem is not string printerName)
+                {
+                    // Empty route — explicit DELETE so the server stops
+                    // returning it in heartbeat route lists.
+                    await DeliveryClient.DeleteRouteAssignment(_endpoint.BaseUrl, credential, row.Type);
+                    continue;
+                }
+                var widthText = row.PaperWidthBox.SelectedItem as string ?? "58";
+                if (!int.TryParse(widthText, out var widthMm)) widthMm = 58;
+                var ok = await DeliveryClient.UpsertRouteAssignment(
+                    _endpoint.BaseUrl, credential, row.Type,
+                    printerName: printerName,
+                    paperWidthMm: widthMm,
+                    isEnabled: true,
+                    isPrimary: false);
+                if (ok)
+                {
+                    anySaved = true;
+                    row.StatusLabel.Text = $"✓ Sačuvano: {printerName}, {widthMm} mm.";
+                    row.StatusLabel.ForeColor = Color.FromArgb(0x1E, 0x7A, 0x3C);
+                }
+                else
+                {
+                    row.StatusLabel.Text = $"✗ Nije sačuvano za {row.RestaurantLabel} — pokušaj ponovo.";
+                    row.StatusLabel.ForeColor = Color.Firebrick;
+                }
+            }
+            _configuredRouteCount = _routeDrafts.Count(r => r.PrinterBox.SelectedItem is string);
+            RefreshStatus(paired: true);
+            ShowNamenuFeedback(
+                anySaved
+                    ? "✓ Namena štampača sačuvana. Sledeći korak: klikni „Testiraj i završi podešavanje“ da potvrdiš da tiketi fizički izlaze."
+                    : "Nijedna ruta nije podešena — kad odabereš štampač, klikni „Sačuvaj namenu“ ponovo.",
+                isError: !anySaved);
+        }
+        catch (Exception ex)
+        {
+            ShowNamenuFeedback($"Čuvanje namene nije uspelo: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            _saveNamenuButton.Enabled = true;
+            _saveNamenuButton.Text = previousText;
+        }
+    }
+
+    private void ShowNamenuFeedback(string message, bool isError)
+    {
+        _namenuFeedbackLabel.Text = message;
+        _namenuFeedbackLabel.ForeColor = isError ? Color.Firebrick : Color.FromArgb(0x1E, 0x7A, 0x3C);
     }
 
     private void RefreshStatus(bool paired)

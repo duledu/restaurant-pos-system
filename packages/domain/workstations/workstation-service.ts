@@ -612,13 +612,11 @@ export function getAgentDownloadInfo(ctx: AuthContext) {
   return {
     available: Boolean(url),
     url,
-    // Interna pilot oznaka — MORA se poklapati sa verzijom OBJAVLJENOG
-    // GitHub Release instalera koji ovaj URL stvarno servira (ne nužno sa
-    // najnovijim AgentVersion.Current u kodu — vidi Printing V2 napomenu:
-    // pilot.3 je izgrađen lokalno za fizički QA i namerno NIJE objavljen
-    // ovde dok fizički test ne prođe). Ažuriraj TEK kad se GitHub Release
-    // asset stvarno zameni.
-    version: "1.0.0-pilot.2",
+    // Version MORA se poklapati sa verzijom OBJAVLJENOG instalera koji
+    // PRINT_AGENT_INSTALLER_URL stvarno servira. Ažurira se kad se
+    // release asset zameni. v1.0.0-rc.1 = Printing P0 production-ready
+    // build (rebuilt against final P0 SetupForm.cs + DeliveryClient.cs).
+    version: "1.0.0-rc.1",
     supportedOS: "Windows 10 64-bit, Windows 11 64-bit (Windows 11 physical hardware acceptance pending)",
   };
 }
@@ -964,6 +962,177 @@ export async function confirmPhysicalTestByAgent(wsCtx: WorkstationAuthContext, 
   );
 
   return updated;
+}
+
+/**
+ * PRINTING P0 — Agent-authenticated route upsert used by the Setup
+ * wizard's "IZABERI NAMENU" step. Mirrors the Admin-side upsert
+ * (`upsertPrintRoute` above) with the differences:
+ *
+ *   - Authenticated via the Agent's bearer credential (WorkstationAuthContext)
+ *     instead of an employee AuthContext.
+ *   - Target workstation is implicit — the Agent can ONLY write to
+ *     its OWN routes (`wsCtx.workstationId`), never a peer's.
+ *   - Permission check replaced by workstation-existence + non-revoked
+ *     + non-disabled checks (already enforced by the auth middleware).
+ *   - Same audit entry shape so audit stream consumers see a single
+ *     canonical "workstation.route_updated" event regardless of caller.
+ *
+ * IMPORTANT — this endpoint intentionally allows the Agent to choose
+ * ANY printerName for any route. The server does not verify that the
+ * printer actually exists on the Agent's Windows machine; that is the
+ * responsibility of the subsequent physical-test step (which would fail
+ * with "Configured printer is not installed for this Windows account").
+ * This is the same trust model Admin uses — Admin trusts the operator
+ * to pick a real printer. Setup trusts the local-machine wizard the
+ * same way.
+ *
+ * Same value-reset logic as the Admin path: a physical-config change
+ * (printerName OR paperWidthMm) invalidates physicalTestConfirmed and
+ * the operator must re-confirm via the next Test print.
+ */
+export async function upsertPrintRouteByAgent(
+  wsCtx: WorkstationAuthContext,
+  type: "KITCHEN" | "BAR" | "RECEIPT",
+  input: UpsertPrintRouteInput
+) {
+  const data = upsertPrintRouteSchema.parse(input);
+  const routeType = type;
+
+  // Workstation identity check: the Agent can ONLY write to its own
+  // workstation's routes. This is implicit — wsCtx.workstationId is
+  // the verified identity from the bearer credential.
+  const workstation = await prisma.workstation.findUnique({
+    where: { id: wsCtx.workstationId },
+    select: { id: true, locationId: true, revokedAt: true, isEnabled: true, restaurantId: true },
+  });
+  if (!workstation) throw new Error("Radna stanica nije pronađena.");
+  if (workstation.revokedAt) throw new Error("Radna stanica je opozvana.");
+  if (!workstation.isEnabled) throw new Error("Radna stanica je onemogućena.");
+
+  // Same isPrimary demotion rule as the Admin path (deterministic CENTRAL_ROUTING).
+  if (data.isPrimary === true) {
+    await prisma.workstationPrintRoute.updateMany({
+      where: { locationId: workstation.locationId, type: routeType, workstationId: { not: workstation.id }, isPrimary: true },
+      data: { isPrimary: false },
+    });
+  }
+
+  // Detect physical-config changes — same rule as the Admin path.
+  const previous = await prisma.workstationPrintRoute.findUnique({
+    where: { workstationId_type: { workstationId: workstation.id, type: routeType } },
+    select: { id: true, printerName: true, paperWidthMm: true, physicalTestConfirmed: true },
+  });
+  const printerNameChanging = data.printerName !== undefined && data.printerName !== (previous?.printerName ?? null);
+  const paperWidthChanging = data.paperWidthMm !== undefined && data.paperWidthMm !== (previous?.paperWidthMm ?? null);
+  const physicalConfigChanging = printerNameChanging || paperWidthChanging;
+  const resettingPhysicalConfirmation = physicalConfigChanging && previous?.physicalTestConfirmed === true;
+
+  const route = await prisma.$transaction(async (tx) => {
+    return tx.workstationPrintRoute.upsert({
+      where: { workstationId_type: { workstationId: workstation.id, type: routeType } },
+      create: {
+        restaurantId: workstation.restaurantId,
+        locationId: workstation.locationId,
+        workstationId: workstation.id,
+        type: routeType,
+        printerName: data.printerName ?? null,
+        paperWidthMm: data.paperWidthMm ?? null,
+        isEnabled: data.isEnabled ?? true,
+        isPrimary: data.isPrimary ?? false,
+      },
+      update: {
+        ...(data.printerName !== undefined
+          ? { printerName: data.printerName, ...(printerNameChanging ? { printerAvailable: null } : {}) }
+          : {}),
+        ...(data.paperWidthMm !== undefined ? { paperWidthMm: data.paperWidthMm } : {}),
+        ...(data.isEnabled !== undefined ? { isEnabled: data.isEnabled } : {}),
+        ...(data.isPrimary !== undefined ? { isPrimary: data.isPrimary } : {}),
+        ...(resettingPhysicalConfirmation
+          ? { physicalTestConfirmed: false, physicalTestConfirmedAt: null, physicalTestConfirmedBy: null }
+          : {}),
+      },
+      select: PRINT_ROUTE_SELECT,
+    });
+  });
+
+  await recordAuditEntry(
+    {
+      userId: `workstation:${wsCtx.workstationId}`,
+      employeeId: `workstation:${wsCtx.workstationId}`,
+      restaurantId: wsCtx.restaurantId,
+      locationIds: [workstation.locationId],
+      roles: ["workstation"],
+      permissions: new Set(["workstations.manage"]),
+    },
+    {
+      entityType: "WorkstationPrintRoute",
+      entityId: route.id,
+      action: "workstation.route_updated",
+      previousValue: previous
+        ? {
+            printerName: previous.printerName,
+            paperWidthMm: previous.paperWidthMm,
+            isEnabled: route.isEnabled,
+            isPrimary: route.isPrimary,
+            physicalTestConfirmed: previous.physicalTestConfirmed,
+          }
+        : null,
+      newValue: {
+        workstationId: workstation.id,
+        type: routeType,
+        printerName: route.printerName,
+        paperWidthMm: route.paperWidthMm,
+        isEnabled: route.isEnabled,
+        isPrimary: route.isPrimary,
+        physicalTestConfirmed: route.physicalTestConfirmed,
+      },
+      ...(resettingPhysicalConfirmation ? { severity: "WARNING" as const } : {}),
+      locationId: workstation.locationId,
+    }
+  );
+
+  return route;
+}
+
+/**
+ * PRINTING P0 — Agent-authenticated route deletion. Mirrors the
+ * PUT semantics but removes the route entirely (so it disappears from
+ * Admin panels, heartbeat route lists, and the Agent's local config).
+ * Used by the Setup wizard's "no printer for this route" option.
+ */
+export async function deletePrintRouteByAgent(
+  wsCtx: WorkstationAuthContext,
+  type: "KITCHEN" | "BAR" | "RECEIPT"
+) {
+  const workstation = await prisma.workstation.findUnique({
+    where: { id: wsCtx.workstationId },
+    select: { id: true, locationId: true, revokedAt: true, isEnabled: true },
+  });
+  if (!workstation) throw new Error("Radna stanica nije pronađena.");
+  if (workstation.revokedAt) throw new Error("Radna stanica je opozvana.");
+  if (!workstation.isEnabled) throw new Error("Radna stanica je onemogućena.");
+  await prisma.workstationPrintRoute.deleteMany({
+    where: { workstationId: workstation.id, type },
+  });
+  await recordAuditEntry(
+    {
+      userId: `workstation:${wsCtx.workstationId}`,
+      employeeId: `workstation:${wsCtx.workstationId}`,
+      restaurantId: wsCtx.restaurantId,
+      locationIds: [workstation.locationId],
+      roles: ["workstation"],
+      permissions: new Set(["workstations.manage"]),
+    },
+    {
+      entityType: "WorkstationPrintRoute",
+      entityId: workstation.id,
+      action: "workstation.route_deleted",
+      previousValue: { type },
+      newValue: null,
+      locationId: workstation.locationId,
+    }
+  );
 }
 
 /**

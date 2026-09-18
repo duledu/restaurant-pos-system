@@ -32,6 +32,15 @@ import { resetPrismaTestTables } from "../setup/reset-test-db";
 let ctx: AuthContext;
 let restaurantId: string;
 let locationId: string;
+// PRINTING P0 — shift cache: business rule "only one OPEN shift per location"
+// (enforced by partial unique index in DDL) means we must reuse the shift
+// across multiple orders in the same test, otherwise makeOrder() would try
+// to create a second open shift for the same location and trip the
+// constraint. This cache is reset by beforeEach implicitly because
+// restaurantId + locationId change every test (new tenant/restaurant/location).
+let cachedShiftId: string | null = null;
+let cachedFloorId: string | null = null;
+let cachedTableId: string | null = null;
 
 beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
@@ -47,6 +56,9 @@ beforeEach(async () => {
     roles: ["MANAGER"],
     permissions: new Set(["workstations.manage", "orders.print"]),
   };
+  cachedShiftId = null;
+  cachedFloorId = null;
+  cachedTableId = null;
 });
 
 async function pairWorkstation(): Promise<{ workstationId: string; wsCtx: WorkstationAuthContext }> {
@@ -68,22 +80,34 @@ async function pairWorkstation(): Promise<{ workstationId: string; wsCtx: Workst
 async function makeOrder(): Promise<string> {
   // Order requires tableId + shiftId (FKs); create the supporting rows
   // inline so this test stays independent of any other test setup.
-  const shift = await prisma.shift.create({
-    data: { restaurantId, locationId, openedBy: "manager", status: "OPEN" },
-  });
-  // RestaurantTable requires a Floor FK, which requires a Location FK.
-  const floor = await prisma.floor.create({
-    data: { restaurantId, locationId, name: `F-${randomUUID().slice(0, 4)}` },
-  });
-  const table = await prisma.restaurantTable.create({
-    data: { floorId: floor.id, label: `T-${randomUUID().slice(0, 4)}`, capacity: 4 },
-  });
+  // PRINTING P0 — reuse the shift/floor/table per test (cached) to honor the
+  // "only one OPEN shift per location" partial unique constraint enforced by
+  // the DDL partial unique index; multiple makeOrder() calls in one test (e.g.
+  // listSubmissionUnknownJobs) would otherwise trip it on the second call.
+  if (!cachedShiftId) {
+    const shift = await prisma.shift.create({
+      data: { restaurantId, locationId, openedBy: "manager", status: "OPEN" },
+    });
+    cachedShiftId = shift.id;
+  }
+  if (!cachedFloorId) {
+    const floor = await prisma.floor.create({
+      data: { restaurantId, locationId, name: `F-${randomUUID().slice(0, 4)}` },
+    });
+    cachedFloorId = floor.id;
+  }
+  if (!cachedTableId) {
+    const table = await prisma.restaurantTable.create({
+      data: { floorId: cachedFloorId, label: `T-${randomUUID().slice(0, 4)}`, capacity: 4 },
+    });
+    cachedTableId = table.id;
+  }
   const order = await prisma.order.create({
     data: {
       restaurantId,
       locationId,
-      tableId: table.id,
-      shiftId: shift.id,
+      tableId: cachedTableId,
+      shiftId: cachedShiftId,
       openedBy: "manager",
       status: "SUBMITTED",
     },

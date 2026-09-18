@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "../ui/Card";
+import { TestPrintConfirmModal } from "./TestPrintConfirmModal";
 
 interface Location {
   id: string;
@@ -128,30 +129,36 @@ function routeOf(w: Workstation, type: RouteType): PrintRoute | undefined {
  * promeniti na oba mesta da Admin i KDS nikad ne prikažu suprotstavljene
  * odgovore za isti server podatak.
  *
- * PRINTING P0 — adds two new states:
- *   AGENT_CANNOT_SEE — Service identity cannot enumerate this route's
- *     printer (visibleToService === false on the route). Distinct from
- *     PRINTER_UNAVAILABLE (which is the printerAvailable === false
- *     post-attempt signal). Triggers a dedicated human-friendly
- *     "TableCore servis ne može da pristupi štampaču" banner.
- *   NEEDS_CONFIRMATION — printer is configured and visible to the
- *     Service, but the operator has not yet pressed "Da, test tiket
- *     je uspešno odštampan" on the Setup wizard for this exact
- *     (printerName, paperWidthMm) combination. The Admin "Test Print"
- *     button drives both the technical test AND the human confirmation
- *     in a single flow.
- * The legacy "READY" state is now STRICTLY the conjunction of:
- *   isEnabled + printerName + paperWidthMm + isOnline + printerReady +
+ * PRINTING P0 (REVISED UX) — connectivity (Računar povezan / Računar
+ * nije povezan) belongs ONCE at workstation level (workstation header
+ * pill), never repeated per route. routeReadiness therefore only
+ * describes ROUTE-side state:
+ *   - READY                  — printer configured, visible to Service,
+ *                              physically confirmed by an operator.
+ *   - NEEDS_CONFIRMATION     — printer configured and visible, but the
+ *                              operator has not yet pressed "Da, test
+ *                              tiket..." for this exact combination.
+ *   - PRINTER_UNAVAILABLE    — printerName set but currently not
+ *                              available on this Windows machine.
+ *   - AGENT_CANNOT_SEE       — Service identity cannot enumerate the
+ *                              printer (per-user-vs-per-machine driver
+ *                              install failure mode).
+ *   - NOT_CONFIGURED         — printerName not yet chosen OR route
+ *                              disabled OR workstation disabled/revoked.
+ *
+ * The legacy "READY" state is STRICTLY the conjunction of:
+ *   isEnabled + printerName + paperWidthMm + printerReady +
  *   visibleToService (true) + physicalTestConfirmed (true).
- * Any silent weakening of that conjunction here would defeat the entire
- * P0 fix; see SETUP-form OnSave for the matching wizard-side check.
+ * Connectivity is intentionally NOT a precondition here — an offline
+ * workstation's last-known route configuration is the truthful state
+ * to show (e.g. an operator reviewing routes after hours); the
+ * workstation-level pill already conveys the offline state ONCE.
  */
 function routeReadiness(
   w: Workstation,
   route: PrintRoute | undefined
-): "READY" | "AGENT_OFFLINE" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" | "AGENT_CANNOT_SEE" | "NEEDS_CONFIRMATION" {
+): "READY" | "PRINTER_UNAVAILABLE" | "NOT_CONFIGURED" | "AGENT_CANNOT_SEE" | "NEEDS_CONFIRMATION" {
   if (!route || !route.isEnabled || w.revokedAt || !w.isEnabled) return "NOT_CONFIGURED";
-  if (!isOnline(w.lastSeenAt)) return "AGENT_OFFLINE";
   // Service-side visibility probe — distinct from post-attempt
   // printerAvailable, evaluated before we trust any "Test Print"
   // output the operator might already have on the table.
@@ -170,13 +177,41 @@ function routeReadiness(
   return "READY";
 }
 
-const READINESS_LABEL: Record<ReturnType<typeof routeReadiness>, string> = {
-  READY: "Spremna",
-  AGENT_OFFLINE: "Računar nije povezan",
+type RouteStatus = ReturnType<typeof routeReadiness>;
+
+// PRINTING P0 (REVISED UX) — restaurant-facing route state labels.
+// Exactly the four states the operator needs to act on; detail text
+// below the action explains the rest. Same physical meaning as the
+// discriminated union above; the labels are deliberately shorter and
+// more uniform than the verbose technical IDs.
+const ROUTE_STATUS_LABEL: Record<RouteStatus, string> = {
+  READY: "Spremno",
+  NEEDS_CONFIRMATION: "Čeka test štampe",
   PRINTER_UNAVAILABLE: "Štampač nedostupan",
   NOT_CONFIGURED: "Nije podešeno",
   AGENT_CANNOT_SEE: "Servis ne vidi štampač",
-  NEEDS_CONFIRMATION: "Čeka fizičku potvrdu",
+};
+
+// Tailwind classes for the route-level status pill. Kept as a string
+// map (not a function) so Tailwind's JIT can statically enumerate the
+// full set of utility names at build time.
+const ROUTE_STATUS_PILL: Record<RouteStatus, string> = {
+  READY: "bg-success/10 text-success border-success/30",
+  NEEDS_CONFIRMATION: "bg-warn-soft text-warn border-warn/40",
+  PRINTER_UNAVAILABLE: "bg-danger-soft text-danger border-danger/30",
+  NOT_CONFIGURED: "bg-cream-200 text-ink/60 border-line",
+  AGENT_CANNOT_SEE: "bg-danger-soft text-danger border-danger/30",
+};
+
+// Single-line explanatory hint shown under the route's controls.
+// Read carefully by the operator when deciding whether to press
+// Testiraj / change printer / escalate to a technician.
+const ROUTE_STATUS_HINT: Record<RouteStatus, string> = {
+  READY: "Štampač je podešen, fizički potvrđen i spreman za štampu.",
+  NEEDS_CONFIRMATION: "Pritisnite Testiraj i potvrdite da je test tiket fizički izašao iz štampača.",
+  PRINTER_UNAVAILABLE: "Izabrani štampač trenutno nije dostupan na ovom računaru — proverite da je uključen i da ima papira.",
+  NOT_CONFIGURED: "Izaberite štampač da biste mogli da testirate i sačuvate rutu.",
+  AGENT_CANNOT_SEE: "Servis ne može da pristupi štampaču — drajver je najverovatnije instaliran samo za vaš nalog.",
 };
 
 /**
@@ -229,6 +264,11 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   // operator's decision; the server handles audit + state transition.
   const [ambiguityJobs, setAmbiguityJobs] = useState<AmbiguityJob[]>([]);
   const [resolvingJobId, setResolvingJobId] = useState<string | null>(null);
+  // PRINTING P0 — TableCore-branded confirmation modal (replaces the
+  // raw window.confirm for the Admin "Test" flow). Holds the route
+  // metadata so the modal can render "Ruta / Štampač / Širina papira"
+  // in a single cream/ink-card instead of a generic browser dialog.
+  const [confirmingTest, setConfirmingTest] = useState<{ workstationId: string; type: RouteType } | null>(null);
 
   interface AmbiguityJob {
     id: string;
@@ -305,6 +345,13 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   // state survives React re-renders. Only one REPRINT per row can be
   // in-flight at a time.
   const inFlightAmbiguityRef = useRef<Set<string>>(new Set());
+  // PRINTING P0 — refs backing the branded test-print confirm modal.
+  // The modal's onResolve callback closes over a resolver we stash
+  // here so the async testPrint() flow can await it. Using refs (not
+  // state) so the resolver stays stable across React renders and
+  // doesn't re-trigger the Promise.
+  const testConfirmResolveRef = useRef<((v: boolean) => void) | null>(null);
+  const testConfirmCtxRef = useRef<{ routeLabel: string; printerName: string; paperWidthMm: number } | null>(null);
   async function acknowledgeAmbiguity(jobId: string, decision: "PRINTED" | "REPRINT", idempotencyKey: string) {
     if (inFlightAmbiguityRef.current.has(jobId)) return;
     inFlightAmbiguityRef.current.add(jobId);
@@ -384,8 +431,25 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         await load();
         return;
       }
-      const confirmMessage = `Test štampa za ${ROUTE_LABEL[type]} je uspešno poslata.\n\nDa li je test tiket fizički izašao iz štampača i da li je čitljiv?`;
-      const proceed = typeof window === "undefined" ? true : window.confirm(confirmMessage);
+      // PRINTING P0 — TableCore-branded modal replaces raw window.confirm
+      // so the Admin sees the same visual identity as the Setup wizard's
+      // WinForms dialog. Resolution is async (operator may take a few
+      // seconds to walk to the printer); we await a Promise whose resolve
+      // is wired to the modal's onResolve callback below.
+      const proceed: boolean = await new Promise<boolean>((resolve) => {
+        const ws = workstationList.find((w) => w.id === workstationId);
+        const route = ws ? routeOf(ws, type) : undefined;
+        const printerName = route?.printerName ?? "nepoznat štampač";
+        const paperWidthMm = route?.paperWidthMm ?? 58;
+        testConfirmCtxRef.current = { routeLabel: ROUTE_LABEL[type], printerName, paperWidthMm };
+        testConfirmResolveRef.current = (v: boolean) => {
+          setConfirmingTest(null);
+          testConfirmCtxRef.current = null;
+          testConfirmResolveRef.current = null;
+          resolve(v);
+        };
+        setConfirmingTest({ workstationId, type });
+      });
       if (!proceed) {
         setError(`Test štampa za ${ROUTE_LABEL[type]} uspela, ali niste potvrdili fizički papir. Status ostaje "čeka fizičku potvrdu".`);
         await load();
@@ -662,84 +726,135 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     const revoked = Boolean(w.revokedAt);
     const printerOptions = w.availablePrinters ?? [];
     const testKey = `${w.id}:${type}`;
+    const isTesting = testingRoute === testKey;
     const showPrimaryToggle =
       printingMode === "CENTRAL_ROUTING" && draft.isEnabled && multipleWorkstationsShareRoute(type, w.locationId, w.id);
+    // PRINTING P0 REVISED UX — one polished route card per route.
+    // Visual contract:
+    //   ┌──────────────────────────────────────────────────┐
+    //   │ ROUTE LABEL                          [status pill]│
+    //   │ ────────────────────────────────────────────────  │
+    //   │ Štampač              │ Širina papira              │
+    //   │ [select, full width] │ [select, full width]       │
+    //   │ ────────────────────────────────────────────────  │
+    //   │ hint text               [ Testiraj <route>  ]     │
+    //   └──────────────────────────────────────────────────┘
+    // The same physical printer may be selected on multiple routes
+    // (KUHINJA + ŠANK on the same POS-58 is a common setup); the
+    // select keeps the draft value regardless of route context.
     return (
-      <div key={type} className="border-t border-line/60 py-2 first:border-t-0">
-      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[80px_1fr_90px_120px_auto]">
-        <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">{ROUTE_LABEL[type]}</span>
-        <select
-          value={draft.printerName}
-          onChange={(e) => patchRouteDraft(w, type, { printerName: e.target.value })}
-          disabled={revoked}
-          className="rounded-md border border-line px-2 py-1.5 text-xs text-ink disabled:opacity-50"
-        >
-          <option value="">— nije podešeno —</option>
-          {draft.printerName && !printerOptions.includes(draft.printerName) && (
-            <option value={draft.printerName}>{draft.printerName} (poslednje poznato)</option>
-          )}
-          {printerOptions.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <select
-          value={draft.paperWidthMm}
-          onChange={(e) => patchRouteDraft(w, type, { paperWidthMm: Number(e.target.value) as 58 | 80 })}
-          disabled={revoked || !draft.printerName}
-          className="rounded-md border border-line px-2 py-1.5 text-xs text-ink disabled:opacity-50"
-        >
-          <option value={58}>58mm</option>
-          <option value={80}>80mm</option>
-        </select>
-        <span
-          className={`justify-self-start rounded-full px-2 py-0.5 text-[11px] font-semibold sm:justify-self-center ${
-            readiness === "READY" ? "bg-success/10 text-success" : readiness === "NOT_CONFIGURED" ? "bg-cream-200 text-inkSoft" : "bg-danger-soft text-danger"
-          }`}
-        >
-          {READINESS_LABEL[readiness]}
-        </span>
-        <button
-          type="button"
-          onClick={() => testPrint(w.id, type)}
-          disabled={revoked || !route?.printerName || testingRoute === testKey}
-          className="justify-self-start text-xs font-semibold text-ink underline disabled:opacity-40 sm:justify-self-end"
-        >
-          Test {ROUTE_LABEL[type].toLowerCase()}
-        </button>
-      </div>
-      {showPrimaryToggle && (
-        <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-inkSoft">
-          <input
-            type="checkbox"
-            checked={draft.isPrimary}
-            onChange={(e) => patchRouteDraft(w, type, { isPrimary: e.target.checked })}
-            disabled={revoked}
-          />
-          Glavna ruta za {ROUTE_LABEL[type].toLowerCase()} na ovoj lokaciji (kad više računara ima ovu rutu, samo glavni je preuzima)
-        </label>
-      )}
-      {readiness === "AGENT_CANNOT_SEE" && (
-        // PRINTING P0 — Service-side visibility probe surfaced here as
-        // a dedicated, human-friendly warning. No mention of service
-        // identity, per-user installs, or infrastructure. Actionable
-        // next step is the same as the Setup wizard's error message.
-        <p className="mt-1.5 rounded-md border border-danger/40 bg-danger-soft px-2 py-1.5 text-[11px] text-danger">
-          TableCore servis ne može da pristupi štampaču <strong>{route?.printerName}</strong> —
-          ponovo instalirajte drajver štampača sa opcijom „Za sve korisnike“ i restartujte računar.
-        </p>
-      )}
-      {readiness === "NEEDS_CONFIRMATION" && (
-        // PRINTING P0 — operator has not yet pressed "Da, test tiket
-        // je uspešno odštampan" on the Setup wizard. The Admin "Test"
-        // button above triggers BOTH the technical test AND the human
-        // confirmation in one flow (see submitTestPrintAndConfirm),
-        // closing the "spooler-success-is-READY" loophole.
-        <p className="mt-1.5 rounded-md border border-warn/40 bg-warn-soft px-2 py-1.5 text-[11px] text-ink">
-          Štampač je podešen ali čeka fizičku potvrdu — kliknite „Test {ROUTE_LABEL[type].toLowerCase()}“ i potvrdite da je tiket izašao.
-        </p>
-      )}
+      <div
+        key={type}
+        className="rounded-md border border-line/70 bg-white px-4 py-3"
+        data-route-type={type}
+      >
+        {/* Header: ROUTE label + status pill */}
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-bold uppercase tracking-[0.06em] text-ink">
+              {ROUTE_LABEL[type]}
+            </span>
+            {showPrimaryToggle && (
+              <span className="rounded-sm border border-gold/30 bg-gold-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink/70">
+                Glavna
+              </span>
+            )}
+          </div>
+          <span
+            data-testid={`route-status-${type}`}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${ROUTE_STATUS_PILL[readiness]}`}
+          >
+            <span
+              aria-hidden
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                readiness === "READY" ? "bg-success" : readiness === "NEEDS_CONFIRMATION" ? "bg-warn" : readiness === "NOT_CONFIGURED" ? "bg-ink/30" : "bg-danger"
+              }`}
+            />
+            {ROUTE_STATUS_LABEL[readiness]}
+          </span>
+        </div>
+
+        {/* Controls: Štampač + Širina papira — same row on sm+, stacked on mobile */}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink/55">
+              Štampač
+            </span>
+            <select
+              value={draft.printerName}
+              onChange={(e) => patchRouteDraft(w, type, { printerName: e.target.value })}
+              disabled={revoked}
+              className="h-9 w-full rounded-md border border-line bg-white px-2.5 text-sm text-ink shadow-sm focus:border-gold focus:outline-none focus:ring-2 focus:ring-gold/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="">— nije podešeno —</option>
+              {draft.printerName && !printerOptions.includes(draft.printerName) && (
+                <option value={draft.printerName}>{draft.printerName} (poslednje poznato)</option>
+              )}
+              {printerOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink/55">
+              Širina papira
+            </span>
+            <select
+              value={draft.paperWidthMm}
+              onChange={(e) => patchRouteDraft(w, type, { paperWidthMm: Number(e.target.value) as 58 | 80 })}
+              disabled={revoked || !draft.printerName}
+              className="h-9 w-full rounded-md border border-line bg-white px-2.5 text-sm text-ink shadow-sm focus:border-gold focus:outline-none focus:ring-2 focus:ring-gold/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value={58}>58 mm</option>
+              <option value={80}>80 mm</option>
+            </select>
+          </label>
+        </div>
+
+        {/* Primary route toggle (CENTRAL_ROUTING with multiple workstations) */}
+        {showPrimaryToggle && (
+          <label className="mt-3 flex items-start gap-2 rounded-md border border-line/60 bg-cream-200 px-2.5 py-2 text-xs text-inkSoft">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 rounded border-line text-gold focus:ring-gold/30"
+              checked={draft.isPrimary}
+              onChange={(e) => patchRouteDraft(w, type, { isPrimary: e.target.checked })}
+              disabled={revoked}
+            />
+            <span>
+              Glavna ruta za {ROUTE_LABEL[type].toLowerCase()} na ovoj lokaciji — kad više računara ima ovu rutu, samo glavni je preuzima.
+            </span>
+          </label>
+        )}
+
+        {/* Footer: hint + secondary Test action. Equal vertical padding,
+            clear visual separator, hint always left, Test always right. */}
+        <div className="mt-3 flex flex-col-reverse items-stretch gap-2 border-t border-line/50 pt-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+          <p className="text-xs leading-snug text-ink/60">
+            {ROUTE_STATUS_HINT[readiness]}
+          </p>
+          <button
+            type="button"
+            onClick={() => testPrint(w.id, type)}
+            disabled={revoked || !route?.printerName || isTesting}
+            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md border border-ink/15 bg-white px-3.5 text-xs font-semibold text-ink shadow-sm transition-colors hover:border-gold hover:bg-gold hover:text-white focus:outline-none focus:ring-2 focus:ring-gold/40 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {isTesting ? "Testiranje…" : `Testiraj ${ROUTE_LABEL[type].toLowerCase()}`}
+          </button>
+        </div>
+
+        {/* Conditional service-side visibility warning — full-width, kept
+            distinct from the status pill so the operator understands it
+            is an INSTRUCTION, not a status summary. */}
+        {readiness === "AGENT_CANNOT_SEE" && (
+          <div className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-3 py-2 text-xs leading-snug text-danger">
+            <span className="font-semibold">Štampač nije dostupan servisu.</span>{" "}
+            Drajver štampača <strong>{route?.printerName}</strong> je najverovatnije instaliran samo za ovaj nalog —
+            ponovo ga instalirajte sa opcijom „Za sve korisnike“ i restartujte računar.
+          </div>
+        )}
       </div>
     );
   }
@@ -747,69 +862,118 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   function renderWorkstationCard(w: Workstation) {
     const online = isOnline(w.lastSeenAt);
     const revoked = Boolean(w.revokedAt);
+    const wsStatus: "REVOKED" | "DISABLED" | "ONLINE" | "OFFLINE" = revoked
+      ? "REVOKED"
+      : !w.isEnabled
+        ? "DISABLED"
+        : online
+          ? "ONLINE"
+          : "OFFLINE";
+    const wsStatusPill: Record<typeof wsStatus, string> = {
+      ONLINE: "bg-success/10 text-success border-success/30",
+      OFFLINE: "bg-warn-soft text-warn border-warn/40",
+      DISABLED: "bg-cream-200 text-ink/60 border-line",
+      REVOKED: "bg-danger-soft text-danger border-danger/30",
+    };
+    const wsStatusLabel: Record<typeof wsStatus, string> = {
+      ONLINE: "Računar povezan",
+      OFFLINE: "Računar nije povezan",
+      DISABLED: "Računar onemogućen",
+      REVOKED: "Računar opozvan",
+    };
+    const showRouteSection = !revoked;
     return (
-      <div key={w.id} className="rounded-md border border-line px-3 py-2.5 text-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="font-medium text-ink">{w.name}</span>
-            <span className="ml-2 text-xs text-inkSoft">{w.location.name}</span>
+      <div key={w.id} className="rounded-md border border-line bg-cream-200/40 p-4 text-sm shadow-card">
+        {/* Header: workstation identity + connectivity pill */}
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-ink">{w.name}</h3>
+            <p className="mt-0.5 text-xs text-inkSoft">
+              {w.location.name}
+              {w.agentVersion ? <> · Agent v{w.agentVersion}</> : null}
+            </p>
           </div>
           <span
-            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-              revoked
-                ? "bg-danger-soft text-danger"
-                : !w.isEnabled
-                  ? "bg-cream-200 text-inkSoft"
-                  : online
-                    ? "bg-success/10 text-success"
-                    : "bg-cream-200 text-inkSoft"
-            }`}
+            data-testid={`ws-status-${w.id}`}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${wsStatusPill[wsStatus]}`}
           >
-            {revoked ? "Opozvana" : !w.isEnabled ? "Onemogućena" : online ? "Povezana" : "Van mreže"}
+            <span
+              aria-hidden
+              className={`inline-block h-2 w-2 rounded-full ${
+                wsStatus === "ONLINE" ? "bg-success" : wsStatus === "OFFLINE" ? "bg-warn" : wsStatus === "DISABLED" ? "bg-ink/30" : "bg-danger"
+              }`}
+            />
+            {wsStatusLabel[wsStatus]}
           </span>
-        </div>
-        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-inkSoft">
-          <span>
-            Dostupni štampači: {w.availablePrinters && w.availablePrinters.length > 0 ? w.availablePrinters.join(", ") : "nijedan prijavljen"}
-          </span>
-          <span>Verzija agenta: {w.agentVersion ?? "—"}</span>
-          <span>Poslednji kontakt: {formatDateTime(w.lastSeenAt)}</span>
-          <span>Poslednja uspešna komunikacija: {formatDateTime(w.lastSuccessfulCommunicationAt)}</span>
-          <span>Poslednja predaja na štampu: {formatDateTime(w.lastPrintAt)}</span>
-          {printingMode === "LOGIN_AWARE" && !revoked && (
-            <span className={w.terminalSession ? "font-semibold text-success" : "text-inkSoft"}>
-              Trenutna operativna uloga:{" "}
-              {w.terminalSession ? ROUTE_LABEL[w.terminalSession.printRole] : "nijedna (niko prijavljen na ovom računaru)"}
-            </span>
-          )}
-          {w.testPrintStatus === "PENDING" && (
-            <span className="font-semibold text-inkSoft">
-              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}): čeka se sledeći kontakt agenta…
-            </span>
-          )}
-          {w.testPrintStatus === "SUCCEEDED" && (
-            <span className="font-semibold text-success">
-              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}) uspela ({formatDateTime(w.testPrintCompletedAt)})
-            </span>
-          )}
-          {w.testPrintStatus === "FAILED" && (
-            <span className="font-semibold text-danger">
-              Test štampa ({w.testPrintRouteType ? ROUTE_LABEL[w.testPrintRouteType] : "—"}) nije uspela ({formatDateTime(w.testPrintCompletedAt)})
-              {w.testPrintError ? `: ${w.testPrintError}` : ""}
-            </span>
-          )}
         </div>
 
-        {!revoked && (
-          <div className="mt-3 rounded-md border border-line/70 bg-cream-100/60 px-2.5 py-1.5">
-            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-inkSoft">Rute štampe</p>
-            {ROUTE_TYPES.map((type) => renderRouteRow(w, type))}
-            <div className="mt-2 flex justify-end">
+        {/* Compressed meta row — only the fields operators actually
+            consult. Available printers and last print are surfaced via
+            the route readiness pills; redundant fields removed. */}
+        <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 text-xs text-inkSoft sm:grid-cols-2 md:grid-cols-3">
+          <div>
+            <dt className="font-medium uppercase tracking-wide text-ink/45">Poslednji kontakt</dt>
+            <dd className="text-ink/80">{formatDateTime(w.lastSeenAt)}</dd>
+          </div>
+          {printingMode === "LOGIN_AWARE" && !revoked && (
+            <div>
+              <dt className="font-medium uppercase tracking-wide text-ink/45">Operativna uloga</dt>
+              <dd className={w.terminalSession ? "font-semibold text-success" : "text-ink/80"}>
+                {w.terminalSession
+                  ? ROUTE_LABEL[w.terminalSession.printRole]
+                  : "Niko prijavljen"}
+              </dd>
+            </div>
+          )}
+          {w.testPrintStatus && (
+            <div>
+              <dt className="font-medium uppercase tracking-wide text-ink/45">Poslednja test štampa</dt>
+              <dd
+                className={
+                  w.testPrintStatus === "SUCCEEDED"
+                    ? "font-medium text-success"
+                    : w.testPrintStatus === "FAILED"
+                      ? "font-medium text-danger"
+                      : "text-ink/80"
+                }
+              >
+                {w.testPrintStatus === "PENDING" && "Čeka se sledeći kontakt agenta…"}
+                {w.testPrintStatus === "SUCCEEDED" && (
+                  <>
+                    Uspela{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
+                    {" · "}
+                    {formatDateTime(w.testPrintCompletedAt)}
+                  </>
+                )}
+                {w.testPrintStatus === "FAILED" && (
+                  <>
+                    Nije uspela{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
+                    {w.testPrintError ? ` · ${w.testPrintError}` : ""}
+                  </>
+                )}
+              </dd>
+            </div>
+          )}
+        </dl>
+
+        {/* Routes section — three polished route cards in a vertical
+            stack with consistent gap. Save action is a proper primary
+            button at the bottom (graphite background, white text),
+            // clearly the single most important action of this card. */}
+        {showRouteSection && (
+          <div className="mt-4">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-inkSoft">
+              Rute štampe
+            </p>
+            <div className="space-y-2.5">
+              {ROUTE_TYPES.map((type) => renderRouteRow(w, type))}
+            </div>
+            <div className="mt-3 flex justify-end">
               <button
                 type="button"
                 onClick={() => saveRoutes(w)}
                 disabled={savingRoutesId === w.id}
-                className="min-h-8 rounded-md bg-graphite px-3 text-xs font-semibold text-cream-100 disabled:opacity-40"
+                className="inline-flex h-10 items-center justify-center rounded-md bg-graphite px-5 text-sm font-semibold text-cream-100 shadow-sm transition-colors hover:bg-graphite-700 focus:outline-none focus:ring-2 focus:ring-gold/40 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {savingRoutesId === w.id ? "Čuvanje…" : "Sačuvaj rute"}
               </button>
@@ -817,50 +981,64 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           </div>
         )}
 
+        {/* Footer: secondary management actions. Promoted from raw
+            underlined text to subtle ghost buttons, still clearly
+            secondary to the Save action above. */}
         {editingId === w.id ? (
-          <div className="mt-2 rounded-md border border-line bg-cream-100 p-2.5">
-            <label className="mb-1 block text-xs text-inkSoft" htmlFor={`ws-name-${w.id}`}>Naziv</label>
+          <div className="mt-4 rounded-md border border-line bg-white p-3">
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-ink/55" htmlFor={`ws-name-${w.id}`}>
+              Naziv računara
+            </label>
             <input
               id={`ws-name-${w.id}`}
               value={editName}
               onChange={(e) => setEditName(e.target.value)}
-              className="mb-2 w-full rounded-md border border-line px-3 py-1.5 text-sm text-ink"
+              className="mb-3 h-9 w-full rounded-md border border-line bg-white px-3 text-sm text-ink focus:border-gold focus:outline-none focus:ring-2 focus:ring-gold/30"
             />
-            <label className="mb-2 flex items-center gap-2 text-xs text-inkSoft">
-              <input type="checkbox" checked={editEnabled} onChange={(e) => setEditEnabled(e.target.checked)} />
-              Omogućen (isključi da privremeno zaustaviš automatsku štampu bez opoziva)
+            <label className="mb-3 flex items-start gap-2 text-xs text-inkSoft">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-line text-gold focus:ring-gold/30"
+                checked={editEnabled}
+                onChange={(e) => setEditEnabled(e.target.checked)}
+              />
+              <span>Omogućen (isključi da privremeno zaustaviš automatsku štampu bez opoziva računara)</span>
             </label>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => saveEditing(w.id)}
                 disabled={busyId === w.id || !editName.trim()}
-                className="min-h-9 rounded-md bg-graphite px-3 text-xs font-semibold text-cream-100 disabled:opacity-40"
+                className="inline-flex h-9 items-center rounded-md bg-graphite px-4 text-xs font-semibold text-cream-100 disabled:opacity-40"
               >
                 Sačuvaj
               </button>
               <button
                 type="button"
                 onClick={() => setEditingId(null)}
-                className="min-h-9 rounded-md border border-line px-3 text-xs font-semibold text-inkSoft"
+                className="inline-flex h-9 items-center rounded-md border border-line px-4 text-xs font-semibold text-inkSoft hover:border-ink/40 hover:text-ink"
               >
                 Otkaži
               </button>
             </div>
           </div>
         ) : (
-          <div className="mt-2 flex flex-wrap gap-3">
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">
             {!revoked && (
               <button
                 type="button"
                 onClick={() => startEditing(w)}
                 disabled={busyId === w.id}
-                className="text-xs font-semibold text-ink underline disabled:opacity-40"
+                className="inline-flex h-8 items-center rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink/80 hover:border-ink/40 hover:text-ink disabled:opacity-40"
               >
                 Podešavanja
               </button>
             )}
-            <button type="button" onClick={() => rePair(w)} className="text-xs font-semibold text-inkSoft underline">
+            <button
+              type="button"
+              onClick={() => rePair(w)}
+              className="inline-flex h-8 items-center rounded-md border border-line bg-white px-3 text-xs font-semibold text-inkSoft hover:border-ink/40 hover:text-ink"
+            >
               Ponovo upari
             </button>
             {!revoked && (
@@ -868,7 +1046,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                 type="button"
                 onClick={() => revoke(w.id)}
                 disabled={busyId === w.id}
-                className="text-xs font-semibold text-danger disabled:opacity-40"
+                className="inline-flex h-8 items-center rounded-md border border-danger/30 bg-white px-3 text-xs font-semibold text-danger hover:bg-danger-soft disabled:opacity-40"
               >
                 Opozovi
               </button>
@@ -1173,6 +1351,14 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             </button>
           )}
         </>
+      )}
+      {confirmingTest && testConfirmCtxRef.current && (
+        <TestPrintConfirmModal
+          routeLabel={testConfirmCtxRef.current.routeLabel}
+          printerName={testConfirmCtxRef.current.printerName}
+          paperWidthMm={testConfirmCtxRef.current.paperWidthMm}
+          onResolve={(v) => testConfirmResolveRef.current?.(v)}
+        />
       )}
     </Card>
   );

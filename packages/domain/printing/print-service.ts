@@ -936,18 +936,23 @@ export async function acknowledgePrintAmbiguity(
     },
   });
   if (!job) throw new Error("PrintJob nije pronađen");
+
+  // PRINTING P0 — idempotency check FIRST, status check SECOND.
+  // operatorConfirmedPrintedAt is the truth source: once set, this PrintJob
+  // is terminal — every subsequent call (with ANY idempotencyKey, intentional
+  // or accidental) returns the same record without re-writing the audit log
+  // or throwing. The status-throw below is reserved for genuine "wrong
+  // operator action" cases (job moved on without ever being acknowledged).
+  if (input.decision === "PRINTED") {
+    if (job.operatorConfirmedPrintedAt) {
+      return { id: job.id, status: "PRINTED", printedAt: job.operatorConfirmedPrintedAt, idempotentReplay: true };
+    }
+  }
   if (job.status !== "SUBMISSION_UNKNOWN") {
     throw new Error(`PrintJob nije u SUBMISSION_UNKNOWN stanju (trenutno: ${job.status})`);
   }
 
   if (input.decision === "PRINTED") {
-    // PRINTED idempotency: operatorConfirmedPrintedAt is the truth source.
-    // Once set, this PrintJob is terminal — every subsequent call (with
-    // ANY idempotencyKey, intentional or accidental) returns the same
-    // record without re-writing the audit log.
-    if (job.operatorConfirmedPrintedAt) {
-      return { id: job.id, status: "PRINTED", printedAt: job.operatorConfirmedPrintedAt, idempotentReplay: true };
-    }
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const j = await tx.printJob.update({

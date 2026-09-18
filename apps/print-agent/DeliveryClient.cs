@@ -263,6 +263,42 @@ public static class DeliveryClient
         return response.IsSuccessStatusCode;
     }
 
+    /// <summary>PRINTING P0 — Setup wizard's "IZABERI NAMENU" step.
+    /// Persists the operator's choice of which Windows printer + paper
+    /// width serves each route (KUHINJA / ŠANK / RAČUN) for THIS
+    /// workstation. The server treats this as authoritative — Admin
+    /// panels and the Agent's heartbeat route list read from the same
+    /// rows. The Agent can ONLY write to its own workstation's routes
+    /// (server-side scope check). Idempotent on the (workstation, type)
+    /// unique constraint.</summary>
+    public static async Task<bool> UpsertRouteAssignment(
+        string baseUrl, string credential, string routeType,
+        string? printerName, int? paperWidthMm, bool? isEnabled, bool? isPrimary)
+    {
+        using var request = AuthedRequest(HttpMethod.Put, baseUrl, $"/api/agent/routes/{routeType}/upsert", credential);
+        request.Content = JsonContent.Create(new
+        {
+            type = routeType,
+            printerName,
+            paperWidthMm,
+            isEnabled,
+            isPrimary,
+        }, options: JsonOptions);
+        using var response = await Http.SendAsync(request);
+        return response.IsSuccessStatusCode;
+    }
+
+    /// <summary>PRINTING P0 — Setup wizard's "no printer for this route"
+    /// path. Removes the route entirely so the server stops emitting
+    /// it in heartbeat route lists and Admin panels. Operator must
+    /// explicitly choose this — there is no implicit removal.</summary>
+    public static async Task<bool> DeleteRouteAssignment(string baseUrl, string credential, string routeType)
+    {
+        using var request = AuthedRequest(HttpMethod.Delete, baseUrl, $"/api/agent/routes/{routeType}/upsert", credential);
+        using var response = await Http.SendAsync(request);
+        return response.IsSuccessStatusCode;
+    }
+
     /// <summary>Faza 2C — prijava ishoda lokalno izvedene testne štampe
     /// (Admin "Test Print" dugme). Namerno bez jobId/attemptId — vidi
     /// workstation-service.ts requestTestPrint napomenu.</summary>
