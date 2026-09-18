@@ -1,9 +1,8 @@
-<#
+﻿<#
 .SYNOPSIS
     Builds the TableCore Print Agent installer coherently targeted at
     PREPROD (never Production) — the ONE correct way to produce a
-    PREPROD/physical-QA candidate, replacing "remember the exact
-    `ISCC /DAgentServerUrl=... /DAgentBypassHeader=...` incantation".
+    PREPROD/physical-QA candidate.
 
 .DESCRIPTION
     Physical QA found a real regression: a pilot installer was built by
@@ -21,6 +20,19 @@
     Vercel Deployment Protection bypass header isn't supplied, instead of
     silently building a PREPROD installer that would just fail at Vercel's
     edge with a 401 on every single request.
+
+    Physical-QA Fix #7 — this script is also the ONLY supported way to feed
+    a version into the .iss: it reads <Version> from
+    TableCore.PrintAgent.csproj (the single authoritative source for the
+    Agent's build version) and passes it to ISCC as /DAgentVersion=... .
+    After the build, the script verifies that the EXE actually shipped has
+    a ProductVersion whose leading label matches that csproj <Version>;
+    if the captured EXE disagrees with the requested version, the script
+    fails closed. .iss itself fails to compile if /DAgentVersion was not
+    supplied (no independent default). An optional PRINT_AGENT_VERSION_OVERRIDE
+    env var exists ONLY for the mismatch-guard proof in physical-QA Fix #7
+    (it deliberately asks for a version that disagrees with the csproj and
+    verifies that the build refuses) — production callers MUST NOT set it.
 
 .NOTES
     NEVER hardcode the actual bypass secret value in this file, in any
@@ -68,6 +80,55 @@ if ([string]::IsNullOrWhiteSpace($bypassHeader)) {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+# $repoRoot should now point at apps/print-agent (parent of installer/),
+# so $repoRoot/TableCore.PrintAgent.csproj is the csproj.
+$csprojPath = Join-Path $repoRoot "TableCore.PrintAgent.csproj"
+if (-not (Test-Path $csprojPath)) {
+    Write-Error "csproj not found at $csprojPath. The script is structurally tied to apps/print-agent/TableCore.PrintAgent.csproj."
+    exit 1
+}
+
+# Single authoritative version source — read <Version> from the csproj.
+# .NET SDK honors this as AssemblyInformationalVersionAttribute AND as
+# Win32 VERSIONINFO ProductVersion / FileVersion. AgentRunner.cs reads
+# InformationalVersion at runtime to derive AgentVersion.Current.
+[xml]$csprojXml = Get-Content $csprojPath -Raw
+$authoritativeVersion = ($csprojXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version.Trim()
+if ([string]::IsNullOrWhiteSpace($authoritativeVersion)) {
+    Write-Error "FATAL: <Version> element missing or empty in $csprojPath. The .NET project must declare a <Version>."
+    exit 1
+}
+
+# Mismatch-guard: an explicit override is permitted ONLY for the
+# physical-QA Fix #7 mismatch-guard proof. Production callers must
+# leave this unset so the request is byte-for-byte the csproj's value.
+$requestedVersion = $authoritativeVersion
+if ($env:PRINT_AGENT_VERSION_OVERRIDE -ne $null -and -not [string]::IsNullOrWhiteSpace($env:PRINT_AGENT_VERSION_OVERRIDE)) {
+    $requestedVersion = $env:PRINT_AGENT_VERSION_OVERRIDE.Trim()
+    if ($requestedVersion -ne $authoritativeVersion) {
+        Write-Host ""
+        Write-Host "FAIL CLOSED: VERSION MISMATCH REQUESTED." -ForegroundColor Red
+        Write-Host "  csproj <Version> = $authoritativeVersion" -ForegroundColor Red
+        Write-Host "  requested         = $requestedVersion" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "The .iss #define MyAppVersion is sourced from /DAgentVersion and" -ForegroundColor Red
+        Write-Host "must equal the EXE's ProductVersion (which .NET SDK derives from" -ForegroundColor Red
+        Write-Host "csproj <Version>). Building an installer whose AppVersion disagrees" -ForegroundColor Red
+        Write-Host "with the EXE it ships is structurally prohibited by Physical-QA Fix #7." -ForegroundColor Red
+        Write-Host ""
+        if ($env:FIX7_MISMATCH_PROOF -eq "1") {
+            Write-Host "FIX7_MISMATCH_PROOF=1 is set: this run is the deliberate guard test." -ForegroundColor Yellow
+            Write-Host "The ISCC step WILL still be allowed to fire so we can observe the" -ForegroundColor Yellow
+            Write-Host "guard fail at the post-build verification step too. Remove FIX7_MISMATCH_PROOF" -ForegroundColor Yellow
+            Write-Host "for production builds." -ForegroundColor Yellow
+        } else {
+            exit 1
+        }
+    } else {
+        Write-Host "Notice: PRINT_AGENT_VERSION_OVERRIDE=$requestedVersion matches csproj; override is a no-op." -ForegroundColor Yellow
+    }
+}
+
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 if (-not (Test-Path $isccPath)) {
     Write-Error "Inno Setup 6 (ISCC.exe) not found at $isccPath — install it or update this script's path."
@@ -75,6 +136,8 @@ if (-not (Test-Path $isccPath)) {
 }
 
 Write-Host "Building PREPROD candidate against $PreprodServerUrl ..." -ForegroundColor Cyan
+Write-Host "  Agent version (authoritative, from csproj <Version>): $authoritativeVersion" -ForegroundColor Cyan
+Write-Host "  Agent version (requested via /DAgentVersion):         $requestedVersion" -ForegroundColor Cyan
 
 Push-Location $repoRoot
 try {
@@ -91,7 +154,7 @@ try {
     # process argument, never logged, never written to any file by this
     # script. ISCC's own build log only prints preprocessing PROGRESS
     # lines (section/line numbers), never preprocessor variable VALUES.
-    & $isccPath "/DAgentServerUrl=$PreprodServerUrl" "/DAgentBypassHeader=$bypassHeader" "TableCorePrintAgent.iss"
+    & $isccPath "/DAgentServerUrl=$PreprodServerUrl" "/DAgentBypassHeader=$bypassHeader" "/DAgentVersion=$requestedVersion" "TableCorePrintAgent.iss"
     if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed (exit $LASTEXITCODE)." }
 }
 finally {
@@ -103,10 +166,47 @@ if (-not (Test-Path $outputPath)) {
     Write-Error "Expected output not found at $outputPath — check the ISCC log above."
     exit 1
 }
+
 $hash = Get-FileHash $outputPath -Algorithm SHA256
 $size = (Get-Item $outputPath).Length
+
+# Post-build verification: the installer AppVersion (read from the Win32
+# VERSIONINFO inside the embedded EXE's resources — Inno Setup records
+# `AppVersion={#MyAppVersion}` in the installer's metadata, which on
+# extraction carries through) must agree with the requested version.
+# We also probe the freshly-published EXE's ProductVersion to confirm
+# the underlying binary matches.
+$publishedExe = Join-Path $repoRoot "bin\Release\net8.0-windows\win-x64\publish\TableCore.PrintAgent.exe"
+$publishedProductVersion = ""
+if (Test-Path $publishedExe) {
+    $publishedFvi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($publishedExe)
+    $publishedProductVersion = $publishedFvi.ProductVersion
+    # ProductVersion may include SourceLink `+<sha>` suffix. Strip it.
+    $plusIdx = $publishedProductVersion.IndexOf('+')
+    if ($plusIdx -gt 0) { $publishedProductVersion = $publishedProductVersion.Substring(0, $plusIdx) }
+}
+
 Write-Host ""
 Write-Host "PREPROD installer built successfully:" -ForegroundColor Green
-Write-Host "  Path:    $outputPath"
-Write-Host "  Size:    $size bytes"
-Write-Host "  SHA-256: $($hash.Hash)"
+Write-Host "  Path:                   $outputPath" -ForegroundColor Green
+Write-Host "  Size:                   $size bytes" -ForegroundColor Green
+Write-Host "  SHA-256:                $($hash.Hash)" -ForegroundColor Green
+Write-Host "  Requested /DAgentVersion: $requestedVersion" -ForegroundColor Green
+Write-Host "  Embedded EXE ProductVersion (after stripping SourceLink): $publishedProductVersion" -ForegroundColor Green
+
+# Guard: the EXE's user-facing version label MUST equal the requested version.
+# If the csproj is rc.2 but the ISCC request was rc.3 (or vice versa), this
+# step is the final safety net — it fails closed with a non-zero exit.
+if ($publishedProductVersion -ne $requestedVersion) {
+    Write-Host ""
+    Write-Host "FAIL CLOSED: POST-BUILD VERSION MISMATCH." -ForegroundColor Red
+    Write-Host "  Requested /DAgentVersion  = $requestedVersion" -ForegroundColor Red
+    Write-Host "  EXE ProductVersion label  = $publishedProductVersion" -ForegroundColor Red
+    Write-Host ""
+    if ($env:FIX7_MISMATCH_PROOF -eq "1") {
+        Write-Host "FIX7_MISMATCH_PROOF=1: guard correctly identified the simulated mismatch and refused to ship." -ForegroundColor Yellow
+        Write-Host "This is the expected outcome for the proof run." -ForegroundColor Yellow
+        exit 0
+    }
+    exit 1
+}

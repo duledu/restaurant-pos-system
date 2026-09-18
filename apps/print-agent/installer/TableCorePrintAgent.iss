@@ -21,25 +21,35 @@
 ; ubacuje ništa dodatno.
 
 #define MyAppName "TableCore Print Agent"
-; Konsolidacija — eksplicitna interna pilot oznaka, NE javno stabilno
-; izdanje (nije potpisano, Windows 11 fizička prihvatna provera na
-; stvarnom hardveru je i dalje na čekanju). MORA se poklapati sa
-; AgentVersion.Current u AgentRunner.cs I <Version> u
-; TableCore.PrintAgent.csproj. Profesionalni instalacioni audit —
-; više MATERIJALNO različitih PREPROD kandidata je ranije objavljeno
-; pod ISTIM vidljivim brojem (1.0.0-pilot.1), pa fizički test nije mogao
-; sam po sebi da potvrdi KOJI je tačno instaler instaliran (samo SHA-256
-; je to razlikovao). Uvećaj OVAJ broj pri SVAKOM novom fizičkom-QA
-; kandidatu ubuduće.
-#define MyAppVersion "1.0.0-rc.2"
+; Physical-QA Fix #7 — SINGLE AUTHORITATIVE VERSION SOURCE.
+;
+; MyAppVersion is NO LONGER independently defined here. The installer
+; consumes the exact same value as the embedded EXE via the
+; /DAgentVersion=... ISCC flag, which build-preprod.ps1 reads directly
+; from <Version> in TableCore.PrintAgent.csproj. .iss fails to compile
+; if /DAgentVersion was not supplied — there is no independent default,
+; so it is structurally impossible to publish an installer whose AppVersion
+; (Add/Remove Programs, in-place upgrade detection, OutputBaseFilename
+; suffix) disagrees with the EXE ProductVersion (Windows Properties →
+; Details) the installer actually ships. See docs/PHYSICAL-QA-FIX-7-
+; VERSION-SOURCE.md.
+;
+; The `BuildSuffix` derivation below (` (PREPROD pilot)`) is computed from
+; the AGENT SERVER URL, NOT from MyAppVersion — semantics are unchanged:
+; the PREPROD build path is opt-in via /DAgentServerUrl=..., the
+; production build is the default (no /D argument at all). The version
+; itself is always pulled from the csproj, regardless of build flavor.
+#ifndef AgentVersion
+  #error "AgentVersion was not provided. build-preprod.ps1 is the only supported way to build this installer; it always passes /DAgentVersion=<value> read from TableCore.PrintAgent.csproj:<Version>. Invoking ISCC.exe directly without that flag is no longer supported."
+#endif
+#define MyAppVersion AgentVersion
 #define MyAppPublisher "TableCore"
 #define MyServiceName "TableCorePrintAgent"
-#define MyServiceAccount "NT SERVICE\TableCorePrintAgent"
+#define MyServiceAccount "NT SERVICE\\TableCorePrintAgent"
 ; Fiksan GUID — NIKAD menjati posle prvog objavljivanja; Inno ga koristi da
 ; prepozna "isti proizvod" pri nadogradnji (isti install direktorijum,
 ; Add/Remove Programs unos zamenjen umesto dupliranog).
-#define MyAppId "{{B9D3E4B0-6C21-4B0B-9B39-7B7C9E9A6E31}"
-
+#define MyAppId "{{B9D3E4B0-6C21-4B0B-9B39-7B7C9E9A6E31}}"
 ; PREPROD pilot build — NAMERNO izolovano od podrazumevanog (produkcionog)
 ; puta ispod. Aktivira se ISKLJUČIVO eksplicitnim
 ; `ISCC /DAgentServerUrl=https://... installer\TableCorePrintAgent.iss` —

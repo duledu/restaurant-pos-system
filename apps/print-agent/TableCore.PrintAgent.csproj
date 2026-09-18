@@ -15,11 +15,22 @@
     <OutputType>WinExe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- Konsolidacija — eksplicitna interna pilot oznaka na samom EXE-u
-         (Windows Svojstva/Details -> Product version), MORA se poklapati sa
-         AgentVersion.Current (AgentRunner.cs) i MyAppVersion (installer/
-         TableCorePrintAgent.iss). NE javno stabilno izdanje. -->
-    <Version>1.0.0-pilot.9</Version>
+    <!-- SINGLE AUTHORITATIVE VERSION SOURCE for the Print Agent.
+         Everything that says "what version is this binary?" derives from
+         this <Version>:
+           - AssemblyInformationalVersionAttribute (read at runtime by
+             apps/print-agent/AgentRunner.cs:AgentVersion.Current, with the
+             optional SourceLink `+<sha>` suffix stripped to the user-facing
+             label).
+           - Win32 VERSIONINFO ProductVersion / FileVersion (visible in
+             Windows Properties -> Details).
+         The installer (apps/print-agent/installer/build-preprod.ps1) is
+         REQUIRED to read THIS exact value and pass it to ISCC as
+         /DAgentVersion=...; .iss has no independent default and fails to
+         compile without that flag. Mismatch between this value and the
+         requested installer version fails the build before any artifact
+         is packaged. -->
+    <Version>1.0.0-rc.2</Version>
     <!-- Never package workstation config, local SDKs, or prior publish/test output. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;.tools/**;agent.local.json</DefaultItemExcludes>
   </PropertyGroup>

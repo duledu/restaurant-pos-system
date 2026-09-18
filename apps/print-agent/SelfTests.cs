@@ -270,7 +270,7 @@ internal static class SelfTests
             // typical real receipt (short/long/very-long names, modifiers,
             // two VAT rates); prove it still fits this same real driver at
             // 58mm, exactly like a real receipt does above.
-            var testPrintTicketForDriver = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", printerName, 58, "1.0.0-pilot.9");
+            var testPrintTicketForDriver = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", printerName, 58, AgentVersion.Current);
             var testPrintDriverResult = WindowsPrinter.Print(new("RECEIPT", printerName, 58), testPrintTicketForDriver, "self-test-receipt-test-print", dryRun: true);
             Check(testPrintDriverResult.Status == "PREFLIGHT_ONLY",
                 $"[{printerName}] the realistic RECEIPT Test Print ticket (stress-test content, same renderer as a real receipt) fits this same real driver — {testPrintDriverResult.Guarantee}");
@@ -501,7 +501,7 @@ internal static class SelfTests
         // RECEIPT RENDERING POLISH, requirement #17 — the Admin Test Print
         // for a RECEIPT route must exercise this SAME renderer (not a
         // disconnected diagnostic ticket) and must be unmistakable.
-        var testPrintTicket = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", "POS-58", 58, "1.0.0-pilot.9");
+        var testPrintTicket = TicketPayload.BuildReceiptTestPrintTicket("Kasa-1", "POS-58", 58, AgentVersion.Current);
         var testPrintText = JoinedText(testPrintTicket);
         Check(testPrintText.Contains("TEST ŠTAMPE") && testPrintText.Contains("TEST USPEŠAN"), "Test Print is unmistakably marked, cannot be confused with a real customer receipt");
         Check(!testPrintText.Contains("RAČUN #"), "Test Print never renders a receipt number — it must never look like a real, sequence-consuming transaction");
