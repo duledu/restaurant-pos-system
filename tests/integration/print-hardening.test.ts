@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@rcs/db";
-import type { AuthContext } from "@rcs/auth";
-import { orders, printing, settings, voids, billing } from "@rcs/domain";
+import type { AuthContext, WorkstationAuthContext } from "@rcs/auth";
+import { orders, printing, settings, voids, billing, workstations, agentPrinting } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 let ctx: AuthContext;
@@ -27,7 +27,7 @@ beforeEach(async () => {
   kitchenId = (await item("KITCHEN")).id;
   barId = (await item("BAR")).id;
   ctx = { userId: "manager", employeeId: "manager", restaurantId: restaurant.id, locationIds: [locationId], roles: ["MANAGER"],
-    permissions: new Set(["settings.manage", "orders.print", "production.manage", "production.view"]) };
+    permissions: new Set(["settings.manage", "orders.print", "production.manage", "production.view", "workstations.manage"]) };
 });
 async function policy(station: "KITCHEN" | "BAR", autoPrint: boolean, isEnabled = true) {
   return settings.upsertPrinterConfig(ctx, { locationId, station, name: station, paperWidthMm: 58, autoPrint, isEnabled });
@@ -161,18 +161,86 @@ describe("automatic printing policy", () => {
     await policy("KITCHEN", false);
     await policy("BAR", false);
     await settings.upsertPrinterConfig(ctx, { locationId, station: "RECEIPT", name: "Receipt", isEnabled: true, autoPrint: false });
+    // Pair an online workstation with a RECEIPT route so the Agent is the
+    // canonical claim path for the receipt reprint under FIX #12. The legacy
+    // RECEIPT PrinterConfig.autoPrint=false is intentionally kept (and is
+    // bypassed for the Agent path — see print-service.ts:
+    // `activeWorkstation ? null : stationPolicy(...)` — this test therefore
+    // also documents the Agent-overrides-legacy-autoPrint interaction).
+    const pairing = await workstations.createPairing(ctx, { locationId, name: "ReceiptAgent" });
+    const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+    await workstations.upsertPrintRoute(ctx, registered.workstationId, "RECEIPT", { printerName: "POS-58", paperWidthMm: 58 });
+    await prisma.workstationPrintRoute.updateMany({
+      where: { workstationId: registered.workstationId },
+      data: { printerAvailable: true },
+    });
+    await prisma.workstation.update({ where: { id: registered.workstationId }, data: { lastSeenAt: new Date() } });
+    const wsCtx: WorkstationAuthContext = {
+      workstationId: registered.workstationId,
+      restaurantId: registered.restaurantId,
+      locationId: registered.locationId,
+      station: registered.station,
+    };
+
     const order = await send();
     await billing.completePayment(ctx, order.id, { method: "CASH", tenderedAmount: 1000 });
     const job = await printing.reprintReceipt(ctx, order.id, randomUUID());
-    expect(job.isAutomatic).toBe(false);
-    const old = (await printing.beginPrintAttempt(ctx, order.id, job.id))!;
+    // PHYSICAL-QA FIX #12 — receipt user reprints are Agent-deliverable.
+    // `isAutomatic` is the Agent-delivery-eligibility flag (decoupled from
+    // creation intent, which is now carried by `isReprint`). The receipt
+    // reprint must remain reachable by the Windows Print Agent so the
+    // waiter UI's "Ponovo štampaj" click produces physical paper, exactly
+    // like the automatic payment-time dispatch — independently of whether
+    // the legacy RECEIPT PrinterConfig.autoPrint is OFF.
+    expect(job.isAutomatic).toBe(true);
+    expect(job.isReprint).toBe(true);
+
+    // Settle the older automatic RECEIPT first (Agent's pollAndClaim orders
+    // candidates by createdAt ASC — the auto receipt is older than the
+    // reprint). This also documents that both rows are independently
+    // Agent-claimable end-to-end through the new isAutomatic:true path.
+    const auto = (await agentPrinting.pollAndClaim(wsCtx))!;
+    expect(auto.documentType).toBe("RECEIPT");
+    expect(auto.isReprint).toBe(false);
+    await agentPrinting.beginSubmission(wsCtx, auto.jobId, auto.attemptId);
+    const autoResult = await agentPrinting.submitResult(wsCtx, auto.jobId, auto.attemptId, "SUBMITTED_TO_SPOOLER");
+    expect(autoResult.status).toBe("PRINTED");
+
+    // Now the Agent claims the reprint. It first claims, then ages the
+    // claim to simulate a tab/browser crash between claim and Windows
+    // submission, then re-claims — every poll call owns its own
+    // stale-recovery pass (agent-print-service.ts: pollAndClaim runs the
+    // resetMany BEFORE the candidate query).
+    const old = (await agentPrinting.pollAndClaim(wsCtx))!;
+    expect(old.jobId).toBe(job.id);
+    expect(old.isReprint).toBe(true);
+    expect(old.documentType).toBe("RECEIPT");
     await ageClaim(job.id);
-    const next = (await printing.beginPrintAttempt(ctx, order.id, job.id))!;
+    const next = (await agentPrinting.pollAndClaim(wsCtx))!;
+    expect(next.jobId).toBe(job.id);
     expect(next.attemptId).not.toBe(old.attemptId);
-    await expect(printing.startPrintSubmission(ctx, order.id, job.id, old.attemptId!)).rejects.toThrow();
-    await printing.startPrintSubmission(ctx, order.id, job.id, next.attemptId!);
-    expect((await printing.confirmPrintResult(ctx, order.id, job.id, { attemptId: next.attemptId!, outcome: "TRANSPORT_COMPLETED" })).status).toBe("PRINTED");
-    expect(await prisma.printJob.count({ where: { orderId: order.id, isAutomatic: true } })).toBe(0);
+
+    // Honest attempt identity — the OLD attemptId cannot finalize after the
+    // Agent's stale-recovery pass reset it back to PENDING.
+    await expect(agentPrinting.submitResult(wsCtx, job.id, old.attemptId, "SUBMITTED_TO_SPOOLER")).rejects.toThrow();
+    await agentPrinting.beginSubmission(wsCtx, job.id, next.attemptId);
+    const result = await agentPrinting.submitResult(wsCtx, job.id, next.attemptId, "SUBMITTED_TO_SPOOLER");
+    expect(result.status).toBe("PRINTED");
+
+    // Both the automatic payment-time receipt dispatch AND the user-initiated
+    // reprint are Agent-eligible after FIX #12. The legacy RECEIPT
+    // autoPrint=false is bypassed for the Agent path (activeWorkstation ?
+    // null : stationPolicy); receipt dispatch honors only the
+    // @@unique([orderId, dispatchKey]) constraint and the user click.
+    // Count is 2: 1 auto + 1 reprint, both `isAutomatic: true`, both
+    // `isReprint: false/true`.
+    const automaticJobs = await prisma.printJob.findMany({
+      where: { orderId: order.id, isAutomatic: true },
+      select: { isReprint: true, type: true },
+    });
+    expect(automaticJobs).toHaveLength(2);
+    expect(automaticJobs.map((j) => j.type)).toEqual(["RECEIPT", "RECEIPT"]);
+    expect(automaticJobs.map((j) => j.isReprint).sort()).toEqual([false, true]);
   });
   it.each(["KITCHEN", "BAR"] as const)("%s OFF creates no jobs and does not affect routing or additional rounds", async (station) => {
     await policy(station, false);

@@ -119,6 +119,15 @@ export function BillClient({ tableId }: { tableId: string }) {
   // Agent claims and physically prints it independently, on its own poll
   // loop, on whatever computer its RECEIPT route points to. This call never
   // waits for that physical print to finish — only for the dispatch itself.
+  //
+  // FIX #13 — wording matches the only state we actually know at the moment
+  // the API returns: the PrintJob row exists server-side and the Agent will
+  // pick it up on its own poll loop within ~1–3s. We deliberately do NOT
+  // claim "printed" because the Agent ACK is not observed by this UI, and we
+  // deliberately do NOT introduce polling just to flip the message — honesty
+  // about the queued state is the correct default for both the automatic and
+  // the user-initiated paths. The Agent's own status is visible from Admin
+  // diagnostics when needed.
   async function handlePrint() {
     if (!orderId || printBusy) return;
     setPrintBusy(true);
@@ -127,7 +136,7 @@ export function BillClient({ tableId }: { tableId: string }) {
     try {
       const job = await printReceipt(orderId);
       setPrintJob(job);
-      setPrintFeedback("Račun poslat na štampu");
+      setPrintFeedback("Račun će biti odštampan");
     } catch (e) {
       setPrintFeedback(null);
       setPrintError(e instanceof Error ? e.message : "Greška pri štampi");
@@ -144,7 +153,7 @@ export function BillClient({ tableId }: { tableId: string }) {
     try {
       const job = await reprintReceipt(orderId);
       setPrintJob(job);
-      setPrintFeedback("Račun poslat na štampu");
+      setPrintFeedback("Račun će biti odštampan");
     } catch (e) {
       setPrintFeedback(null);
       setPrintError(e instanceof Error ? e.message : "Greška pri ponovnoj štampi");

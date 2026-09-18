@@ -383,32 +383,26 @@ export async function dispatchReceiptPrintJob(
       station: null,
       dispatchKey: opts.dispatchKey,
       content: toJson(content),
-      // PRINTING V2 FINAL — physical PREPROD root cause: this was left at
-      // the schema default (false), same as a MANUAL KITCHEN/BAR
-      // reprint (requestStationPrint) — correct for that case (a KDS
-      // operator's own browser is expected to claim it), but WRONG here.
-      // agentPrinting.pollAndClaim's candidate query filters
-      // `isAutomatic: true` (mirroring dispatchStationPrintJobs's
-      // KITCHEN/BAR automatic dispatch below) — with this left false,
-      // EVERY receipt PrintJob (both the automatic payment-time dispatch
-      // and the new silent printing.printReceipt primary action) was
-      // structurally invisible to the Agent's own poll forever, only ever
-      // reachable by an employee's own browser manually claiming it
-      // (printAndConfirm/beginPrintJob). That is exactly the observed bug:
-      // the waiter UI correctly reported "sent" (the job genuinely exists),
-      // but no Agent ever printed it. RECEIPT now dispatches automatic
-      // exactly like KITCHEN/BAR.
-      // A user-initiated reprint is NOT automatic: it must NOT be picked
-      // up by the Print Agent's automatic poll/claim loop, otherwise
-      // clicking "Reprint" silently produces a duplicate physical print
-      // (the operator triggered the click AND the agent polls and grabs
-      // it within seconds). The same separation applies to KITCHEN/BAR
-      // manual prints (see requestStationPrint); this brings RECEIPT into
-      // parity. The original "RECEIPT physical-failure root cause" fix
-      // intentionally made the AUTOMATIC payment-time RECEIPT dispatch
-      // agent-claimable — that path calls this function with
-      // isReprint: false, so isAutomatic stays true there.
-      isAutomatic: !opts.isReprint,
+      // PRINTING V2 — single, unambiguous meaning:
+      //   `isAutomatic` = "the Windows Print Agent may claim this row via
+      //   agentPrinting.pollAndClaim". It is the delivery-eligibility flag.
+      //   `isReprint`   = "this row was created by an explicit user reprint
+      //   request" (creation intent). Audit / identity only.
+      // They were previously overloaded into the same boolean, which made
+      // receipts invisible to the Agent whenever a user clicked Reprint
+      // (the Physical-QA FIX #12 root cause). The two flags are now
+      // decoupled: a row is Agent-claimable IFF it represents a real
+      // demand for physical paper, regardless of who triggered it. An
+      // accidental rapid double-click is suppressed one layer up (the
+      // waiter UI's ref-stable idempotencyKey in print-client.ts keeps the
+      // @@unique([orderId, dispatchKey]) constraint effective — see that
+      // file). Intentional later reprints keep producing fresh PrintJobs,
+      // each one Agent-claimable exactly once. KITCHEN/BAR manual prints
+      // (requestStationPrint) intentionally stay `isAutomatic: false`
+      // because they are claimed by the KDS operator's OWN browser via
+      // beginPrintAttempt, not by the Agent poll loop — that path is
+      // unchanged.
+      isAutomatic: true,
       isReprint: opts.isReprint,
       reprintOfId: original?.id ?? null,
       requestedBy: opts.requestedBy,

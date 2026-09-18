@@ -131,12 +131,37 @@ export async function printReceipt(orderId: string): Promise<PrintJob> {
   return body.printJob as PrintJob;
 }
 
+// Per-order in-flight `reprintReceipt` promise map. Module-scope is safe —
+// only bill-client.tsx calls reprintReceipt in this app, and React 18
+// event-loop batching is the only case that benefits from dedup.
+const inflightReprintByOrder = new Map<string, Promise<PrintJob>>();
+
 export async function reprintReceipt(orderId: string): Promise<PrintJob> {
-  const body = await apiFetch(`/api/pos/orders/${orderId}/receipt/reprint`, {
+  // Physical-QA FIX #12 — Rapid double-click (React 18 batches setPrintBusy
+  // so two clicks that fire inside the same event loop tick BOTH see
+  // printBusy === false and proceed) must NOT produce two physical prints.
+  // The server already deduplicates on
+  //   @@unique([orderId, dispatchKey = "receipt-reprint:<paymentId>:<key>"])
+  // — but only if the SAME `idempotencyKey` reaches it for retries of the
+  // SAME user intent. We pin the in-flight request per orderId here: the
+  // first click of a user action generates one UUID and reuses it for any
+  // subsequent click that arrives before this call resolves; a click that
+  // arrives AFTER resolution is a fresh intent and gets a fresh UUID.
+  // This mirrors the explicit-request-identity pattern already used by
+  // acknowledgePrintAmbiguity (see print-service.ts handleReprint ack).
+  const inflight = inflightReprintByOrder.get(orderId);
+  if (inflight) return inflight;
+  const idempotencyKey = crypto.randomUUID();
+  const promise = apiFetch(`/api/pos/orders/${orderId}/receipt/reprint`, {
     method: "POST",
-    body: JSON.stringify({ idempotencyKey: crypto.randomUUID() }),
-  });
-  return body.printJob as PrintJob;
+    body: JSON.stringify({ idempotencyKey }),
+  }).then((body) => body.printJob as PrintJob);
+  inflightReprintByOrder.set(orderId, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightReprintByOrder.delete(orderId);
+  }
 }
 
 /** Claim, receive one-shot start permission, invoke transport, then acknowledge that attempt. */
