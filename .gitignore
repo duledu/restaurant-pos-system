@@ -36,6 +36,16 @@ coverage/
 # potpuno odvojena od DEV baze iznad, vidi docs/database-safety.md
 .local-postgres-data-test/
 
+# Stale .next cache directories captured during manual renames; safe to
+# recreate from `next build`. Ignored to keep working tree clean.
+.next-stale-*/
+
+# Repros removed out of tests/scripts during debugging; kept locally for
+# reference but never tracked (they intentionally have non-.test.ts names
+# that vitest wouldn't pick up anyway, but better to make the policy
+# explicit).
+/_repro_removed/
+
 # Database backups (scripts/db-backup.mjs) — contain real business data,
 # NEVER commit. See docs/database-backup-recovery.md.
 /backups/
