@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Reflection;
 
 namespace TableCore.PrintAgent;
 
@@ -537,13 +538,46 @@ public static class AgentRunner
 }
 
 /// <summary>
-/// Faza 2C, sekcija 7 — jasno, korisnički-vidljivo verzionisanje proizvoda
-/// (ne interna faza-po-faza oznaka kao ranije "2.0.0-phase2b"). Agent
-/// prijavljuje ovu vrednost preko heartbeat-a (DeliveryClient.Heartbeat);
-/// Admin je prikazuje uz radnu stanicu. MORA se poklapati sa
-/// MyAppVersion u installer/TableCorePrintAgent.iss pri svakom objavljivanju.
+/// Faza 2C, sekcija 7 — jasno, korisnički-vidljivo verzionisanje proizvoda.
+/// BUG #7 (print-agent version source, 2026-09-19) — SINGLE authoritative
+/// source. The user-facing version is now derived at runtime from the
+/// executing assembly's AssemblyInformationalVersionAttribute, which
+/// .NET populates from TableCore.PrintAgent.csproj:&lt;Version&gt;. SourceLink
+/// appends `+&lt;sha&gt;` so the raw attribute value is e.g.
+/// "1.0.0-rc.2+abc1234"; we strip everything from the first '+' so the
+/// heartbeat, Admin Workstations panel, and self-tests all see the same
+/// clean "1.0.0-rc.2" label WITHOUT losing the build-metadata suffix in
+/// the actual binary resources. The installer (.iss) is required to
+/// consume the same value via /DAgentVersion from build-preprod.ps1; a
+/// mismatch between the csproj &lt;Version&gt; and the ISCC-supplied version
+/// fails the build before any artifact is packaged. Agent reports this
+/// value via heartbeat to the Admin Workstations panel
+/// (DeliveryClient.Heartbeat).
 /// </summary>
 public static class AgentVersion
 {
-    public const string Current = "1.0.0-pilot.9";
+    /// <summary>
+    /// User-facing version label (e.g. "1.0.0-rc.2"). Derived from the
+    /// executing assembly's InformationalVersion with any SourceLink
+    /// `+&lt;sha&gt;` suffix stripped. Never hardcoded; if InformationalVersion
+    /// is missing (impossible for a Release build), falls back to the
+    /// normalized AssemblyVersion instead, and finally to "unknown" as a
+    /// loud failure signal — never an empty string, never a misleading
+    /// placeholder.
+    /// </summary>
+    public static string Current
+    {
+        get
+        {
+            var asm = typeof(AgentVersion).Assembly;
+            var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (string.IsNullOrWhiteSpace(info))
+            {
+                var v = asm.GetName().Version;
+                return v is null ? "unknown" : $"{v.Major}.{v.Minor}.{v.Build}";
+            }
+            var plus = info.IndexOf('+');
+            return plus > 0 ? info.Substring(0, plus) : info;
+        }
+    }
 }
