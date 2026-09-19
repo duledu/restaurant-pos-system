@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
 import { TicketPrintPanel, type TicketContent } from "../../../../../components/printing/TicketPrintPanel";
-import { fetchPrintJobs, printReceipt, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
+import { fetchPrintJobs, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
 
 interface BillItem {
   id: string;
@@ -111,45 +111,37 @@ export function BillClient({ tableId }: { tableId: string }) {
       .catch(() => {});
   }, [result, orderId]);
 
-  // Print Agent physical QA fix — the primary action must NEVER open the
-  // browser's own print dialog (window.print()/BrowserPrintTransport). It
-  // only asks the server to guarantee the authoritative RECEIPT PrintJob
-  // exists (idempotent — safe to call even if payment already auto-dispatched
-  // it, and safe to retry/double-click); the already-running Windows Print
-  // Agent claims and physically prints it independently, on its own poll
-  // loop, on whatever computer its RECEIPT route points to. This call never
-  // waits for that physical print to finish — only for the dispatch itself.
+  // PRINTING P0 — manual reprint after a successful payment. The original
+  // receipt is dispatched AUTOMATICALLY by completePayment (see
+  // billing-service.ts → dispatchReceiptPrintJob with dispatchKey
+  // "receipt:<paymentId>"), so the operator never needs a second button to
+  // re-trigger that deterministic row — the Agency Print Agent picks the
+  // authoritative PrintJob up on its own poll loop regardless. This control
+  // is therefore the EXPLICIT, INTENTIONAL reprint path: each click
+  // generates a fresh per-intent UUID on the client (print-client.ts
+  // inflightReprintByOrder Map) and the server uses it inside dispatchKey
+  // "receipt-reprint:<paymentId>:<idempotencyKey>", producing a SEPARATE
+  // PrintJob that is also Agent-claimable. Rapid double-clicks share the
+  // SAME in-flight promise → same UUID → same row; a fresh click after
+  // resolution produces a fresh UUID → a fresh physical copy.
   //
-  // FIX #13 — wording matches the only state we actually know at the moment
-  // the API returns: the PrintJob row exists server-side and the Agent will
-  // pick it up on its own poll loop within ~1–3s. We deliberately do NOT
-  // claim "printed" because the Agent ACK is not observed by this UI, and we
-  // deliberately do NOT introduce polling just to flip the message — honesty
-  // about the queued state is the correct default for both the automatic and
-  // the user-initiated paths. The Agent's own status is visible from Admin
-  // diagnostics when needed.
-  async function handlePrint() {
-    if (!orderId || printBusy) return;
-    setPrintBusy(true);
-    setPrintError(null);
-    setPrintFeedback("Šaljem na štampač…");
-    try {
-      const job = await printReceipt(orderId);
-      setPrintJob(job);
-      setPrintFeedback("Račun će biti odštampan");
-    } catch (e) {
-      setPrintFeedback(null);
-      setPrintError(e instanceof Error ? e.message : "Greška pri štampi");
-    } finally {
-      setPrintBusy(false);
-    }
-  }
-
+  // FIX #13 — the wording below ("Šaljem na štampač…" while in-flight,
+  // "Račun će biti odštampan" once the API returns) matches the only state
+  // we can authoritatively know at that moment: the server-side PrintJob
+  // exists and the Agent will claim it on its next poll. We deliberately
+  // do NOT flip the message to a past-tense "printed" because the Agent
+  // ACK is not observed by this UI, and we deliberately do NOT add a
+  // polling loop just to upgrade the wording. SUBMISSION_UNKNOWN must
+  // never auto-reprint (see print-hardening.test.ts); Admin reconciliation
+  // is the single path for that state.
   async function handleReprint() {
     if (!orderId || printBusy) return;
     setPrintBusy(true);
     setPrintError(null);
-    setPrintFeedback("Šaljem na štampač…");
+    // In-flight wording is rendered directly on the button itself
+    // ({printBusy ? "Šaljem na štampač…" : "Ponovi štampu računa"}) — we
+    // deliberately do NOT also push it to printFeedback to avoid
+    // double-mirroring the same transient signal.
     try {
       const job = await reprintReceipt(orderId);
       setPrintJob(job);
@@ -268,22 +260,14 @@ export function BillClient({ tableId }: { tableId: string }) {
           )}
           {printError && <div className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{printError}</div>}
 
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={handlePrint}
-              disabled={printBusy}
-              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
-            >
-              {printBusy ? "…" : "Štampaj račun"}
-            </button>
+          <div className="mt-4">
             <button
               type="button"
               onClick={handleReprint}
               disabled={printBusy}
-              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
+              className="w-full rounded-md border-2 border-line bg-white py-3.5 text-sm font-semibold text-ink transition-colors hover:border-gold hover:text-gold-dark disabled:opacity-40"
             >
-              Ponovo štampaj
+              {printBusy ? "Šaljem na štampač…" : "Ponovi štampu računa"}
             </button>
           </div>
 

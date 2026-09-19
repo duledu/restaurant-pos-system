@@ -3,8 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card } from "../../../../components/ui/Card";
 import { Skeleton } from "../../../../components/ui/Skeleton";
-import { TicketPrintPanel, type TicketContent } from "../../../../components/printing/TicketPrintPanel";
-import { defaultPrintTransport } from "../../../../lib/print-transport";
 import { QzSettingsPanel } from "../../../../components/kds/QzSettingsPanel";
 import { WorkstationsPanel } from "../../../../components/kds/WorkstationsPanel";
 
@@ -41,64 +39,6 @@ function emptyDraft(locationId: string, station: PrinterConfig["station"]): Omit
   return { locationId, station, name: "", printerType: "BROWSER", paperWidthMm: 80, isEnabled: true, autoPrint: false, copies: 1 };
 }
 
-/**
- * P0.14 — probna štampa. NAMERNO potpuno klijentska (bez ijednog API
- * poziva): štampa lažni, fiksni sadržaj kroz ISTI TicketPrintPanel
- * renderer koji koriste stvarni tiketi/računi (dakle stvarno testira
- * širinu papira/CSS/ćirilicu-latinicu/dugačak naziv/dodatke/napomenu za
- * IZABRANU konfiguraciju), bez dodirivanja porudžbine, stola, inventara,
- * plaćanja, KDS-a, smene ili fiskalnog toka — ne postoji ni jedan red za
- * kreirati jer se ništa ne piše u bazu.
- */
-function buildTestPrintContent(station: PrinterConfig["station"], paperWidthMm: number): TicketContent {
-  if (station === "RECEIPT") {
-    return {
-      kind: "RECEIPT",
-      restaurantName: "TableCore",
-      restaurantLegalName: null,
-      address: null,
-      phone: null,
-      taxIdNumber: null,
-      legalNote: "PROBNA ŠTAMPA — nije fiskalni račun, nije stvarna transakcija",
-      footerText: "Ovo je probna štampa iz Podešavanja štampača.",
-      receiptNumber: 0,
-      orderNumber: "TEST",
-      tableLabel: "TEST",
-      waiterName: "Test",
-      issuedAt: new Date().toISOString(),
-      items: [
-        { quantity: 2, name: "Piletina u sosu sa pečurkama i vrhnjem", unitPrice: "890.00", lineTotal: "1780.00" },
-        { quantity: 1, name: "Šopska salata", unitPrice: "450.00", lineTotal: "450.00" },
-      ],
-      subtotal: "2230.00",
-      taxTotal: "446.00",
-      discountAmount: null,
-      total: "2230.00",
-      currency: "RSD",
-      paymentMethod: "CASH",
-      tenderedAmount: "2230.00",
-      changeAmount: "0.00",
-      paperWidthMm,
-    };
-  }
-  return {
-    kind: station,
-    stationLabel: station === "KITCHEN" ? "KUHINJA" : "ŠANK",
-    restaurantName: "TableCore",
-    tableLabel: "TEST",
-    waiterName: "Test",
-    orderNumber: "TEST0001",
-    submittedAt: new Date().toISOString(),
-    items: [
-      { quantity: 2, name: "Piletina u sosu sa pečurkama, vrhnjem i pečurkama", note: "bez luka, extra ljuto", modifiers: ["+ Kačkavalj", "Bez luka"] },
-      { quantity: 1, name: "Šopska salata", note: null, modifiers: [] },
-      { quantity: 3, name: "Ćevapi (5 komada)", note: "srednje pečeno", modifiers: ["+ Kajmak", "+ Ajvar"] },
-    ],
-    isAdditional: false,
-    paperWidthMm,
-  };
-}
-
 export function PrintersSettingsClient() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [locationId, setLocationId] = useState<string | null>(null);
@@ -106,12 +46,6 @@ export function PrintersSettingsClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
-  const [testPrintContent, setTestPrintContent] = useState<TicketContent | null>(null);
-
-  useEffect(() => {
-    if (!testPrintContent) return;
-    defaultPrintTransport.print().finally(() => setTestPrintContent(null));
-  }, [testPrintContent]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -294,13 +228,6 @@ export function PrintersSettingsClient() {
                       >
                         {saving === station ? "Čuvanje…" : "Sačuvaj"}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setTestPrintContent(buildTestPrintContent(station, cfg.paperWidthMm))}
-                        className="min-h-11 rounded-md border border-line px-5 py-2 text-sm font-semibold text-inkSoft hover:border-gold/50 hover:text-ink"
-                      >
-                        Probna štampa
-                      </button>
                     </div>
                   </Card>
                 );
@@ -310,8 +237,6 @@ export function PrintersSettingsClient() {
           </details>
         </div>
       )}
-
-      {testPrintContent && <TicketPrintPanel content={testPrintContent} />}
     </div>
   );
 }

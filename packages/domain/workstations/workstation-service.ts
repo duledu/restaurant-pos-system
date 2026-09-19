@@ -82,6 +82,14 @@ const WORKSTATION_PUBLIC_SELECT = {
       printerName: true,
       paperWidthMm: true,
       printerAvailable: true,
+      // PRINTING P0 FIX #1 — Admin UI's routeReadiness() must observe the
+      // human physical confirmation state. Without these three fields the
+      // GET /api/admin/workstations readback strips the persisted
+      // confirmation and the route pill stays "Čeka test štampe" even
+      // after a successful POST /confirm. Mirror of PRINT_ROUTE_SELECT.
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: true,
+      physicalTestConfirmedBy: true,
       isEnabled: true,
       isPrimary: true,
       updatedAt: true,

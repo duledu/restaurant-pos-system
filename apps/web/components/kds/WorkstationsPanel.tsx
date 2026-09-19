@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "../ui/Card";
 import { TestPrintConfirmModal } from "./TestPrintConfirmModal";
+import { evaluateTestPollResult, type PollObservation, type ReconciliationDecision } from "../../lib/test-print-reconciliation";
+import { observeTestPrintLifecycle, OBSERVATION_WINDOW_MS, POLL_INTERVAL_MS, extractWorkstationObservation } from "../../lib/test-print-observation";
 
 interface Location {
   id: string;
@@ -414,23 +416,51 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     try {
       // Step 1: queue the technical test.
       await apiFetch(`/api/admin/workstations/${workstationId}/test-print`, { method: "POST", body: JSON.stringify({ type }) });
-      // Step 2: poll up to ~12s for the Agent to report the result.
-      const deadline = Date.now() + 12000;
-      let status: "PENDING" | "SUCCEEDED" | "FAILED" | null = "PENDING";
-      let errorMsg: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const ws = (await apiFetch("/api/admin/workstations")).workstations?.find((w: Workstation) => w.id === workstationId);
-        status = ws?.testPrintStatus ?? null;
-        errorMsg = ws?.testPrintError ?? null;
-        if (status === "SUCCEEDED" || status === "FAILED") break;
-      }
-      // Step 3 + 4: branch on the result.
-      if (status !== "SUCCEEDED") {
+      // Step 2: observe the persisted state for the SAFE OBSERVATION WINDOW
+      // (FIX #1 v3) — see apps/web/lib/test-print-observation.ts for the
+      // full timing math. Briefly: Agent pickup ≤ 25s + Windows print ≤ 10s
+      // + HTTP ≤ 1s + transient buffer ≤ 6s = 45s. The window is the
+      // primary mechanism that closes the real-hardware race where a
+      // legitimately pending test completes after the legacy 12s hard cap.
+      //
+      // `ourRequestedAtMs` is the browser-side timestamp we sent on the
+      // /test-print POST above. The reconciliation helper compares it
+      // server-side against `Workstation.testPrintRequestedAt` to reject
+      // stale historical SUCCEEDEDs from previous operator sessions — see
+      // apps/web/lib/test-print-reconciliation.ts (STALE_REQUEST_BUFFER_MS).
+      const ourRequestedAtMs = Date.now();
+      const outcome = await observeTestPrintLifecycle(ourRequestedAtMs, type, {
+        observationWindowMs: OBSERVATION_WINDOW_MS,
+        pollIntervalMs: POLL_INTERVAL_MS,
+        clock: {
+          now: () => Date.now(),
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        },
+        fetcher: async () => {
+          // SHARED extraction helper — observation fetcher and any future
+          // consumer (Admin banner, Admin diagnostics, regression test)
+          // all derive the SAME PollObservation from the SAME fresh API
+          // response, eliminating the class of bug where two paths
+          // diverge due to a stale React closure or independent code path.
+          const ws = (await apiFetch("/api/admin/workstations")).workstations?.find((w: Workstation) => w.id === workstationId);
+          if (!ws) return null;
+          return extractWorkstationObservation(ws);
+        },
+      });
+      const errorMsg = outcome.lastPolled?.testPrintError ?? null;
+      const decision: ReconciliationDecision = outcome.decision;
+      // Step 3 + 4: branch on the decision.
+      if (decision === "SHOW_TIMEOUT") {
         setError(errorMsg ? `Test štampa nije uspela: ${errorMsg}` : "Test štampa još uvek traje — proverite štampač i pokušajte ponovo.");
         await load();
         return;
       }
+      if (decision === "SHOW_FAILURE") {
+        setError(errorMsg ? `Test štampa nije uspela: ${errorMsg}` : "Test štampa nije uspela — proverite štampač i konfiguraciju rute.");
+        await load();
+        return;
+      }
+      // decision === "OPEN_MODAL": fall through to the modal flow below.
       // PRINTING P0 — TableCore-branded modal replaces raw window.confirm
       // so the Admin sees the same visual identity as the Setup wizard's
       // WinForms dialog. Resolution is async (operator may take a few
