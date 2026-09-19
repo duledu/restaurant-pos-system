@@ -659,6 +659,48 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     setRouteDrafts((prev) => ({ ...prev, [key]: { ...getRouteDraft(w, type), ...patch } }));
   }
 
+  // BUG #2 (printing UX, 2026-09-19) — derive dirty state for the route
+  // Save button by comparing the explicit in-memory draft (when present)
+  // against the LAST PERSISTED values from the workstation object. We do
+  // NOT introduce a "touched" flag, timers, or per-keystroke bookkeeping:
+  // the Save button only lights up when the values the operator is about
+  // to save differ from what the server last confirmed. Reverting a
+  // change back to its original persisted value naturally disables Save
+  // again (draft === persisted), and a successful save clears the draft
+  // map so the form returns to "saved" without an extra reset.
+  //
+  // Initial hydration is NOT dirty: routeDrafts is empty after mount
+  // until the operator first touches a control (patchRouteDraft is the
+  // only writer), and getRouteDraft synthesizes the visible values from
+  // the server state when no draft is present — so an explicit draft
+  // entry is the only signal that the operator has deviated from the
+  // persisted baseline.
+  function persistedRouteDraft(persisted: PrintRoute | undefined): RouteDraft {
+    return {
+      printerName: persisted?.printerName ?? "",
+      paperWidthMm: (persisted?.paperWidthMm as 58 | 80) ?? 58,
+      isEnabled: persisted?.isEnabled ?? true,
+      isPrimary: persisted?.isPrimary ?? false,
+    };
+  }
+  function draftEqualsPersisted(draft: RouteDraft, persisted: PrintRoute | undefined): boolean {
+    const base = persistedRouteDraft(persisted);
+    return (
+      draft.printerName === base.printerName &&
+      draft.paperWidthMm === base.paperWidthMm &&
+      draft.isEnabled === base.isEnabled &&
+      draft.isPrimary === base.isPrimary
+    );
+  }
+  function hasUnsavedChangesForRoute(w: Workstation, type: RouteType): boolean {
+    const key = draftKey(w.id, type);
+    if (!(key in routeDrafts)) return false;
+    return !draftEqualsPersisted(routeDrafts[key], routeOf(w, type));
+  }
+  function hasUnsavedChanges(w: Workstation): boolean {
+    return ROUTE_TYPES.some((type) => hasUnsavedChangesForRoute(w, type));
+  }
+
   async function saveRoutes(w: Workstation) {
     setSavingRoutesId(w.id);
     setError(null);
@@ -968,14 +1010,26 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
             <div className="space-y-2.5">
               {ROUTE_TYPES.map((type) => renderRouteRow(w, type))}
             </div>
-            <div className="mt-3 flex justify-end">
+            <div className="mt-3 flex items-center justify-end gap-3">
+              {!hasUnsavedChanges(w) && savingRoutesId !== w.id && (
+                // BUG #2 — explicit "Sačuvano" indicator next to the
+                // disabled Save button so the operator immediately
+                // understands the current values already match the
+                // server. Hidden during save and while dirty.
+                <span
+                  data-testid={`routes-saved-${w.id}`}
+                  className="text-xs font-medium text-success"
+                >
+                  Sačuvano
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => saveRoutes(w)}
-                disabled={savingRoutesId === w.id}
+                disabled={savingRoutesId === w.id || !hasUnsavedChanges(w)}
                 className="inline-flex h-10 items-center justify-center rounded-md bg-graphite px-5 text-sm font-semibold text-cream-100 shadow-sm transition-colors hover:bg-graphite-700 focus:outline-none focus:ring-2 focus:ring-gold/40 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {savingRoutesId === w.id ? "Čuvanje…" : "Sačuvaj rute"}
+                {savingRoutesId === w.id ? "Čuvanje…" : "Sačuvaj podešavanja"}
               </button>
             </div>
           </div>

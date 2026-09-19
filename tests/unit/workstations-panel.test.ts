@@ -229,7 +229,7 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     for (const select of printerSelects) expect((select as HTMLSelectElement).value).toBe("POS-58");
   });
 
-  it("Sačuvaj rute PUTs each route independently by type", async () => {
+  it("Sačuvaj podešavanja PUTs each route independently by type", async () => {
     workstationsResponse = [workstation({ lastSeenAt: new Date().toISOString(), printRoutes: [] })];
     const putCalls: string[] = [];
     fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
@@ -240,8 +240,20 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
       throw new Error(`Unexpected request ${input}`);
     });
     await mount();
+    // BUG #2 — with no operator edits, the Save button is now DISABLED.
+    // To exercise the multi-PUT path we synthesize one explicit draft
+    // edit (the only legitimate way to enable the button after the fix),
+    // then click Save and verify all three route types are PUT.
     await act(async () => {
-      const saveButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Sačuvaj rute");
+      const printerSelects = [...host.querySelectorAll("select")].filter((s) => [...s.options].some((o) => o.value === "POS-58"));
+      // pick a route with a known empty select, then drive a change event
+      const target = printerSelects[0] as HTMLSelectElement;
+      target.value = "POS-58";
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      const saveButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Sačuvaj podešavanja");
+      expect(saveButton).toBeTruthy();
       saveButton!.click();
     });
     expect(putCalls.some((p) => p.endsWith("/routes/KITCHEN"))).toBe(true);
@@ -465,5 +477,148 @@ describe("WorkstationsPanel — Printing V2 Final (printing modes + deterministi
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(host.textContent).toContain("Glavna ruta");
+  });
+});
+
+// BUG #2 (Admin → Printers → Sačuvaj rute dirty-state UX) — the Save
+// button must reflect whether the operator has actually changed any
+// setting. Initial load = clean + disabled + "Sačuvano" indicator. After
+// any field change = dirty + enabled + indicator hidden. After revert =
+// clean again. After successful save = clean again, persisted baseline
+// updates. The button label is now restaurant-facing ("Sačuvaj
+// podešavanja") not infrastructure terminology ("Sačuvaj rute"). Bug #1
+// (physicalTestConfirmed) lifecycle is unaffected and not asserted here.
+describe("WorkstationsPanel — Printers Save button reflects dirty state (BUG #2)", () => {
+  function findSaveButton(): HTMLButtonElement | undefined {
+    return [...host.querySelectorAll("button")].find((b) => b.textContent === "Sačuvaj podešavanja") as HTMLButtonElement | undefined;
+  }
+
+  it("initial load with already-configured routes shows 'Sačuvano' and a disabled 'Sačuvaj podešavanja' button", async () => {
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["POS-58"],
+        printRoutes: [
+          route("KITCHEN", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 }),
+          route("BAR", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 }),
+          route("RECEIPT", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 }),
+        ],
+      }),
+    ];
+    await mount();
+    const btn = findSaveButton();
+    expect(btn).toBeTruthy();
+    expect(btn!.disabled).toBe(true);
+    expect(host.textContent).toContain("Sačuvano");
+    // The legacy infrastructure label must NOT appear anywhere.
+    expect(host.textContent).not.toContain("Sačuvaj rute");
+  });
+
+  it("changing a setting enables Save and hides 'Sačuvano' (DIRTY state)", async () => {
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["POS-58", "Microsoft Print to PDF"],
+        printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 })],
+      }),
+    ];
+    await mount();
+    expect(findSaveButton()!.disabled).toBe(true);
+    expect(host.textContent).toContain("Sačuvano");
+
+    // Operator changes the KITCHEN route's printerName from POS-58 to
+    // the Microsoft Print to PDF option.
+    await act(async () => {
+      const selects = [...host.querySelectorAll("select")].filter((s) =>
+        [...s.options].some((o) => o.value === "Microsoft Print to PDF"),
+      );
+      const target = selects[0] as HTMLSelectElement;
+      target.value = "Microsoft Print to PDF";
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const btn = findSaveButton();
+    expect(btn).toBeTruthy();
+    expect(btn!.disabled).toBe(false);
+    // 'Sačuvano' indicator must disappear while the form is dirty.
+    expect(host.textContent).not.toContain("Sačuvano");
+  });
+
+  it("reverting a change back to its original persisted value disables Save again (REVERT → SAVED)", async () => {
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["POS-58", "Microsoft Print to PDF"],
+        printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 })],
+      }),
+    ];
+    await mount();
+    expect(findSaveButton()!.disabled).toBe(true);
+
+    // Change → revert → expect clean again.
+    await act(async () => {
+      const selects = [...host.querySelectorAll("select")].filter((s) =>
+        [...s.options].some((o) => o.value === "Microsoft Print to PDF"),
+      );
+      const target = selects[0] as HTMLSelectElement;
+      target.value = "Microsoft Print to PDF";
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(findSaveButton()!.disabled).toBe(false);
+
+    await act(async () => {
+      const selects = [...host.querySelectorAll("select")].filter((s) =>
+        [...s.options].some((o) => o.value === "Microsoft Print to PDF"),
+      );
+      const target = selects[0] as HTMLSelectElement;
+      target.value = "POS-58";
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(findSaveButton()!.disabled).toBe(true);
+    expect(host.textContent).toContain("Sačuvano");
+  });
+
+  it("after a successful save, Save is disabled again and 'Sačuvano' reappears (no duplicate save)", async () => {
+    workstationsResponse = [
+      workstation({
+        lastSeenAt: new Date().toISOString(),
+        availablePrinters: ["POS-58"],
+        printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 })],
+      }),
+    ];
+    const putCalls: string[] = [];
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      const path = String(input).split("?")[0];
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: [] });
+      if ( path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
+      if (path.includes("/routes/") && options?.method === "PUT") { putCalls.push(path); return response({ route: {} }); }
+      throw new Error(`Unexpected request ${input}`);
+    });
+    await mount();
+    expect(findSaveButton()!.disabled).toBe(true);
+
+    // Operator changes paperWidthMm on KITCHEN route.
+    await act(async () => {
+      const selects = [...host.querySelectorAll("select")];
+      // The paperWidthMm select is the one whose options include 58 and 80.
+      const target = selects.find((s) => {
+        const opts = [...s.options].map((o) => o.value);
+        return opts.includes("58") && opts.includes("80");
+      }) as HTMLSelectElement;
+      target.value = "80";
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(findSaveButton()!.disabled).toBe(false);
+
+    // Save → expect PUT for KITCHEN at minimum, then back to clean state.
+    await act(async () => {
+      findSaveButton()!.click();
+    });
+    expect(putCalls.some((p) => p.endsWith("/routes/KITCHEN"))).toBe(true);
+
+    // The form must return to the saved state — Save disabled + indicator visible.
+    expect(findSaveButton()!.disabled).toBe(true);
+    expect(host.textContent).toContain("Sačuvano");
+    // The legacy infrastructure label must never reappear.
+    expect(host.textContent).not.toContain("Sačuvaj rute");
   });
 });
