@@ -85,6 +85,21 @@ const WORKSTATION_PUBLIC_SELECT = {
       isEnabled: true,
       isPrimary: true,
       updatedAt: true,
+      // BUG #1 (printing P0, 2026-09-19) — Admin-facing public
+      // workstation projection previously omitted the three fields
+      // that record the operator's physical "Da — radi" confirmation.
+      // A fresh GET therefore arrived with physicalTestConfirmed
+      // = undefined, so routeReadiness() classified every route as
+      // NEEDS_CONFIRMATION / "Čeka test štampu" regardless of the
+      // Agent's persisted status. The DB held the truth; the UI
+      // never saw it. Re-adding these THREE EXISTING columns to
+      // the EXISTING public select (no new columns, no new projection,
+      // no new server work) closes the gap without changing any
+      // downstream semantics — readiness still requires the persisted
+      // human confirmation; the projection just no longer hides it.
+      physicalTestConfirmed: true,
+      physicalTestConfirmedAt: true,
+      physicalTestConfirmedBy: true,
     },
   },
   agentVersion: true,
