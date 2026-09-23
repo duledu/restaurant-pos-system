@@ -422,6 +422,136 @@ export async function writeOffStock(ctx: AuthContext, ingredientStockId: string,
   return updated;
 }
 
+// ─── Bulk opening-stock initialization (go-live workflow) ────────────────────
+
+export interface IngredientOpeningStockLine {
+  ingredientId: string;
+  quantity: number; // target ABSOLUTE stock (not a delta), must be >= 0
+}
+
+export interface IngredientOpeningStockResult {
+  itemsAffected: number; // lines whose stock actually changed (movement created)
+  itemsUnchanged: number; // lines already at the requested quantity — no movement
+  results: Array<{ ingredientId: string; ingredientName: string; before: number; after: number; movementId: string | null }>;
+}
+
+/**
+ * Ingredient-side counterpart to inventory-service.ts's bulkSetOpeningStock —
+ * same shape, same 'inventory.opening_stock' gate (deliberately stricter
+ * than 'inventory.manage', OWNER/ADMIN only), same atomic
+ * reconcile-to-absolute-target semantics, same one-OPENING_STOCK-movement-
+ * per-changed-line ledger discipline, same single aggregate audit entry.
+ * Phase 2 gap: finished-goods (MenuItem/InventoryItem) already had this bulk
+ * path; raw ingredients only had one-row-at-a-time receiveStock. This does
+ * NOT introduce a second stock engine — it reuses IngredientStock/
+ * IngredientMovement exactly as receiveStock/initializeStock already do.
+ */
+export async function bulkSetIngredientOpeningStock(
+  ctx: AuthContext,
+  input: { locationId: string; lines: IngredientOpeningStockLine[]; reason?: string }
+): Promise<IngredientOpeningStockResult> {
+  requirePermission(ctx, "inventory.opening_stock");
+
+  if (input.lines.length === 0) throw new Error("Nema stavki za postavljanje početnog stanja");
+  for (const line of input.lines) {
+    if (line.quantity < 0) throw new Error("Količina ne može biti negativna");
+  }
+
+  const location = await prisma.location.findFirst({
+    where: { id: input.locationId, restaurantId: ctx.restaurantId },
+  });
+  if (!location) throw new Error("Lokacija nije pronađena");
+  requireLocationAccess(ctx, location.id);
+
+  const ingredientIds = input.lines.map((l) => l.ingredientId);
+  const ingredientList = await prisma.ingredient.findMany({
+    where: { id: { in: ingredientIds }, restaurantId: ctx.restaurantId },
+    select: { id: true, name: true, unit: true },
+  });
+  const ingredientById = new Map(ingredientList.map((i) => [i.id, i]));
+  const missing = ingredientIds.filter((id) => !ingredientById.has(id));
+  if (missing.length > 0) {
+    throw new Error(`Sirovine ne pripadaju ovom restoranu ili ne postoje: ${missing.join(", ")}`);
+  }
+
+  const reason = input.reason?.trim() || "Postavljanje početnog stanja sirovina";
+
+  const results = await prisma.$transaction(
+    async (tx) => {
+      const out: IngredientOpeningStockResult["results"] = [];
+      for (const line of input.lines) {
+        const ingredient = ingredientById.get(line.ingredientId)!;
+        const existing = await tx.ingredientStock.findUnique({
+          where: { locationId_ingredientId: { locationId: input.locationId, ingredientId: line.ingredientId } },
+        });
+
+        const before = existing ? Number(existing.currentStock) : 0;
+        const after = line.quantity;
+        const delta = after - before;
+
+        let ingredientStockId: string;
+        if (existing) {
+          ingredientStockId = existing.id;
+          if (delta !== 0) {
+            await tx.ingredientStock.update({ where: { id: existing.id }, data: { currentStock: after } });
+          }
+        } else {
+          const created = await tx.ingredientStock.create({
+            data: {
+              restaurantId: ctx.restaurantId,
+              locationId: input.locationId,
+              ingredientId: line.ingredientId,
+              currentStock: after,
+            },
+          });
+          ingredientStockId = created.id;
+        }
+
+        let movementId: string | null = null;
+        if (delta !== 0) {
+          const mov = await tx.ingredientMovement.create({
+            data: {
+              restaurantId: ctx.restaurantId,
+              locationId: input.locationId,
+              ingredientId: line.ingredientId,
+              ingredientStockId,
+              type: "OPENING_STOCK",
+              quantityDelta: delta,
+              quantityBefore: before,
+              quantityAfter: after,
+              employeeId: ctx.employeeId,
+              reason,
+            },
+          });
+          movementId = mov.id;
+        }
+
+        out.push({ ingredientId: line.ingredientId, ingredientName: ingredient.name, before, after, movementId });
+      }
+      return out;
+    },
+    { timeout: 30_000, maxWait: 10_000 } // bulk operations can touch 100+ ingredients — default 5s timeout is too tight
+  );
+
+  const changed = results.filter((r) => r.movementId !== null);
+
+  await recordAuditEntry(ctx, {
+    entityType: "IngredientStock",
+    entityId: input.locationId,
+    action: "ingredient.opening_stock_set",
+    newValue: {
+      locationId: input.locationId,
+      reason,
+      itemsAffected: changed.length,
+      itemsUnchanged: results.length - changed.length,
+      changes: changed.map((r) => ({ ingredientId: r.ingredientId, ingredientName: r.ingredientName, before: r.before, after: r.after })),
+    },
+    locationId: input.locationId,
+  });
+
+  return { itemsAffected: changed.length, itemsUnchanged: results.length - changed.length, results };
+}
+
 // ─── Internal helper ────────────────────────────────────────────────────────
 
 /**

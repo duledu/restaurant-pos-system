@@ -151,69 +151,105 @@ export function RecipeModal({
     onChanged?.();
   }
 
-  async function removeLine(lineId: string) {
+  async function removeLine(lineId: string, ingredientName: string) {
+    if (!confirm(`Ukloniti "${ingredientName}" iz normativa?`)) return;
     await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, { method: "DELETE" });
     await load();
     onChanged?.();
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={onClose}>
       <div
-        className="w-full max-w-lg rounded-lg bg-white p-5 shadow-elevated"
+        className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-lg sm:rounded-lg"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center justify-between border-b border-line px-5 py-4">
           <h2 className="text-lg font-bold text-ink">
             Normativ — {item.name}
             {readOnly && <span className="ml-2 align-middle text-xs font-normal text-ink/40">(samo za pregled)</span>}
           </h2>
-          <button onClick={onClose} className="text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+          <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
         </div>
 
+        <div className="flex-1 overflow-y-auto px-5 py-4">
         {loading ? (
           <p className="text-sm text-inkSoft">Učitavanje…</p>
         ) : lines.length === 0 ? (
           <p className="mb-3 text-sm text-inkSoft">Normativ nije definisan.</p>
         ) : (
-          <table className="mb-3 w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-ink/50">
-                <th className="pb-1">Sirovina</th>
-                <th className="pb-1">Količina</th>
-                <th className="pb-1">Jedinica</th>
-                <th className="pb-1" />
-              </tr>
-            </thead>
-            <tbody>
+          <>
+            {/* Mobile: stacked cards — a 4-column table doesn't fit a phone. */}
+            <div className="mb-3 space-y-2 sm:hidden">
               {lines.map((line) => (
-                <tr key={line.id} className="border-t border-line/60">
-                  <td className="py-1.5 pr-2">{line.ingredient.name}</td>
-                  <td className="py-1.5 pr-2">
+                <div key={line.id} className="rounded-md border border-line/70 p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{line.ingredient.name}</p>
+                    {!readOnly && (
+                      <button onClick={() => removeLine(line.id, line.ingredient.name)} className="shrink-0 text-xs text-danger/70 hover:text-danger">Ukloni</button>
+                    )}
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1.5">
                     {readOnly ? (
-                      <span className="text-ink">{line.quantity}</span>
+                      <span className="text-sm text-ink">{line.quantity}</span>
                     ) : (
                       <input
                         type="number"
+                        inputMode="decimal"
                         step="0.001"
                         defaultValue={line.quantity}
                         onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
-                        className="w-20 rounded-sm border border-line px-1.5 py-1 text-sm"
+                        className="w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
                       />
                     )}
-                  </td>
-                  <td className="py-1.5 pr-2 text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</td>
-                  <td className="py-1.5 text-right">
-                    {!readOnly && (
-                      <button onClick={() => removeLine(line.id)} className="text-xs text-danger/70 hover:text-danger">Ukloni</button>
-                    )}
-                  </td>
-                </tr>
+                    <span className="text-sm text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</span>
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        )}
+            </div>
 
+            {/* Desktop: table. */}
+            <table className="mb-3 hidden w-full text-sm sm:table">
+              <thead>
+                <tr className="text-left text-xs text-ink/50">
+                  <th className="pb-1">Sirovina</th>
+                  <th className="pb-1">Količina</th>
+                  <th className="pb-1">Jedinica</th>
+                  <th className="pb-1" />
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((line) => (
+                  <tr key={line.id} className="border-t border-line/60">
+                    <td className="py-1.5 pr-2">{line.ingredient.name}</td>
+                    <td className="py-1.5 pr-2">
+                      {readOnly ? (
+                        <span className="text-ink">{line.quantity}</span>
+                      ) : (
+                        <input
+                          type="number"
+                          step="0.001"
+                          defaultValue={line.quantity}
+                          onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
+                          className="w-20 rounded-sm border border-line px-1.5 py-1 text-sm"
+                        />
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-2 text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</td>
+                    <td className="py-1.5 text-right">
+                      {!readOnly && (
+                        <button onClick={() => removeLine(line.id, line.ingredient.name)} className="text-xs text-danger/70 hover:text-danger">Ukloni</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+        </div>
+
+        <div className="shrink-0 border-t border-line px-5 py-4">
         {readOnly ? (
           <p className="rounded-md border border-line bg-cream-100 p-3 text-xs text-inkSoft">
             Nemate dozvolu za izmenu normativa (potrebna je OWNER/ADMIN/MANAGER uloga) — prikaz je samo za pregled.
@@ -221,9 +257,9 @@ export function RecipeModal({
         ) : (
           <div className="rounded-md border border-line bg-cream-100 p-3">
             <p className="mb-2 text-xs font-semibold text-ink">Dodaj sirovinu</p>
-            <div className="flex flex-wrap items-start gap-2">
+            <div className="flex flex-col gap-2">
               <select
-                className="min-w-[10rem] flex-1 rounded-sm border border-line px-2 py-1.5 text-sm"
+                className="w-full rounded-sm border border-line px-2 py-2 text-sm"
                 value={ingredientId}
                 onChange={(e) => onSelectIngredient(e.target.value)}
               >
@@ -232,24 +268,27 @@ export function RecipeModal({
                   <option key={i.id} value={i.id}>{i.name} ({UNIT_LABELS_SR[i.unit] ?? i.unit})</option>
                 ))}
               </select>
-              <input
-                type="number"
-                step="0.001"
-                placeholder="Količina"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                className="w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
-              />
-              {unitOptions.length > 1 ? (
-                <select value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="rounded-sm border border-line px-2 py-1.5 text-sm">
-                  {unitOptions.map((u) => <option key={u} value={u}>{UNIT_LABELS_SR[u] ?? u}</option>)}
-                </select>
-              ) : selectedIngredient ? (
-                <span className="flex items-center px-1 text-sm text-ink/60">{UNIT_LABELS_SR[selectedIngredient.unit] ?? selectedIngredient.unit}</span>
-              ) : null}
-              <button onClick={addLine} className="rounded-sm bg-gold px-3 py-1.5 text-sm font-medium text-white hover:bg-gold-dark">
-                Sačuvaj
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.001"
+                  placeholder="Količina"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  className="w-24 rounded-sm border border-line px-2 py-2 text-sm"
+                />
+                {unitOptions.length > 1 ? (
+                  <select value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="rounded-sm border border-line px-2 py-2 text-sm">
+                    {unitOptions.map((u) => <option key={u} value={u}>{UNIT_LABELS_SR[u] ?? u}</option>)}
+                  </select>
+                ) : selectedIngredient ? (
+                  <span className="flex items-center px-1 text-sm text-ink/60">{UNIT_LABELS_SR[selectedIngredient.unit] ?? selectedIngredient.unit}</span>
+                ) : null}
+                <button onClick={addLine} className="min-h-11 flex-1 rounded-sm bg-gold px-3 py-2 text-sm font-medium text-white hover:bg-gold-dark sm:flex-none">
+                  Sačuvaj
+                </button>
+              </div>
             </div>
             {preview != null && selectedIngredient && entryUnit !== selectedIngredient.unit && (
               <p className="mt-1.5 text-xs text-ink/50">
@@ -259,6 +298,7 @@ export function RecipeModal({
             {err && <p className="mt-1.5 text-xs text-danger">{err}</p>}
           </div>
         )}
+        </div>
       </div>
     </div>
   );

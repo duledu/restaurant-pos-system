@@ -179,53 +179,90 @@ export function NormativiClient() {
           <EmptyState title="Nema rezultata" description={items.length === 0 ? "Nema artikala u meniju." : undefined} />
         </Card>
       ) : (
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-line bg-cream-200 text-left text-xs font-semibold uppercase tracking-wide text-inkSoft">
-                  <th className="px-4 py-3">Artikal</th>
-                  <th className="px-4 py-3">Kategorija</th>
-                  <th className="px-4 py-3 text-center">Status</th>
-                  <th className="px-4 py-3 text-right">Sastojaka</th>
-                  <th className="px-4 py-3 text-right">Akcije</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line/60">
-                {filtered.map((item) => (
-                  <tr key={item.id} className="hover:bg-cream-200/60">
-                    <td className="px-4 py-3 font-semibold text-ink">{item.name}</td>
-                    <td className="px-4 py-3 text-inkSoft">{item.categoryName ?? "—"}</td>
-                    <td className="px-4 py-3 text-center">
-                      {item.isConfigured ? (
-                        <Badge tone="success">Konfigurisano</Badge>
-                      ) : item.inventoryTrackingMethod === "RECIPE" ? (
-                        // P1.6: artikal je EKSPLICITNO u RECIPE modu ali bez ijedne linije —
-                        // prodaja je blokirana (RecipeNotConfiguredError), ne samo "nije definisano".
-                        <Badge tone="danger">Normativ nije podešen</Badge>
-                      ) : (
-                        <Badge tone="neutral">Normativ nije definisan</Badge>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono tabular-nums text-ink">{item.ingredientCount}</td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setEditingItem(item)}
-                        className={
-                          canManage
-                            ? "min-h-11 rounded-md bg-gold-soft px-2.5 py-1.5 text-xs font-semibold text-gold-dark hover:bg-gold/20"
-                            : "min-h-11 rounded-md px-2.5 py-1.5 text-xs font-semibold text-inkSoft hover:bg-ink/[.05]"
-                        }
-                      >
-                        {canManage ? "Uredi normativ" : "Pregled"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <>
+          {/* Mobile: card list — the desktop 5-column table doesn't fit a phone. */}
+          <div className="space-y-2 sm:hidden">
+            {filtered.map((item) => (
+              <Card key={item.id} className="p-3.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-semibold text-ink">{item.name}</p>
+                    <p className="mt-0.5 truncate text-xs text-inkSoft">{item.categoryName ?? "Nekategorisano"}</p>
+                  </div>
+                  <span className="shrink-0 font-mono text-xs tabular-nums text-inkSoft">{item.ingredientCount} sast.</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  {item.isConfigured ? (
+                    <Badge tone="success">Konfigurisano</Badge>
+                  ) : item.inventoryTrackingMethod === "RECIPE" ? (
+                    <Badge tone="danger">Normativ nije podešen</Badge>
+                  ) : (
+                    <Badge tone="neutral">Normativ nije definisan</Badge>
+                  )}
+                  <button
+                    onClick={() => setEditingItem(item)}
+                    className={
+                      canManage
+                        ? "min-h-11 rounded-md bg-gold-soft px-3 py-1.5 text-xs font-semibold text-gold-dark hover:bg-gold/20"
+                        : "min-h-11 rounded-md px-3 py-1.5 text-xs font-semibold text-inkSoft hover:bg-ink/[.05]"
+                    }
+                  >
+                    {canManage ? "Uredi normativ" : "Pregled"}
+                  </button>
+                </div>
+              </Card>
+            ))}
           </div>
-        </Card>
+
+          {/* Desktop: full table. */}
+          <Card className="hidden overflow-hidden sm:block">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-line bg-cream-200 text-left text-xs font-semibold uppercase tracking-wide text-inkSoft">
+                    <th className="px-4 py-3">Artikal</th>
+                    <th className="px-4 py-3">Kategorija</th>
+                    <th className="px-4 py-3 text-center">Status</th>
+                    <th className="px-4 py-3 text-right">Sastojaka</th>
+                    <th className="px-4 py-3 text-right">Akcije</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line/60">
+                  {filtered.map((item) => (
+                    <tr key={item.id} className="hover:bg-cream-200/60">
+                      <td className="px-4 py-3 font-semibold text-ink">{item.name}</td>
+                      <td className="px-4 py-3 text-inkSoft">{item.categoryName ?? "—"}</td>
+                      <td className="px-4 py-3 text-center">
+                        {item.isConfigured ? (
+                          <Badge tone="success">Konfigurisano</Badge>
+                        ) : item.inventoryTrackingMethod === "RECIPE" ? (
+                          // P1.6: artikal je EKSPLICITNO u RECIPE modu ali bez ijedne linije —
+                          // prodaja je blokirana (RecipeNotConfiguredError), ne samo "nije definisano".
+                          <Badge tone="danger">Normativ nije podešen</Badge>
+                        ) : (
+                          <Badge tone="neutral">Normativ nije definisan</Badge>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono tabular-nums text-ink">{item.ingredientCount}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => setEditingItem(item)}
+                          className={
+                            canManage
+                              ? "min-h-11 rounded-md bg-gold-soft px-2.5 py-1.5 text-xs font-semibold text-gold-dark hover:bg-gold/20"
+                              : "min-h-11 rounded-md px-2.5 py-1.5 text-xs font-semibold text-inkSoft hover:bg-ink/[.05]"
+                          }
+                        >
+                          {canManage ? "Uredi normativ" : "Pregled"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </>
       )}
 
       {editingItem && (

@@ -332,7 +332,73 @@ function SessionDetailView({
   function renderLines(lines: SessionLine[]) {
     if (lines.length === 0) return <p className="py-4 text-sm text-ink/55">Nema dodatih stavki.</p>;
     return (
-      <div className="overflow-x-auto rounded-lg border border-line bg-white">
+      <>
+        {/* Mobile: card list, "COUNTED" input first — walking through storage
+            entering counts one item after another, no 6-column table. */}
+        <div className="space-y-2 sm:hidden">
+          {lines.map((l) => {
+            const diff = l.physicalQty !== null ? Number(l.physicalQty) - Number(l.systemQtySnapshot) : null;
+            return (
+              <div key={l.id} className="rounded-lg border border-line bg-white p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="min-w-0 flex-1 truncate font-medium text-ink">{l.name}</p>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_STYLE[l.status]}`}>{STATUS_LABEL[l.status]}</span>
+                </div>
+                <p className="mt-0.5 text-xs text-ink/55">Sistemsko: {l.systemQtySnapshot} {l.unit}</p>
+
+                <div className="mt-2 flex items-center gap-2">
+                  {readOnly ? (
+                    <span className="tabular-nums text-ink">{l.physicalQty ?? "—"}</span>
+                  ) : (
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step="0.001"
+                      defaultValue={l.physicalQty ?? ""}
+                      onBlur={(e) => enterQty(l.id, e.target.value)}
+                      disabled={l.status === "STALE"}
+                      placeholder="Fizičko stanje"
+                      className="min-h-11 w-28 rounded-md border border-line px-2.5 py-2 text-right text-base disabled:opacity-50"
+                    />
+                  )}
+                  <span className="text-sm text-ink/55">{l.unit}</span>
+                  {diff !== null && (
+                    <span className={`ml-auto tabular-nums text-sm ${diff < 0 ? "text-danger" : diff > 0 ? "text-warn" : "text-ink/55"}`}>
+                      {diff > 0 ? `+${diff}` : diff}
+                    </span>
+                  )}
+                </div>
+
+                {!readOnly && l.status === "STALE" && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <button type="button" onClick={() => recount(l.id)} className="min-h-9 rounded-md bg-graphite px-2.5 py-1 text-xs font-semibold text-cream-100">
+                      Prebroj ponovo
+                    </button>
+                    {isOwnerAdmin && (
+                      <label className="flex items-center gap-1 text-xs text-ink/70">
+                        <input
+                          type="checkbox"
+                          checked={overrideIds.has(l.id)}
+                          onChange={(e) => {
+                            const next = new Set(overrideIds);
+                            if (e.target.checked) next.add(l.id);
+                            else next.delete(l.id);
+                            setOverrideIds(next);
+                          }}
+                        />
+                        Odobri
+                      </label>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Desktop: full table. */}
+        <div className="hidden overflow-x-auto rounded-lg border border-line bg-white sm:block">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-inkSoft">
@@ -405,7 +471,8 @@ function SessionDetailView({
             })}
           </tbody>
         </table>
-      </div>
+        </div>
+      </>
     );
   }
 

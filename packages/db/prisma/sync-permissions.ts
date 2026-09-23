@@ -20,6 +20,7 @@
  *   npm run db:production:permissions -- --confirm-production
  */
 import { PrismaClient } from "@prisma/client";
+import { pathToFileURL } from "node:url";
 import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mjs";
 
 const NEW_PERMISSIONS = [
@@ -27,17 +28,18 @@ const NEW_PERMISSIONS = [
   { code: "workstations.manage", description: "Uparivanje/opoziv TableCore Print Agent radnih stanica (Faza 2A)" },
 ] as const;
 
-const NEW_ROLE_GRANTS: Record<string, string[]> = {
+export const NEW_ROLE_GRANTS: Record<string, string[]> = {
   OWNER: ["inventory.count", "workstations.manage"],
   ADMIN: ["inventory.count", "workstations.manage"],
   MANAGER: ["inventory.count", "workstations.manage"],
-  // P0 printing fix — INVENTORY_MANAGER je propušten u originalnom Fazi 2A
-  // granту (samo inventory.count je bio nameravan za tu ulogu), ali
-  // workstations.manage pripada istoj "operativni menadžment lokacije"
-  // grupi permisija kao settings.manage/production.manage — KITCHEN/BAR
-  // NAMERNO ostaju bez ovoga (operativne uloge koje PRIMAJU/štampaju
-  // tikete, ne administriraju radne stanice).
-  INVENTORY_MANAGER: ["workstations.manage"],
+  // Inventory Phase 2 fix — INVENTORY_MANAGER je propušten u originalnom
+  // Fazi 2A grantu (samo inventory.count je bio nameravan za tu ulogu, vidi
+  // istoriju ovog fajla), sada dodato. workstations.manage pripada istoj
+  // "operativni menadžment lokacije" grupi permisija kao
+  // settings.manage/production.manage — KITCHEN/BAR NAMERNO ostaju bez ovoga
+  // (operativne uloge koje PRIMAJU/štampaju tikete, ne administriraju radne
+  // stanice).
+  INVENTORY_MANAGER: ["inventory.count", "workstations.manage"],
 };
 
 async function main() {
@@ -73,7 +75,10 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

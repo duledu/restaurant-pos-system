@@ -50,6 +50,12 @@ interface Movement {
   employeeName?: string | null;
 }
 
+// Mirrors inventory-client.tsx's OPENING_STOCK_ROLES — same
+// 'inventory.opening_stock' server grant (OWNER/ADMIN only, deliberately
+// stricter than 'inventory.manage'). UX-only gate; server is the real
+// authorization boundary.
+const OPENING_STOCK_ROLES = new Set(["OWNER", "ADMIN"]);
+
 const TYPE_LABELS: Record<string, string> = {
   OPENING_STOCK: "Početno stanje",
   RECEIPT: "Prijem robe",
@@ -86,6 +92,221 @@ async function apiFetch(url: string, options?: RequestInit) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? "Greška");
   return body;
+}
+
+// ─── Bulk opening-stock modal (go-live: many ingredients at once) ──────────
+//
+// Ingredient-side counterpart to inventory-client.tsx's OpeningStockModal —
+// same "edit -> confirm -> apply" flow, same OPENING_STOCK ledger semantics
+// (server: bulkSetIngredientOpeningStock). Before this, raw ingredients
+// only had one-row-at-a-time "Postavi početno stanje" per ingredient
+// (StockPanel above) — realistic for a handful of items, not for entering
+// 100+ ingredients at restaurant go-live. Bottom-sheet on mobile (someone
+// standing in storage counting bottles), centered dialog on desktop.
+
+function IngredientOpeningStockModal({
+  locationId,
+  onClose,
+  onDone,
+}: {
+  locationId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [allIngredients, setAllIngredients] = useState<Ingredient[]>([]);
+  const [quantities, setQuantities] = useState<Record<string, string>>({});
+  const [search, setSearch] = useState("");
+  const [step, setStep] = useState<"edit" | "confirm">("edit");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{
+    itemsAffected: number;
+    itemsUnchanged: number;
+    results: Array<{ ingredientId: string; ingredientName: string; before: number; after: number; movementId: string | null }>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!locationId) return;
+    apiFetch(`/api/admin/ingredients?locationId=${locationId}&activeOnly=true`).then((j) => {
+      const list: Ingredient[] = j.ingredients ?? [];
+      setAllIngredients(list);
+      // Pre-fill with CURRENT (test/dev) stock so a manager only has to
+      // overtype the items whose real physical count differs — leaving a
+      // value untouched posts no movement (before === after is a no-op
+      // server-side), so this never silently "re-confirms" stale numbers.
+      const initial: Record<string, string> = {};
+      for (const i of list) {
+        if (i.stock) initial[i.id] = fmtQty(Number(i.stock.currentStock));
+      }
+      setQuantities(initial);
+    });
+  }, [locationId]);
+
+  const filtered = allIngredients.filter((i) => i.name.toLowerCase().includes(search.toLowerCase()));
+  const lines = allIngredients
+    .filter((i) => quantities[i.id] !== undefined && quantities[i.id] !== "" && !isNaN(Number(quantities[i.id])))
+    .map((i) => ({ ingredientId: i.id, ingredientName: i.name, unit: i.unit, quantity: Number(quantities[i.id]) }));
+
+  function reviewStep() {
+    if (!locationId) { setErr("Izaberite lokaciju"); return; }
+    if (lines.length === 0) { setErr("Unesite bar jednu količinu"); return; }
+    if (lines.some((l) => l.quantity < 0)) { setErr("Količina ne može biti negativna"); return; }
+    setErr("");
+    setStep("confirm");
+  }
+
+  async function apply() {
+    setLoading(true); setErr("");
+    try {
+      const j = await apiFetch("/api/admin/ingredients/opening-stock", {
+        method: "POST",
+        body: JSON.stringify({
+          locationId,
+          lines: lines.map((l) => ({ ingredientId: l.ingredientId, quantity: l.quantity })),
+          reason: "Postavljanje početnog stanja sirovina (go-live)",
+        }),
+      });
+      setResult(j);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Greška");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const sheetClass = "fixed inset-0 z-50 flex items-end justify-center bg-graphite-900/50 sm:items-center sm:p-4";
+  const panelClass = "flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-2xl sm:rounded-lg";
+
+  if (result) {
+    return (
+      <div className={sheetClass} onClick={onClose}>
+        <div className={panelClass} onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between border-b border-line px-4 py-3 sm:px-6 sm:py-4">
+            <h2 className="text-base font-semibold text-ink">Početno stanje sirovina postavljeno</h2>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
+            <p className="mb-3 text-sm text-ink">
+              Izmenjeno: <strong>{result.itemsAffected}</strong> sirovina. Nepromenjeno (već na traženoj količini): {result.itemsUnchanged}.
+            </p>
+            <div className="mb-2 max-h-72 overflow-y-auto rounded-md border border-line">
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-line bg-cream-200 text-left text-inkSoft"><th className="px-2 py-1.5 font-medium">Sirovina</th><th className="px-2 py-1.5 text-right font-medium">Pre</th><th className="px-2 py-1.5 text-right font-medium">Posle</th></tr></thead>
+                <tbody>
+                  {result.results.filter((r) => r.movementId).map((r) => (
+                    <tr key={r.ingredientId} className="border-b border-line/60">
+                      <td className="px-2 py-1 text-ink">{r.ingredientName}</td>
+                      <td className="px-2 py-1 text-right font-mono tabular-nums text-inkSoft">{fmtQty(r.before)}</td>
+                      <td className="px-2 py-1 text-right font-mono tabular-nums font-semibold text-ink">{fmtQty(r.after)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="border-t border-line px-4 py-3 sm:px-6 sm:py-4">
+            <Button onClick={() => { onClose(); onDone(); }} className="w-full">Zatvori</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === "confirm") {
+    return (
+      <div className={sheetClass} onClick={onClose}>
+        <div className={panelClass} onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between border-b border-line px-4 py-3 sm:px-6 sm:py-4">
+            <h2 className="text-base font-semibold text-ink">Potvrda — Postavi početno stanje sirovina</h2>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
+            <div className="mb-4 rounded-md bg-gold-soft px-3 py-3 text-sm text-gold-dark">
+              Ova akcija je namenjena unosu stvarnog fizičkog stanja sirovina pre početka rada restorana.
+              Svaka promena se beleži kao trajno kretanje zalihe (tip &quot;Početno stanje&quot;) — ništa se tiho ne prepisuje.
+            </div>
+            <p className="mb-2 text-sm text-inkSoft">
+              Sirovina za izmenu: <strong className="text-ink">{lines.length}</strong>
+            </p>
+            <div className="mb-2 max-h-72 overflow-y-auto rounded-md border border-line">
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-line bg-cream-200 text-left text-inkSoft"><th className="px-2 py-1.5 font-medium">Sirovina</th><th className="px-2 py-1.5 text-right font-medium">Nova količina</th></tr></thead>
+                <tbody>
+                  {lines.map((l) => (
+                    <tr key={l.ingredientId} className="border-b border-line/60">
+                      <td className="px-2 py-1 text-ink">{l.ingredientName}</td>
+                      <td className="px-2 py-1 text-right font-mono tabular-nums font-semibold text-ink">{fmtQty(l.quantity)} {UNIT_LABELS[l.unit]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {err && <p className="mb-3 text-sm text-danger">{err}</p>}
+          </div>
+          <div className="flex gap-2 border-t border-line px-4 py-3 sm:px-6 sm:py-4">
+            <Button variant="secondary" onClick={() => setStep("edit")} className="flex-1">Nazad</Button>
+            <Button onClick={apply} disabled={loading} className="flex-1">
+              {loading ? "Primena…" : "Potvrdi početno stanje"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={sheetClass} onClick={onClose}>
+      <div className={panelClass} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-line px-4 py-3 sm:px-6 sm:py-4">
+          <h2 className="text-base font-semibold text-ink">Postavi početno stanje sirovina</h2>
+          <button onClick={onClose} aria-label="Zatvori" className="flex h-11 w-11 items-center justify-center rounded-md text-ink/50 hover:bg-ink/[.05] hover:text-ink">✕</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
+          <p className="mb-3 text-sm text-inkSoft">
+            Unesite stvarno fizičko stanje za svaku sirovinu pre nego što restoran počne da radi (npr. Juneće meso 12.4 kg, Konjak 2450 ml).
+            Ovo ne briše prodaju ni istoriju. Postojeće vrednosti su unapred popunjene — izmenite samo ono što se razlikuje od stvarnog stanja.
+          </p>
+          <input
+            type="search"
+            inputMode="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Pretraga sirovina…"
+            className={`mb-3 ${inputClass}`}
+          />
+          <div className="mb-2 max-h-[50vh] overflow-y-auto rounded-md border border-line">
+            <table className="w-full text-xs">
+              <tbody>
+                {filtered.map((i) => (
+                  <tr key={i.id} className="border-b border-line/60">
+                    <td className="px-2 py-2 text-ink">{i.name}</td>
+                    <td className="px-2 py-2 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          min={0}
+                          step="any"
+                          value={quantities[i.id] ?? ""}
+                          onChange={(e) => setQuantities((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                          className="w-20 rounded border border-line px-2 py-1.5 text-right text-sm"
+                        />
+                        <span className="w-7 text-left text-[11px] text-inkSoft">{UNIT_LABELS[i.unit]}</span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {err && <p className="mb-2 text-sm text-danger">{err}</p>}
+        </div>
+        <div className="border-t border-line px-4 py-3 sm:px-6 sm:py-4">
+          <Button onClick={reviewStep} className="w-full">
+            Pregled i potvrda ({lines.length} {lines.length === 1 ? "sirovina" : "sirovina"})
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── Create ingredient form ─────────────────────────────────────────────────
@@ -450,6 +671,9 @@ export function IngredientsClient() {
   // P1.7 audit §9: status filter (client-side over the already-loaded,
   // location-scoped list — same pattern as inventory-client.tsx Zalihe).
   const [statusFilter, setStatusFilter] = useState<"all" | "low" | "out" | "negative">("all");
+  const [roles, setRoles] = useState<string[]>([]);
+  const [showOpeningStock, setShowOpeningStock] = useState(false);
+  const canOpeningStock = roles.some((r) => OPENING_STOCK_ROLES.has(r));
 
   const loadCategories = useCallback(async () => {
     const j = await apiFetch("/api/admin/inventory-categories");
@@ -485,6 +709,7 @@ export function IngredientsClient() {
       // istim efektivnim parametrima).
       setLocationId(locs[0]?.id ?? "");
     });
+    apiFetch("/api/pos/me").then((j) => setRoles(j.roles ?? [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -528,10 +753,23 @@ export function IngredientsClient() {
             <Button size="sm" variant="ghost" onClick={seedDefaults} disabled={seeding}>
               {seeding ? "Podešavanje…" : "Podesi KUHINJA/ŠANK kategorije"}
             </Button>
+            {canOpeningStock && (
+              <Button size="sm" variant="secondary" onClick={() => setShowOpeningStock(true)} disabled={!locationId}>
+                Početno stanje (grupno)
+              </Button>
+            )}
             <CreateIngredientForm categories={categories} onCreated={() => load(locationId, effectiveCategoryId)} />
           </>
         }
       />
+
+      {showOpeningStock && (
+        <IngredientOpeningStockModal
+          locationId={locationId}
+          onClose={() => setShowOpeningStock(false)}
+          onDone={() => load(locationId, effectiveCategoryId)}
+        />
+      )}
 
       {topCategories.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1.5">

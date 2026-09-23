@@ -43,13 +43,6 @@ const STATION_LABEL: Record<MenuItem["preparationStation"], string> = {
   NONE: "—",
 };
 
-const STATION_BADGE: Record<MenuItem["preparationStation"], string> = {
-  KITCHEN:         "bg-warn-soft text-warn",
-  BAR:             "bg-info-soft text-info",
-  KITCHEN_AND_BAR: "bg-ink/[0.07] text-ink/70",
-  NONE:            "",
-};
-
 const UNCAT = "__uncategorized__";
 
 async function apiFetch(url: string, options?: RequestInit) {
@@ -221,6 +214,28 @@ export function MenuManagementClient() {
     } catch (e) { setError(e instanceof Error ? e.message : "Greška"); }
   }
 
+  async function renameItem(id: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) { setError("Naziv ne sme biti prazan"); return; }
+    try {
+      await apiFetch(`/api/admin/menu/items/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: trimmed }),
+      });
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Greška pri izmeni naziva"); }
+  }
+
+  async function setStation(id: string, preparationStation: MenuItem["preparationStation"]) {
+    try {
+      await apiFetch(`/api/admin/menu/items/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ preparationStation }),
+      });
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Greška pri izmeni stanice"); }
+  }
+
   async function moveToCategory(id: string, categoryId: string) {
     try {
       await apiFetch(`/api/admin/menu/items/${id}/category`, {
@@ -261,7 +276,7 @@ export function MenuManagementClient() {
   }
 
   const priceEdit: PriceEditState = { editingPriceId, priceDraft, setEditingPriceId, setPriceDraft };
-  const actions: ItemActions = { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, refresh: load };
+  const actions: ItemActions = { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, renameItem, setStation, refresh: load };
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -486,6 +501,8 @@ interface ItemActions {
   deleteItem: (id: string) => void;
   moveToCategory: (id: string, categoryId: string) => void;
   setTrackingMethod: (item: MenuItem, method: MenuItem["inventoryTrackingMethod"]) => void;
+  renameItem: (id: string, name: string) => void;
+  setStation: (id: string, preparationStation: MenuItem["preparationStation"]) => void;
   refresh: () => void;
 }
 
@@ -600,14 +617,44 @@ function ItemRow({
   canManageRecipes: boolean;
 }) {
   const { editingPriceId, priceDraft, setEditingPriceId, setPriceDraft } = priceEdit;
-  const { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, refresh } = actions;
+  const { savePrice, toggleActive, toggleAvailable, duplicateItem, archiveItem, deleteItem, moveToCategory, setTrackingMethod, renameItem, setStation, refresh } = actions;
   const isEditing = editingPriceId === item.id;
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(item.name);
+
+  function saveName() {
+    setEditingName(false);
+    if (nameDraft.trim() !== item.name) renameItem(item.id, nameDraft);
+  }
 
   return (
     <tr className={`border-b border-line last:border-0 transition-colors hover:bg-ink/[0.014] ${!item.isActive ? "opacity-50" : ""}`}>
       {/* Name */}
       <td className="px-4 py-2.5">
-        <span className="font-medium text-ink">{item.name}</span>
+        {editingName ? (
+          <div className="flex items-center gap-1">
+            <input
+              autoFocus
+              className="w-40 rounded-sm border border-gold/60 px-1.5 py-1 text-xs focus:border-gold focus:outline-none"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveName();
+                if (e.key === "Escape") { setNameDraft(item.name); setEditingName(false); }
+              }}
+            />
+            <button onClick={saveName} className="rounded-sm bg-gold px-2 py-0.5 text-[11px] font-medium text-white hover:bg-gold-dark">✓</button>
+            <button onClick={() => { setNameDraft(item.name); setEditingName(false); }} className="text-xs text-ink/55 hover:text-ink/80">✕</button>
+          </div>
+        ) : (
+          <button
+            onClick={() => { setNameDraft(item.name); setEditingName(true); }}
+            className="rounded-sm px-1 py-0.5 text-left font-medium text-ink transition-colors hover:bg-gold-soft"
+            title="Klikni da izmeniš naziv"
+          >
+            {item.name}
+          </button>
+        )}
         {item.quantity != null && (
           <span className="ml-2 text-xs text-ink/60">
             {item.quantity}{item.unit ? ` ${item.unit}` : ""}
@@ -660,13 +707,15 @@ function ItemRow({
 
       {/* Station */}
       <td className="px-4 py-2.5">
-        {item.preparationStation !== "NONE" ? (
-          <span className={`inline-block rounded-sm px-2 py-0.5 text-xs font-medium ${STATION_BADGE[item.preparationStation]}`}>
-            {STATION_LABEL[item.preparationStation]}
-          </span>
-        ) : (
-          <span className="text-xs text-ink/50">—</span>
-        )}
+        <select
+          className="w-full rounded-sm border border-line bg-transparent px-1.5 py-1 text-xs text-ink/75 focus:outline-none hover:border-ink/30"
+          value={item.preparationStation}
+          onChange={(e) => setStation(item.id, e.target.value as MenuItem["preparationStation"])}
+        >
+          {(Object.keys(STATION_LABEL) as MenuItem["preparationStation"][]).map((s) => (
+            <option key={s} value={s}>{STATION_LABEL[s]}</option>
+          ))}
+        </select>
       </td>
 
       {/* Available */}

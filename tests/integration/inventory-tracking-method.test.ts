@@ -101,6 +101,20 @@ async function orderAndPay(ctx: AuthContext, fixture: Fixture, menuItemId: strin
   return billing.completePayment(ctx, submitted.id, { method: "CASH" });
 }
 
+// Inventory Phase 2 — Part E: same order, multiple distinct MenuItems, ONE
+// payment. Every existing orderAndPay call in this file adds exactly one
+// menuItemId per order, so no test here exercised DIRECT_STOCK + RECIPE +
+// NO_TRACKING routing together in a single cart/payment before this helper.
+async function orderAndPayMultiple(ctx: AuthContext, fixture: Fixture, lines: { menuItemId: string; quantity: number }[]) {
+  const table = await newTable(fixture);
+  const order = await orders.openOrder(ctx, { tableId: table.id });
+  for (const line of lines) {
+    await orders.addItem(ctx, order.id, line);
+  }
+  const submitted = await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
+  return billing.completePayment(ctx, submitted.id, { method: "CASH" });
+}
+
 async function seedIngredient(
   ctx: AuthContext,
   fixture: Fixture,
@@ -594,5 +608,104 @@ describe("RBAC: samo OWNER/ADMIN/MANAGER menjaju metodu praćenja", () => {
 
     expect(result.inventoryTrackingMethod).toBe("NO_TRACKING");
     expect(auditCountAfter).toBe(auditCountBefore);
+  });
+});
+
+// Inventory Phase 2 — Part E deduction verification. Existing coverage
+// (audited before writing these) already proves KILOGRAM and LITER
+// deduction, idempotency-by-paymentId, and each tracking method in
+// isolation. It never instantiates a GRAM or MILLILITER ingredient, and
+// never combines more than one tracking method in the same order/payment —
+// this closes exactly those two gaps using the SAME generic recipe engine
+// (no per-unit or per-item special-casing).
+describe("Faza 2 verifikacija: GRAM jedinica (odbitak po težini)", () => {
+  it("10000g -> 9500g posle 2 prodate porcije od 250g po receptu", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Pljeskavica (gramaža)");
+    const meso = await seedIngredient(owner, fixture, "Juneće meso (g)", "GRAM", 10_000);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: meso.id, quantity: 250 });
+
+    await orderAndPay(owner, fixture, item.id, 2);
+
+    const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meso.id, locationId: fixture.locationId } });
+    expect(Number(stock.currentStock)).toBeCloseTo(9_500, 9);
+    const movement = await prisma.ingredientMovement.findFirstOrThrow({ where: { ingredientId: meso.id, type: "SALE" } });
+    expect(Number(movement.quantityBefore)).toBe(10_000);
+    expect(Number(movement.quantityAfter)).toBeCloseTo(9_500, 9);
+  });
+});
+
+describe("Faza 2 verifikacija: MILLILITER jedinica (točenje pića po receptu)", () => {
+  it("700ml -> 650ml posle jedne porcije od 50ml (konjak-stil, generički recepturni engine, bez hardkodovanja)", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Žestoko piće (čašica)");
+    const bottle = await seedIngredient(owner, fixture, "Žestoko piće — flaša (ml)", "MILLILITER", 700);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: bottle.id, quantity: 50 });
+
+    await orderAndPay(owner, fixture, item.id, 1);
+
+    const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: bottle.id, locationId: fixture.locationId } });
+    expect(Number(stock.currentStock)).toBeCloseTo(650, 9);
+  });
+
+  it("700ml -> 400ml posle ukupno 6 prodatih čašica od po 50ml, kroz odvojene porudžbine", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+    const item = await createMenuItem(fixture, "Žestoko piće (čašica) 2");
+    const bottle = await seedIngredient(owner, fixture, "Žestoko piće — flaša 2 (ml)", "MILLILITER", 700);
+    await recipes.addRecipeLine(owner, item.id, { ingredientId: bottle.id, quantity: 50 });
+
+    for (let i = 0; i < 6; i++) {
+      await orderAndPay(owner, fixture, item.id, 1);
+    }
+
+    const stock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: bottle.id, locationId: fixture.locationId } });
+    expect(Number(stock.currentStock)).toBeCloseTo(400, 9);
+    const movements = await prisma.ingredientMovement.findMany({ where: { ingredientId: bottle.id, type: "SALE" } });
+    expect(movements).toHaveLength(6);
+  });
+});
+
+describe("Faza 2 verifikacija: mešovita porudžbina — DIRECT_STOCK + RECIPE + NO_TRACKING u ISTOJ porudžbini/naplati", () => {
+  it("svaki artikal se odbija tačno prema svojoj sopstvenoj inventoryTrackingMethod, nikad prema kategoriji, sve u jednoj naplati", async () => {
+    const fixture = await createFixture();
+    const owner = ownerCtx(fixture);
+
+    const noTracking = await createMenuItem(fixture, "Mix: bez praćenja");
+    // default NO_TRACKING, ništa dodatno
+
+    const directStock = await createMenuItem(fixture, "Mix: gotov proizvod");
+    const invItem = await inventory.initializeTracking(owner, { menuItemId: directStock.id, locationId: fixture.locationId, initialStock: 10, unit: "kom" });
+
+    const recipeItem = await createMenuItem(fixture, "Mix: normativ");
+    const meso = await seedIngredient(owner, fixture, "Meso (mix test)", "KILOGRAM", 5);
+    await recipes.addRecipeLine(owner, recipeItem.id, { ingredientId: meso.id, quantity: 0.2 });
+
+    const result = await orderAndPayMultiple(owner, fixture, [
+      { menuItemId: noTracking.id, quantity: 3 },
+      { menuItemId: directStock.id, quantity: 2 },
+      { menuItemId: recipeItem.id, quantity: 1 },
+    ]);
+
+    // NO_TRACKING: nijedan tip kretanja za ovaj artikal.
+    const noTrackingInvMov = await prisma.inventoryMovement.findMany({ where: { menuItemId: noTracking.id } });
+    expect(noTrackingInvMov).toHaveLength(0);
+
+    // DIRECT_STOCK: tačan odbitak InventoryItem, nijedan IngredientMovement.
+    const afterDirect = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
+    expect(Number(afterDirect.currentStock)).toBe(8); // 10 - 2
+    const directIngMov = await prisma.ingredientMovement.findMany({ where: { restaurantId: fixture.restaurantId, orderId: result.order.id } });
+
+    // RECIPE: tačan odbitak IngredientStock, nijedan InventoryMovement za taj artikal.
+    const mesoStock = await prisma.ingredientStock.findFirstOrThrow({ where: { ingredientId: meso.id, locationId: fixture.locationId } });
+    expect(Number(mesoStock.currentStock)).toBeCloseTo(5 - 0.2, 9); // 1x porcija
+    const recipeInvMov = await prisma.inventoryMovement.findMany({ where: { menuItemId: recipeItem.id } });
+    expect(recipeInvMov).toHaveLength(0);
+
+    // Ukupno tačno JEDAN IngredientMovement (od RECIPE artikla) za ovu naplatu — DIRECT_STOCK ne piše IngredientMovement.
+    expect(directIngMov).toHaveLength(1);
+    expect(directIngMov[0].ingredientId).toBe(meso.id);
   });
 });
