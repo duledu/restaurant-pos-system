@@ -82,10 +82,15 @@ beforeEach(() => {
   vi.stubGlobal("print", windowPrint);
   printJobsResponse = [receiptPrintJob()];
 
+  // P0.6 finding #2 — reset between tests; individual tests opt into a
+  // known orderId via history.pushState to exercise the fast path.
+  window.history.pushState({}, "", "/waiter/tables/5/bill");
+
   fetchMock = vi.fn(async (input: string, options?: RequestInit) => {
     const path = String(input).split("?")[0];
     const method = options?.method ?? "GET";
     if (path === "/api/pos/orders" && method === "POST") return response({ order: { id: "order-1", status: "COMPLETED" } });
+    if (path === "/api/pos/orders/order-1" && method === "GET") return response({ order: { id: "order-1", status: "COMPLETED" } });
     if (path === "/api/pos/orders/order-1/receipt" && method === "GET") return response({ receipt });
     if (path === "/api/pos/orders/order-1/print-jobs" && method === "GET") return response({ printJobs: printJobsResponse });
     if (path === "/api/pos/orders/order-1/receipt/print" && method === "POST") return response({ printJob: receiptPrintJob() });
@@ -177,5 +182,35 @@ describe("BillClient — primary receipt print goes through the Print Agent, nev
     printJobsResponse = [];
     await mount();
     expect(host.textContent).not.toContain("Štampaj preko browsera");
+  });
+});
+
+describe("BillClient — P0.6 finding #2 (bill/receipt loading)", () => {
+  it("with a known orderId (from the order screen), uses the cheap GET lookup and never calls openOrder", async () => {
+    window.history.pushState({}, "", "/waiter/tables/5/bill?orderId=order-1");
+    await mount();
+    expect(fetchMock.mock.calls.some(([url, opts]) => url === "/api/pos/orders/order-1" && (opts?.method ?? "GET") === "GET")).toBe(true);
+    expect(fetchMock.mock.calls.some(([url, opts]) => url === "/api/pos/orders" && opts?.method === "POST")).toBe(false);
+    expect(host.textContent).toContain("Plaćanje uspešno");
+  });
+
+  it("without an orderId (direct navigation/back/refresh), falls back to the existing openOrder resolution unchanged", async () => {
+    await mount();
+    expect(fetchMock.mock.calls.some(([url, opts]) => url === "/api/pos/orders" && opts?.method === "POST")).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/pos/orders/order-1")).toBe(false);
+    expect(host.textContent).toContain("Plaćanje uspešno");
+  });
+
+  it("shows contextual 'Pripremam račun…' while loading, not the generic 'Učitavanje…'", async () => {
+    let resolveOrder!: (v: Response) => void;
+    fetchMock.mockImplementationOnce(async () => new Promise<Response>((resolve) => { resolveOrder = resolve; }));
+    await act(async () => {
+      root.render(h(BillClient, { tableId: "5" }));
+    });
+    expect(host.textContent).toContain("Pripremam račun…");
+    expect(host.textContent).not.toContain("Učitavanje…");
+    await act(async () => {
+      resolveOrder(response({ order: { id: "order-1", status: "COMPLETED" } }));
+    });
   });
 });

@@ -7,7 +7,12 @@ import { PosClient } from "../../apps/web/app/waiter/tables/pos-client";
 import { OrderClient } from "../../apps/web/app/waiter/tables/[tableId]/order-client";
 import { readAvailability, mergeWaiterMenu } from "../../apps/web/lib/waiter-menu";
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+// P0.6 finding #1 — PosClient now also calls router.prefetch() once table
+// data is known (see pos-client.tsx); the mock needs that method too or
+// every test mounting PosClient throws. Hoisted + shared so a dedicated
+// test can assert on it directly (see "P0.6 findings" describe below).
+const { routerPush, routerPrefetch } = vi.hoisted(() => ({ routerPush: vi.fn(), routerPrefetch: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush, prefetch: routerPrefetch }) }));
 vi.mock("../../apps/web/components/branding/AppLogo", () => ({ AppLogo: () => null }));
 vi.mock("../../apps/web/components/ui/QuickLockButton", () => ({ QuickLockButton: () => null }));
 vi.mock("../../apps/web/components/ui/LogoutButton", () => ({ LogoutButton: () => null }));
@@ -39,6 +44,7 @@ beforeEach(() => {
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   custom = () => undefined;
   beep = vi.fn();
+  routerPush.mockClear(); routerPrefetch.mockClear();
   vi.stubGlobal("AudioContext", class {
     currentTime = 0; destination = {};
     resume = async () => {}; close = async () => {};
@@ -911,5 +917,45 @@ describe("Tekuća porudžbina does not duplicate submitted rows (physical-device
     // browser only (see this task's own CDP-based verification).
     const value = rootEl!.style.getPropertyValue("--waiter-header-h");
     expect(value.endsWith("px")).toBe(true);
+  });
+});
+
+describe("P0.6 findings", () => {
+  // Finding #3 — "Zauzeo kolega" must name the actual colleague.
+  it("names the colleague holding a table instead of the generic message", async () => {
+    custom = url => url.startsWith("/api/pos/tables") ? response({
+      floors: [{ ...floors[0], tables: [floors[0].tables[0], { ...floors[0].tables[1], activeOrderOwnerId: "e2", activeOrderOwnerName: "Marko Jovanović" }] }],
+    }) : undefined;
+    await render(h(PosClient));
+    await click("Table 12");
+    expect(host.textContent).toContain("Sto koristi: Marko Jovanović");
+    expect(host.textContent).not.toContain("Ovaj sto trenutno vodi drugi konobar.");
+    // Ownership enforcement itself is unchanged — still no navigation.
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("does not show a colleague warning for the current waiter's own table", async () => {
+    // Default fixture: table "5" is already owned by "e1", the logged-in employee.
+    await render(h(PosClient));
+    await click("Table 5");
+    expect(host.textContent).not.toContain("Sto je zauzet");
+  });
+
+  it("falls back to the generic message when the owner's name can't be resolved, never showing a raw ID", async () => {
+    custom = url => url.startsWith("/api/pos/tables") ? response({
+      floors: [{ ...floors[0], tables: [floors[0].tables[0], { ...floors[0].tables[1], activeOrderOwnerId: "e2", activeOrderOwnerName: null }] }],
+    }) : undefined;
+    await render(h(PosClient));
+    await click("Table 12");
+    expect(host.textContent).toContain("Ovaj sto trenutno vodi drugi konobar.");
+    expect(host.textContent).not.toContain("e2");
+  });
+
+  // Finding #1 — the [tableId] route is warmed once real table data is
+  // known, without waiting for or depending on any navigation/tap.
+  it("prefetches the table-order route once table data loads, before any tap", async () => {
+    await render(h(PosClient));
+    expect(routerPrefetch).toHaveBeenCalledWith("/waiter/tables/5");
+    expect(routerPush).not.toHaveBeenCalled();
   });
 });

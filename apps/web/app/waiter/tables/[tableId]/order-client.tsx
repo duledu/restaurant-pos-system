@@ -1010,7 +1010,12 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             )}
 
             <button
-              onClick={() => router.push(`/waiter/tables/${tableId}/bill`)}
+              // P0.6 finding #2 — orderId is already known here; passing it
+              // lets the bill screen skip re-resolving tableId -> orderId
+              // through openOrder's table/shift/findFirst chain (see the
+              // fast path in bill-client.tsx's load()) and go straight to
+              // the cheaper single-row getOrder read.
+              onClick={() => router.push(`/waiter/tables/${tableId}/bill?orderId=${order?.id ?? ""}`)}
               className="mt-3 w-full rounded-md bg-gold py-3.5 text-base font-semibold text-white transition-colors hover:bg-gold-dark"
             >
               Račun / Naplata

@@ -69,7 +69,20 @@ export function BillClient({ tableId }: { tableId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const orderRes = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
+      // P0.6 finding #2 — when the order screen already told us the
+      // orderId (query param, read directly rather than via
+      // useSearchParams() to avoid requiring a new Suspense boundary for
+      // this one screen), use it directly (a single getOrder row lookup)
+      // instead of re-resolving tableId -> orderId through openOrder's
+      // find-active-shift + find-active-order chain, which exists to
+      // (re)create an order when none is known yet. Since the waiter can
+      // only reach this screen FROM an order that already exists, that
+      // fallback is only needed for direct navigation/back-button/refresh
+      // without the query param — behavior there is completely unchanged.
+      const knownOrderId = new URLSearchParams(window.location.search).get("orderId") || null;
+      const orderRes = knownOrderId
+        ? await apiFetch(`/api/pos/orders/${knownOrderId}`)
+        : await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
       const orderId = orderRes.order.id;
       setOrderId(orderId);
 
@@ -183,7 +196,10 @@ export function BillClient({ tableId }: { tableId: string }) {
     }
   }
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Učitavanje…</div>;
+  // P0.6 finding #2 — contextual copy for the one wait this screen has
+  // (computing the bill, or fetching the already-issued receipt), scoped
+  // to only this screen, not the generic app-wide "Učitavanje…".
+  if (loading) return <div className="flex min-h-screen items-center justify-center text-ink/55">Pripremam račun…</div>;
 
   if (result) {
     const { receipt, payment } = result;

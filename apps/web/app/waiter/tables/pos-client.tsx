@@ -101,6 +101,23 @@ export function PosClient() {
   // Hitna ispravka: sto koji je zauzet od strane DRUGOG konobara — tap
   // otvara ovaj popup umesto navigacije (vidi selectTable ispod).
   const [blockedTable, setBlockedTable] = useState<Table | null>(null);
+
+  // P0.6 finding #1 — selectTable navigates via router.push() from a plain
+  // onClick (required so ownership can be checked BEFORE navigating, see
+  // below), which does NOT get Next.js's automatic <Link> viewport
+  // prefetch. That means the FIRST table tap each session pays for a cold
+  // route-chunk fetch on top of the actual order data fetch (traced in
+  // order-client.tsx's useLayoutEffect/inspectTable, which already starts
+  // its own network read at commit with no render-blocking wait — that
+  // part was already correct). Warming the shared [tableId] route once,
+  // as soon as real table data is known, removes that one-time cost —
+  // pure client-side JS bundle prefetch, no data/business logic involved,
+  // and the route module is the same for every table so any one concrete
+  // id is enough to warm it for all of them.
+  useEffect(() => {
+    const firstTable = floors[0]?.tables[0];
+    if (firstTable) router.prefetch(`/waiter/tables/${firstTable.id}`);
+  }, [floors, router]);
   async function openShift() {
     if (!locationId) return;
     setOpening(true);
@@ -316,7 +333,13 @@ export function PosClient() {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="blocked-table-title" className="mb-1.5 text-lg font-bold text-ink">Sto je zauzet</h2>
-            <p className="mb-5 text-sm text-inkSoft">Ovaj sto trenutno vodi drugi konobar.</p>
+            {/* P0.6 finding #3 — name the actual colleague so the waiter can
+                go find them, instead of a generic "drugi konobar". Falls
+                back to the old generic wording when the name genuinely
+                isn't available (employee record gone) — never a raw ID. */}
+            <p className="mb-5 text-sm text-inkSoft">
+              {blockedTable.activeOrderOwnerName ? `Sto koristi: ${blockedTable.activeOrderOwnerName}` : "Ovaj sto trenutno vodi drugi konobar."}
+            </p>
             <button
               type="button"
               onClick={() => setBlockedTable(null)}

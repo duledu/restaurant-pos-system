@@ -51,6 +51,24 @@ export async function listTables(ctx: AuthContext, locationId: string) {
     orderBy: { sortOrder: "asc" },
   });
 
+  // P0.6 finding #3 — "Zauzeo kolega" alone doesn't tell the waiter WHO to
+  // go find. openedBy is deliberately a bare employeeId with no Prisma
+  // relation (see the field comment in schema.prisma — "bez FK", same
+  // convention as voidedBy/transferredBy/etc.), so the display name isn't
+  // available via `include`. Resolved here with ONE batched query for every
+  // distinct current table-holder on this floor list (mirrors the existing
+  // Order.openedBy -> Employee name pattern already used in
+  // print-service.ts's dispatchStationPrintJobs) — never a per-table query,
+  // never exposes anything beyond the same first/last name already shown
+  // elsewhere in the app (e.g. kitchen ticket "Konobar:").
+  const ownerIds = [...new Set(
+    floors.flatMap((floor) => floor.tables.map((table) => table.orders[0]?.openedBy).filter((id): id is string => Boolean(id)))
+  )];
+  const owners = ownerIds.length
+    ? await prisma.employee.findMany({ where: { id: { in: ownerIds } }, select: { id: true, firstName: true, lastName: true } })
+    : [];
+  const ownerName = new Map(owners.map((o) => [o.id, `${o.firstName} ${o.lastName}`]));
+
   return floors.map((floor) => ({
     ...floor,
     // Prisma orderBy: { label: "asc" } iznad je LEKSIKOGRAFSKO (string)
@@ -61,6 +79,10 @@ export async function listTables(ctx: AuthContext, locationId: string) {
     tables: sortByLabelNatural(floor.tables).map(({ orders, ...table }) => ({
       ...table,
       activeOrderOwnerId: orders[0]?.openedBy ?? null,
+      // null when there's no active order OR the owning employee record
+      // is somehow gone (e.g. deleted) — callers must show a generic
+      // fallback in that case, never a raw ID.
+      activeOrderOwnerName: orders[0]?.openedBy ? (ownerName.get(orders[0].openedBy) ?? null) : null,
       readyItems: orders[0]?.items ?? [],
     })),
   }));

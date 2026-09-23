@@ -147,13 +147,19 @@ describe("waiter table visibility — location and restaurant scoping", () => {
 /**
  * Regression coverage for the "Waiter B taps Waiter A's table and lands on
  * an almost-empty rejected-access screen" UX bug. The fix exposes
- * activeOrderOwnerId (raw employeeId only, never a name) on listTables so
- * the frontend can block navigation BEFORE it happens
- * (lib/table-ownership.ts's isTableHeldByAnotherWaiter). These tests prove:
- * (1) the new field is populated correctly, and (2) the pre-existing
- * server-side authorization (requireDraftOwnership / getOrder) is completely
- * unchanged — a waiter can never gain access to another waiter's order by
- * hitting the API directly, regardless of what the UI does.
+ * activeOrderOwnerId on listTables so the frontend can block navigation
+ * BEFORE it happens (lib/table-ownership.ts's isTableHeldByAnotherWaiter).
+ * These tests prove: (1) the new field is populated correctly, and (2) the
+ * pre-existing server-side authorization (requireDraftOwnership / getOrder)
+ * is completely unchanged — a waiter can never gain access to another
+ * waiter's order by hitting the API directly, regardless of what the UI does.
+ *
+ * P0.6 finding #3 — "Zauzeo kolega" alone didn't say WHO. listTables now
+ * also exposes activeOrderOwnerName (batch-resolved from the SAME
+ * employeeId, one query for the whole floor list — see table-service.ts),
+ * so the blocked-table popup can name the actual colleague. Never a raw ID:
+ * an owner whose Employee record can't be found (openedBy has no DB-level
+ * FK — see the schema comment) falls back to null, never the ID itself.
  */
 describe("waiter table visibility — active order ownership exposure (pre-navigation UX fix)", () => {
   it("a free table (no active order) has activeOrderOwnerId: null", async () => {
@@ -225,6 +231,50 @@ describe("waiter table visibility — active order ownership exposure (pre-navig
     const waiter = context(fixture, [fixture.locationAId]);
     const floors = await tables.listTables(waiter, fixture.locationAId);
     expect(floors[0].tables[0].activeOrderOwnerId).toBeNull();
+  });
+
+  it("a table held by another waiter also exposes their resolved display name", async () => {
+    const fixture = await createFixture();
+    await prisma.employee.create({ data: { id: "waiter-owner", restaurantId: fixture.restaurantId, firstName: "Marko", lastName: "Jovanović" } });
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "waiter-owner" },
+    });
+    await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "waiter-owner",
+        status: "DRAFT",
+      },
+    });
+
+    const otherWaiter = context(fixture, [fixture.locationAId]); // employeeId: "waiter-1"
+    const floors = await tables.listTables(otherWaiter, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerName).toBe("Marko Jovanović");
+  });
+
+  it("falls back to null (never a raw employeeId) when the owning employee record can't be found", async () => {
+    const fixture = await createFixture();
+    const shift = await prisma.shift.create({
+      data: { restaurantId: fixture.restaurantId, locationId: fixture.locationAId, openedBy: "ghost-employee" },
+    });
+    await prisma.order.create({
+      data: {
+        restaurantId: fixture.restaurantId,
+        locationId: fixture.locationAId,
+        tableId: fixture.tableAId,
+        shiftId: shift.id,
+        openedBy: "ghost-employee",
+        status: "DRAFT",
+      },
+    });
+
+    const waiter = context(fixture, [fixture.locationAId]);
+    const floors = await tables.listTables(waiter, fixture.locationAId);
+    expect(floors[0].tables[0].activeOrderOwnerId).toBe("ghost-employee");
+    expect(floors[0].tables[0].activeOrderOwnerName).toBeNull();
   });
 
   it("SERVER-SIDE: a different waiter directly opening another waiter's DRAFT order via getOrder is still REJECTED (frontend popup is UX only, not the security boundary)", async () => {
