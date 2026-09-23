@@ -92,6 +92,20 @@ function stockStatus(item: InventoryItem): "negative" | "out" | "low" | "ok" {
   return "ok";
 }
 
+// Inventory Phase 1 — shared derivation used by BOTH the mobile card list
+// and the desktop table below, so the two renderings of the same
+// `filtered` data can never silently disagree on status/color.
+function rowVisuals(item: InventoryItem) {
+  const effectivelyTracked = isEffectivelyTracked(item);
+  const status = effectivelyTracked ? stockStatus(item) : null;
+  const stockCls =
+    status === "negative" ? "text-danger" :
+    status === "out" ? "text-danger" :
+    status === "low" ? "text-warn" :
+    "text-ink";
+  return { status, effectivelyTracked, stockCls };
+}
+
 function isLowStock(item: InventoryItem) {
   return stockStatus(item) === "low";
 }
@@ -945,7 +959,63 @@ export function InventoryClient() {
           <EmptyState title={emptyTitle} description={emptyDescription} />
         </Card>
       ) : (
-        <Card className="overflow-hidden">
+        <>
+          {/* Inventory Phase 1 — mobile-first card list. Same `filtered`
+              data, same status derivation, same setModal(...) actions as
+              the desktop table below — a second rendering of identical
+              state, not a second data/logic path. Shown only below sm:
+              (the table takes over at sm: and up, where its horizontal
+              overflow-x-auto has always been fine); the manager standing
+              in storage on a phone gets full-width cards with real touch
+              targets instead of a horizontally-scrolling table. */}
+          <div className="space-y-2.5 sm:hidden">
+            {filtered.map(item => {
+              const { status, effectivelyTracked, stockCls } = rowVisuals(item);
+              const min = item.menuItem.minimumStock;
+              const cardCls =
+                status === "negative" ? "border-danger/40 bg-danger/10" :
+                status === "out" ? "border-danger/30 bg-danger-soft/60" :
+                status === "low" ? "border-warn/40 bg-warn-soft/40" :
+                !effectivelyTracked ? "border-line opacity-60" :
+                "border-line bg-white";
+              return (
+                <div key={item.id} className={`rounded-lg border p-3.5 ${cardCls}`}>
+                  <div className="mb-2 flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-ink">{item.menuItem.name}</p>
+                      <p className="text-xs text-inkSoft">{item.location.name}</p>
+                    </div>
+                    <div className={`shrink-0 text-right text-lg font-bold tabular-nums ${stockCls}`}>
+                      {fmtQty(item.currentStock)} {item.unit}
+                    </div>
+                  </div>
+                  <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
+                    {status === "negative" && <Badge tone="dangerSolid">Negativna zaliha</Badge>}
+                    {status === "out" && <Badge tone="danger">Nema na zalihama</Badge>}
+                    {status === "low" && <Badge tone="warn">Niska zaliha</Badge>}
+                    {!effectivelyTracked && item.menuItem.hasRecipe && <Badge tone="gold">Normativ aktivan</Badge>}
+                    <Badge tone={effectivelyTracked ? "success" : "neutral"}>
+                      {effectivelyTracked ? "Aktivno" : item.menuItem.hasRecipe ? "Normativ (sirovine)" : "Isključeno"}
+                    </Badge>
+                    {item.menuItem.inventoryCategory && (
+                      <Badge tone="neutral">
+                        {item.menuItem.inventoryCategory.parent ? `${item.menuItem.inventoryCategory.parent.name} / ${item.menuItem.inventoryCategory.name}` : item.menuItem.inventoryCategory.name}
+                      </Badge>
+                    )}
+                    {min != null && <span className="text-xs text-inkSoft">Min: {fmtQty(Number(min))} {item.unit}</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 text-xs font-semibold">
+                    <button onClick={() => setModal({ type: "receive", item })} className="min-h-11 flex-1 rounded-md bg-gold-soft px-2.5 py-1.5 text-gold-dark hover:bg-gold/20">Prijem</button>
+                    <button onClick={() => setModal({ type: "adjust", item })} className="min-h-11 flex-1 rounded-md border border-line px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">Korekcija</button>
+                    <button onClick={() => setModal({ type: "movements", item })} className="min-h-11 flex-1 rounded-md border border-line px-2.5 py-1.5 text-gold-dark hover:bg-gold-soft">Historija</button>
+                    <button onClick={() => setModal({ type: "threshold", item })} className="min-h-11 flex-1 rounded-md border border-line px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">Prag</button>
+                    <button onClick={() => setModal({ type: "category", item })} className="min-h-11 flex-1 rounded-md border border-line px-2.5 py-1.5 text-inkSoft hover:bg-ink/[.05] hover:text-ink">Kategorija</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <Card className="hidden overflow-hidden sm:block">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -960,8 +1030,7 @@ export function InventoryClient() {
               </thead>
               <tbody className="divide-y divide-line/60">
                 {filtered.map(item => {
-                  const effectivelyTracked = isEffectivelyTracked(item);
-                  const status = effectivelyTracked ? stockStatus(item) : null;
+                  const { status, effectivelyTracked, stockCls } = rowVisuals(item);
                   const min = item.menuItem.minimumStock;
                   const rowCls =
                     status === "negative" ? "bg-danger/10 shadow-[inset_3px_0_0_#B91C1C]" :
@@ -969,11 +1038,6 @@ export function InventoryClient() {
                     status === "low" ? "bg-warn-soft/40 shadow-[inset_3px_0_0_#B45309]" :
                     !effectivelyTracked ? "opacity-60 hover:bg-cream-200/40" :
                     "hover:bg-cream-200/60";
-                  const stockCls =
-                    status === "negative" ? "text-danger" :
-                    status === "out" ? "text-danger" :
-                    status === "low" ? "text-warn" :
-                    "text-ink";
                   return (
                     <tr key={item.id} className={rowCls}>
                       <td className="px-4 py-3">
@@ -1026,7 +1090,8 @@ export function InventoryClient() {
               </tbody>
             </table>
           </div>
-        </Card>
+          </Card>
+        </>
       )}
 
       {modal?.type === "receive"    && <ReceiveModal   item={modal.item} onClose={() => setModal(null)} onDone={closeAndRefresh} />}
