@@ -379,6 +379,48 @@ internal static class SelfTests
         parsedTicket.Validate(); // baca ako ijedna linija krši postojeća Faza 1 pravila (dužina/kontrolni znakovi)
         Check(true, "TicketPayload output passes existing Ticket.Validate() unchanged");
 
+        // #8/#9 — KITCHEN/BAR "STO Sto 3" duplication regression proofs.
+        // ParseKitchenBar previously rendered a bare "STO {tableLabel}"
+        // concatenation; a table whose Admin-chosen label already reads
+        // "Sto 3" produced "STO Sto 3". FormatTableHeader (TicketPayload.cs)
+        // now merges a REDUNDANT LEADING "Sto"/"STO" word instead of
+        // duplicating it, while leaving every other label byte-for-byte
+        // untouched. KITCHEN and BAR share the exact same ParseKitchenBar
+        // path, so one set of cases proves both; a BAR-kind case below
+        // additionally proves the shared path itself.
+        static (Ticket Ticket, int PaperWidthMm, string Station) ParseKitchenBarPayload(string kind, string stationLabel, string tableLabel, string orderNumber) =>
+            TicketPayload.Parse(System.Text.Json.JsonDocument.Parse($$"""
+                {"kind":"{{kind}}","stationLabel":"{{stationLabel}}","tableLabel":"{{tableLabel}}","waiterName":"Ana","orderNumber":"{{orderNumber}}",
+                 "submittedAt":"2026-09-20T10:00:00.000Z","isAdditional":false,"paperWidthMm":58,
+                 "items":[{"quantity":1,"name":"Test"}]}
+                """).RootElement);
+
+        var (kitchenStoTicket, _, kitchenStoStation) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "Sto 3", "K1");
+        Check(kitchenStoStation == "KITCHEN", "KITCHEN payload still reports station KITCHEN after the header fix");
+        Check(kitchenStoTicket.Lines.Any(l => l.Text == "STO 3"), "REGRESSION PROOF #8: table label 'Sto 3' renders exactly 'STO 3' on a KITCHEN ticket, never 'STO Sto 3'");
+        kitchenStoTicket.Validate();
+
+        var (kitchenNumericTicket, _, _) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "3", "K2");
+        Check(kitchenNumericTicket.Lines.Any(l => l.Text == "STO 3"), "a bare numeric table label '3' (no existing 'Sto' word) still renders 'STO 3' exactly as before this fix");
+
+        var (kitchenTerasaTicket, _, _) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "Terasa 5", "K3");
+        Check(kitchenTerasaTicket.Lines.Any(l => l.Text == "STO Terasa 5"), "a legitimate custom table label 'Terasa 5' (no leading 'Sto' word) is preserved in full, prefixed normally");
+
+        var (kitchenVipStoTicket, _, _) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "VIP Sto", "K4");
+        Check(kitchenVipStoTicket.Lines.Any(l => l.Text == "STO VIP Sto"), "a custom label containing the word 'Sto' NOT as its leading word ('VIP Sto') must never be stripped/corrupted — only a REDUNDANT LEADING 'Sto' is merged");
+
+        var (kitchenBastaTicket, _, _) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "Bašta Sto 2", "K5");
+        Check(kitchenBastaTicket.Lines.Any(l => l.Text == "STO Bašta Sto 2"), "a custom label with 'Sto' embedded mid-string ('Bašta Sto 2') is preserved verbatim, prefixed normally, never stripped");
+
+        var (kitchenFallbackTicket, _, _) = ParseKitchenBarPayload("KITCHEN", "KUHINJA", "Poneti", "K6");
+        Check(kitchenFallbackTicket.Lines.Any(l => l.Text == "STO Poneti"), "a non-numbered fallback/takeaway-style table label ('Poneti') is preserved and prefixed normally, same as any other custom label without a leading 'Sto' word");
+
+        var (barStoTicket, _, barStoStation) = ParseKitchenBarPayload("BAR", "ŠANK", "Sto 7", "B1");
+        Check(barStoStation == "BAR", "BAR payload reports station BAR");
+        Check(barStoTicket.Lines.Any(l => l.Text == "STO 7"), "REGRESSION PROOF #9: table label 'Sto 7' renders exactly 'STO 7' on a BAR ticket (same shared ParseKitchenBar path as KITCHEN), never 'STO Sto 7'");
+        barStoTicket.Validate();
+        Check(true, "#8/#9 KITCHEN/BAR table-header fix output passes existing Ticket.Validate() unchanged");
+
         // PREPROD physical QA follow-up (real receipt #425, POS-58 — the
         // receipt never actually printed) — RECEIPT content was NEVER given
         // its own parser; every job type silently went through the

@@ -24,6 +24,18 @@ public sealed class SetupForm : Form
     private static readonly Color BrandGraphite = Color.FromArgb(0x0A, 0x19, 0x31);
     private static readonly Color BrandGraphiteHover = Color.FromArgb(0x1A, 0x3D, 0x63);
     private static readonly Color BrandGraphiteDisabled = Color.FromArgb(0x9A, 0x9F, 0xA6);
+    // #3 (Setup redesign, 2026-09-2x) — presentation-only palette additions.
+    // Nothing below changes what any control DOES, only how the existing
+    // sections (connection status, printer-assignment cards, advanced/
+    // diagnostics) are visually grouped — see the card/banner/toggle panels
+    // built in the constructor.
+    private static readonly Color CardBackground = Color.FromArgb(0xF6, 0xF7, 0xF9);
+    private static readonly Color CardBorder = Color.FromArgb(0xE1, 0xE4, 0xE9);
+    private static readonly Color BannerConnectedBg = Color.FromArgb(0xEA, 0xF7, 0xEE);
+    private static readonly Color BannerConnectedBorder = Color.FromArgb(0x9F, 0xD9, 0xB2);
+    private static readonly Color BannerPendingBg = Color.FromArgb(0xFB, 0xF4, 0xE7);
+    private static readonly Color BannerPendingBorder = Color.FromArgb(0xE9, 0xCE, 0x9A);
+    private static readonly Color BrandSuccess = Color.FromArgb(0x1E, 0x7A, 0x3C);
 
     private readonly Label _statusLabel = new() { AutoSize = true, MaximumSize = new Size(420, 0) };
     private readonly TextBox _pairingCodeBox = new() { Width = 220, PlaceholderText = "XXXX-XXXX-XXXX" };
@@ -113,6 +125,67 @@ public sealed class SetupForm : Form
     private readonly Label _versionLabel = new() { AutoSize = true, Text = $"TableCore Print Agent v{AgentVersion.Current}" };
     private readonly Label _endpointLabel = new() { AutoSize = true };
 
+    // #3 (Setup redesign) — connection status banner. Wraps the EXISTING
+    // _statusLabel (its Text/logic is still set exclusively by
+    // RefreshStatus below, completely unchanged) in a colored card so the
+    // paired/unpaired state reads as the dominant thing on screen instead
+    // of a plain gray line at the top.
+    private readonly Panel _connectionBanner = new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(12, 10, 12, 10),
+        BackColor = BannerPendingBg,
+    };
+    // #3 — pairing controls (code box / Poveži / Otkaži / feedback /
+    // re-pair warning) become SECONDARY once paired: collapsed by default
+    // behind this link, expandable for recovery. Never removes the
+    // capability — see RefreshStatus/EnterRepairMode/ExitRepairMode/OnPair,
+    // which only gain a couple of ADDITIVE _pairingDetailsPanel.Visible
+    // lines; none of their existing decision logic changes.
+    private readonly LinkLabel _pairingToggleLink = new()
+    {
+        Text = "Ponovo upari / promeni računar",
+        AutoSize = true,
+        Visible = false,
+        Margin = new Padding(0, 10, 0, 0),
+        LinkColor = BrandGraphite,
+        LinkBehavior = LinkBehavior.HoverUnderline,
+    };
+    // TableLayoutPanel (not plain Panel) — this holds SEVERAL stacked
+    // children (label/pairRow/feedback/warning) added via Controls.Add in
+    // the constructor; a plain Panel does not auto-stack its children
+    // (they'd all sit at Location (0,0) and overlap), matching the same
+    // ColumnCount=1 vertical-stack pattern used by `layout`/`advancedInner`
+    // elsewhere in this file.
+    private readonly TableLayoutPanel _pairingDetailsPanel = new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        ColumnCount = 1,
+    };
+    // #3/#6 — technical/diagnostic content (raw endpoint, agent version,
+    // the "print to any printer regardless of routing" diagnostic tool)
+    // moved behind a collapsed-by-default "Napredno / Dijagnostika"
+    // disclosure instead of always being visible in the normal flow.
+    // Nothing about what these controls DO changes — same fields, same
+    // event handlers, only their default container visibility.
+    private readonly LinkLabel _advancedToggleLink = new()
+    {
+        Text = "▸ Napredno / Dijagnostika",
+        AutoSize = true,
+        Margin = new Padding(0, 18, 0, 0),
+        LinkColor = SystemColors.GrayText,
+        LinkBehavior = LinkBehavior.HoverUnderline,
+    };
+    private readonly Panel _advancedPanel = new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Visible = false,
+        Margin = new Padding(0, 6, 0, 0),
+    };
+
     private readonly AgentEndpoint _endpoint = null!;
     private readonly string? _endpointError;
     private readonly string? _prefillPairingCode;
@@ -174,7 +247,7 @@ public sealed class SetupForm : Form
         // MinimumSize/MaximumSize, samo visina je promenljiva.
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        MinimumSize = new Size(480, 0);
+        MinimumSize = new Size(520, 0);
 
         _pairButton.FlatAppearance.BorderSize = 0;
         _pairButton.FlatAppearance.MouseOverBackColor = BrandGraphiteHover;
@@ -200,18 +273,33 @@ public sealed class SetupForm : Form
             ColumnCount = 1,
             Padding = new Padding(16, 16, 16, 24),
         };
-        layout.Controls.Add(_statusLabel);
-        layout.Controls.Add(new Label { Text = "Kod za uparivanje:", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
-        var pairRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-        _pairingCodeBox.Margin = new Padding(0, 6, 0, 0);
+
+        // #3 — connection status banner (POVEŽI / connected state). Bigger,
+        // bolded _statusLabel inside a colored card — RefreshStatus below
+        // still owns 100% of _statusLabel's TEXT and continues to also
+        // color/size this SAME banner panel based on paired state.
+        _statusLabel.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+        _connectionBanner.Controls.Add(_statusLabel);
+        layout.Controls.Add(_connectionBanner);
+
+        // #3 — pairing/recovery becomes secondary: collapsed behind a link
+        // once paired (see RefreshStatus/EnterRepairMode/ExitRepairMode/
+        // OnPair for the additive Visible toggles), always expanded while
+        // unpaired since pairing IS the primary task at that point.
+        layout.Controls.Add(_pairingToggleLink);
+        _pairingDetailsPanel.Controls.Add(new Label { Text = "Kod za uparivanje:", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
+        var pairRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
+        _pairingCodeBox.Margin = new Padding(0, 6, 8, 0);
+        _pairButton.Margin = new Padding(0, 0, 8, 0);
         pairRow.Controls.Add(_pairingCodeBox);
         pairRow.Controls.Add(_pairButton);
         pairRow.Controls.Add(_repairCancelButton);
-        layout.Controls.Add(pairRow);
+        _pairingDetailsPanel.Controls.Add(pairRow);
         _pairFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
-        layout.Controls.Add(_pairFeedbackLabel);
+        _pairingDetailsPanel.Controls.Add(_pairFeedbackLabel);
         _repairWarningLabel.Margin = new Padding(0, 0, 0, 0);
-        layout.Controls.Add(_repairWarningLabel);
+        _pairingDetailsPanel.Controls.Add(_repairWarningLabel);
+        layout.Controls.Add(_pairingDetailsPanel);
 
         // PRINTING P0 — IZABERI NAMENU step. The operator picks which
         // Windows printer + paper width serves each route (KUHINJA /
@@ -219,7 +307,7 @@ public sealed class SetupForm : Form
         // is allowed to serve multiple routes (KUHINJA + ŠANK on a
         // single POS-58 is a common small-restaurant setup) — the UI
         // deliberately does not prevent this.
-        _discoveredPrintersLabel.Margin = new Padding(0, 16, 0, 0);
+        _discoveredPrintersLabel.Margin = new Padding(0, 20, 0, 0);
         _discoveredPrintersLabel.Text = _availablePrinters.Length switch
         {
             0 => "Nijedan štampač nije detektovan na ovom računaru.",
@@ -228,37 +316,90 @@ public sealed class SetupForm : Form
         };
         _discoveredPrintersLabel.ForeColor = _availablePrinters.Length == 0 ? Color.Firebrick : SystemColors.GrayText;
         layout.Controls.Add(_discoveredPrintersLabel);
-        layout.Controls.Add(new Label { Text = "Rute štampe (izaberi za svaku namenu):", AutoSize = true, Margin = new Padding(0, 8, 0, 4) });
+        // #3 — "rute"/"namena" (developer/internal terms) replaced with a
+        // plain restaurant-facing section title in the primary UX; the
+        // underlying route TYPE strings (KITCHEN/BAR/RECEIPT) and server
+        // API are untouched — this is a label only.
+        layout.Controls.Add(new Label
+        {
+            Text = "Štampači",
+            AutoSize = true,
+            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            Margin = new Padding(0, 10, 0, 2),
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Izaberi koji štampač i širinu papira koristi svaka namena:",
+            AutoSize = true,
+            MaximumSize = new Size(440, 0),
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(0, 0, 0, 6),
+        });
         BuildRouteDraftRows();
         foreach (var row in _routeDrafts)
         {
             var routeCard = BuildRouteCardPanel(row);
-            routeCard.Margin = new Padding(0, 0, 0, 6);
+            routeCard.Margin = new Padding(0, 0, 0, 8);
             layout.Controls.Add(routeCard);
         }
-        var namenuActionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
+        var namenuActionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
         namenuActionRow.Controls.Add(_saveNamenuButton);
         layout.Controls.Add(namenuActionRow);
         _namenuFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
         layout.Controls.Add(_namenuFeedbackLabel);
 
-        var actionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 16, 0, 0) };
-        actionRow.Controls.Add(_testPrintButton);
+        // #3 — TESTIRAJ → POTVRDI → SPREMNO is one continuous action
+        // (OnSave already drives test-print → human confirmation → ready
+        // per route internally); _saveButton is now the sole, visually
+        // primary control in this row. The old always-visible diagnostic
+        // "Probna štampa" button moves into Napredno/Dijagnostika below —
+        // same field, same Click handler, only its container changes.
+        _saveButton.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+        var actionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 18, 0, 0) };
         actionRow.Controls.Add(_saveButton);
         layout.Controls.Add(actionRow);
         _saveFeedbackLabel.Margin = new Padding(0, 4, 0, 0);
         layout.Controls.Add(_saveFeedbackLabel);
 
-        _versionLabel.Margin = new Padding(0, 24, 0, 0);
-        layout.Controls.Add(_versionLabel);
+        // #3/#6 — technical/diagnostic information (raw server endpoint,
+        // agent version, ad hoc "print to any printer" tool) is real and
+        // useful for support, but must not dominate the normal restaurant
+        // setup flow — moved behind this collapsed-by-default disclosure.
+        layout.Controls.Add(_advancedToggleLink);
+        var advancedInner = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            Padding = new Padding(10, 8, 10, 8),
+        };
+        advancedInner.Controls.Add(new Label { Text = "Probna štampa na proizvoljnom štampaču (dijagnostika):", AutoSize = true, MaximumSize = new Size(420, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(0, 0, 0, 4) });
+        var diagnosticRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
+        diagnosticRow.Controls.Add(_testRouteTypeBox);
+        diagnosticRow.Controls.Add(_printerBox);
+        diagnosticRow.Controls.Add(_paperWidthBox);
+        advancedInner.Controls.Add(diagnosticRow);
+        _testPrintButton.Margin = new Padding(0, 8, 0, 0);
+        advancedInner.Controls.Add(_testPrintButton);
+        _versionLabel.Margin = new Padding(0, 16, 0, 0);
+        advancedInner.Controls.Add(_versionLabel);
         _endpointLabel.Margin = new Padding(0, 2, 0, 0);
         _endpointLabel.ForeColor = _endpointError is null ? SystemColors.GrayText : Color.Firebrick;
         _endpointLabel.Text = _endpointError is null
             ? $"Server: {_endpoint.DescribeForLog()}"
             : $"Nevalidno podešavanje servera: {_endpointError}";
-        layout.Controls.Add(_endpointLabel);
+        advancedInner.Controls.Add(_endpointLabel);
+        _advancedPanel.Controls.Add(advancedInner);
+        layout.Controls.Add(_advancedPanel);
 
         Controls.Add(layout);
+
+        _pairingToggleLink.Click += (_, _) => _pairingDetailsPanel.Visible = !_pairingDetailsPanel.Visible;
+        _advancedToggleLink.Click += (_, _) =>
+        {
+            _advancedPanel.Visible = !_advancedPanel.Visible;
+            _advancedToggleLink.Text = _advancedPanel.Visible ? "▾ Napredno / Dijagnostika" : "▸ Napredno / Dijagnostika";
+        };
 
         // Diagnostic OnTestPrint path — populate its combo boxes too
         // so tech support can still print to any printer regardless
@@ -355,6 +496,7 @@ public sealed class SetupForm : Form
         _pairingCodeBox.Text = presetCode ?? "";
         _pairButton.Text = "Poveži ponovo";
         _repairCancelButton.Visible = true;
+        _pairingDetailsPanel.Visible = true; // #3 — re-pair always expands the (otherwise collapsed) pairing section
         if (viaUri)
         {
             _repairWarningLabel.Text = "Ovaj računar je već povezan sa TableCore.\nNovi kod će zameniti postojeće uparivanje.";
@@ -376,7 +518,7 @@ public sealed class SetupForm : Form
         _repairUnlocked = false;
         _repairWarningLabel.Visible = false;
         _repairCancelButton.Visible = false;
-        RefreshStatus(paired: true);
+        RefreshStatus(paired: true); // #3 — also re-collapses _pairingDetailsPanel since _repairUnlocked is now false
         ShowPairFeedback("", isError: false);
     }
 
@@ -535,29 +677,45 @@ public sealed class SetupForm : Form
     /// AutoSize on every control + flow panel that wraps on narrow
     /// widths (DPI-safe at 100/125/150 %).
     /// </summary>
+    // #3 — visual "card" per route (KUHINJA/ŠANK/RAČUN): a bordered,
+    // tinted panel instead of a bare flow of controls, so the three
+    // purposes read as distinct, clearly grouped choices rather than one
+    // undifferentiated block. Same controls (row.PrinterBox/PaperWidthBox/
+    // ClearButton/StatusLabel), same event wiring from BuildRouteDraftRows
+    // — only the container/typography around them changes. WrapContents
+    // stays true (unchanged) so the row never gets clipped at higher DPI.
     private TableLayoutPanel BuildRouteCardPanel(RouteDraftRow row)
     {
+        // Single Panel with the native BorderStyle.FixedSingle — deliberately
+        // NOT nested Dock=Fill panels inside an AutoSize parent (a classic
+        // WinForms sizing trap: AutoSize wants to measure children, Dock=Fill
+        // wants to fill the already-measured parent — the two can deadlock
+        // to a 0-size control). BorderStyle avoids that entirely while still
+        // giving each route its own visually distinct bordered/tinted card.
         var card = new TableLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            Dock = DockStyle.Top,
-            Padding = new Padding(8, 6, 8, 6),
+            BackColor = CardBackground,
+            BorderStyle = BorderStyle.FixedSingle,
+            Padding = new Padding(9, 7, 9, 7),
         };
         var headerRow = new FlowLayoutPanel
         {
             AutoSize = true,
             WrapContents = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = CardBackground,
             Margin = new Padding(0, 0, 0, 4),
         };
         var typeLabel = new Label
         {
-            Text = row.RestaurantLabel + ":",
+            Text = row.RestaurantLabel,
             AutoSize = true,
-            Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
-            Margin = new Padding(0, 6, 8, 0),
+            Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+            BackColor = CardBackground,
+            Margin = new Padding(0, 6, 10, 0),
         };
         headerRow.Controls.Add(typeLabel);
         headerRow.Controls.Add(row.PrinterBox);
@@ -565,6 +723,7 @@ public sealed class SetupForm : Form
         headerRow.Controls.Add(row.ClearButton);
         card.Controls.Add(headerRow);
         row.StatusLabel.Margin = new Padding(0, 2, 0, 0);
+        row.StatusLabel.BackColor = CardBackground;
         card.Controls.Add(row.StatusLabel);
         return card;
     }
@@ -666,15 +825,27 @@ public sealed class SetupForm : Form
                 ? $"{_configuredRouteCount} {(_configuredRouteCount == 1 ? "ruta štampe podešena" : "rute štampe podešene")}."
                 : "Rute štampe još nisu podešene — podesi ih u Admin panelu (Podešavanja → Štampači).";
             var label = (_connectedName is null ? "Povezano sa TableCore." : $"Povezano sa TableCore: {_connectedName}.") + " " + routesText;
-            _statusLabel.Text = label;
             _pairingCodeBox.Enabled = false;
             _pairButton.Text = "Ponovo upari (novi kod)";
+            // #3 — presentation only: paired state reads as a prominent
+            // green "connected" banner, and the pairing/re-pair controls
+            // (still fully functional, never removed) collapse behind the
+            // secondary toggle link instead of dominating the screen.
+            _connectionBanner.BackColor = BannerConnectedBg;
+            _statusLabel.Text = "✓ Računar je povezan. " + label;
+            _pairingToggleLink.Visible = true;
+            if (!_repairUnlocked) _pairingDetailsPanel.Visible = false;
         }
         else
         {
             _statusLabel.Text = "Nije upareno. Unesite kod za uparivanje iz Admin panela (Podešavanja → Štampači).";
             _pairingCodeBox.Enabled = true;
             _pairButton.Text = "Poveži";
+            // #3 — unpaired: pairing IS the primary task, so it stays
+            // expanded and the toggle link (nothing to collapse to) hides.
+            _connectionBanner.BackColor = BannerPendingBg;
+            _pairingToggleLink.Visible = false;
+            _pairingDetailsPanel.Visible = true;
         }
     }
 

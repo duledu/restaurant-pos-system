@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace TableCore.PrintAgent;
 
@@ -148,6 +149,34 @@ public static class TicketPayload
     public static (Ticket Ticket, int PaperWidthMm, string Station) Parse(JsonElement content) =>
         GetString(content, "kind") == "RECEIPT" ? ParseReceipt(content) : ParseKitchenBar(content);
 
+    // #8/#9 (KITCHEN/BAR "STO Sto 3" duplication, 2026-09-2x) — same root
+    // principle as the RECEIPT-side fix below (BuildReceiptBodyLines): the
+    // table LABEL is already the complete, Admin-chosen display name (e.g.
+    // "Sto 3", "Terasa 5", "VIP Sto") and must never be blindly re-derived.
+    // The RECEIPT metadata line solves this by rendering a "Field: value"
+    // row ("Sto: Sto 1" reads fine as a caption), but the KITCHEN/BAR ticket
+    // renders the table identity as ONE large, glanced-at HEADER line, where
+    // "STO Sto 3" reads as a genuine duplication and "STO: Sto 3" would look
+    // wrong for a header — so that exact pattern isn't reusable verbatim
+    // here. Instead: merge a REDUNDANT LEADING "Sto"/"STO" WORD into the
+    // "STO" header instead of duplicating it. Deliberately a whole-word,
+    // start-anchored match (never a substring strip) — "VIP Sto" and
+    // "Bašta Sto 2" contain the word "Sto" but NOT as their own leading
+    // word, so they must render unchanged as "STO VIP Sto" / "STO Bašta Sto
+    // 2". A label with no leading "Sto" word (numeric, custom, fallback)
+    // keeps the exact prior "STO {label}" behavior. Shared by both KITCHEN
+    // and BAR because both go through this same ParseKitchenBar function.
+    private static readonly Regex LeadingStoWord = new(@"^sto(?=\s|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static string FormatTableHeader(string tableLabel)
+    {
+        var trimmed = tableLabel.Trim();
+        var match = LeadingStoWord.Match(trimmed);
+        if (!match.Success) return $"STO {trimmed}".Trim();
+        var remainder = trimmed[match.Length..].TrimStart();
+        return remainder.Length == 0 ? "STO" : $"STO {remainder}";
+    }
+
     private static (Ticket Ticket, int PaperWidthMm, string Station) ParseKitchenBar(JsonElement content)
     {
         var stationLabel = GetString(content, "stationLabel");
@@ -166,7 +195,7 @@ public static class TicketPayload
             new(string.IsNullOrWhiteSpace(stationLabel) ? station : stationLabel, 14, true),
         };
         if (isAdditional) lines.Add(new("DODATNA PORUDZBINA", 12, true));
-        lines.Add(new($"STO {tableLabel}".Trim(), 18, true));
+        lines.Add(new(FormatTableHeader(tableLabel), 18, true));
         if (!string.IsNullOrWhiteSpace(orderNumber)) lines.Add(new($"NARUDZBINA #{orderNumber}", 10));
         if (!string.IsNullOrWhiteSpace(waiterName)) lines.Add(new($"KONOBAR: {waiterName}", 10));
 

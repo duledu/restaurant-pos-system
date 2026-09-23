@@ -299,6 +299,24 @@ export async function dispatchReceiptPrintJob(
           where: { orderId_dispatchKey: { orderId: receipt.orderId, dispatchKey: originalDispatchKey } },
         });
 
+  // BUG #11/#12 (manual RECEIPT reprint never physically printed) — mirrors
+  // the identical, already-proven pattern in retryPrintJob above: forcing
+  // isAutomatic:false unconditionally on a reprint permanently hides it from
+  // agentPrinting.pollAndClaim (which only polls isAutomatic:true, see
+  // agent-print-service.ts), so "Ponovo štampaj račun" created a real
+  // PrintJob row that no Agent ever saw — it sat PENDING until a human
+  // manually claimed it via the browser fallback. Stays isAutomatic:true
+  // (Agent-claimable, same silent flow as the original automatic dispatch)
+  // whenever a live Print Agent owns this RECEIPT route; falls back to the
+  // legacy isAutomatic:false (manual claim only) exactly when no Agent is
+  // active, same safety net retryPrintJob already established. Duplicate
+  // physical prints are prevented by beginPrintAttempt's ATOMIC PENDING->
+  // PRINTING claim (a single-row updateMany), not by hiding the job from
+  // the Agent — two claimants racing for the same row can never both win,
+  // and a genuinely new reprint intent always gets its OWN row (fresh
+  // dispatchKey per click, see reprintReceipt).
+  const activeWorkstation = await activeWorkstationFor(prisma, ctx.restaurantId, receipt.locationId, "RECEIPT");
+
   let content: ReturnType<typeof buildReceiptTicketContent>;
   if (original) {
     content = original.content as unknown as ReturnType<typeof buildReceiptTicketContent>;
@@ -320,10 +338,7 @@ export async function dispatchReceiptPrintJob(
     // width — this fix removes the root cause at its source; the paired Agent
     // fix (see AgentRunner.cs ProcessReceivedJob) removes the second, unsafe
     // "trust the server's embedded width over local config" layer too.
-    const [settings, activeWorkstation] = await Promise.all([
-      getRestaurantSettings(ctx),
-      activeWorkstationFor(prisma, ctx.restaurantId, receipt.locationId, "RECEIPT"),
-    ]);
+    const settings = await getRestaurantSettings(ctx);
     const paperWidthMm = activeWorkstation
       ? (activeWorkstation.paperWidthMm ?? 80)
       : (await getPrinterConfigForDispatch(ctx.restaurantId, receipt.locationId, "RECEIPT")).paperWidthMm;
@@ -398,17 +413,13 @@ export async function dispatchReceiptPrintJob(
       // the waiter UI correctly reported "sent" (the job genuinely exists),
       // but no Agent ever printed it. RECEIPT now dispatches automatic
       // exactly like KITCHEN/BAR.
-      // A user-initiated reprint is NOT automatic: it must NOT be picked
-      // up by the Print Agent's automatic poll/claim loop, otherwise
-      // clicking "Reprint" silently produces a duplicate physical print
-      // (the operator triggered the click AND the agent polls and grabs
-      // it within seconds). The same separation applies to KITCHEN/BAR
-      // manual prints (see requestStationPrint); this brings RECEIPT into
-      // parity. The original "RECEIPT physical-failure root cause" fix
-      // intentionally made the AUTOMATIC payment-time RECEIPT dispatch
-      // agent-claimable — that path calls this function with
-      // isReprint: false, so isAutomatic stays true there.
-      isAutomatic: !opts.isReprint,
+      // BUG #11/#12 fix — see the activeWorkstation comment above. A
+      // reprint stays Agent-claimable (isAutomatic:true) whenever a live
+      // Print Agent owns this RECEIPT route; only falls back to
+      // isAutomatic:false (manual browser claim) when no Agent is active,
+      // same rule retryPrintJob already uses. The original automatic
+      // payment-time dispatch (isReprint:false) is unaffected — always true.
+      isAutomatic: opts.isReprint ? Boolean(activeWorkstation) : true,
       isReprint: opts.isReprint,
       reprintOfId: original?.id ?? null,
       requestedBy: opts.requestedBy,

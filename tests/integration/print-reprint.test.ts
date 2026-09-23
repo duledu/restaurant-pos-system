@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
 import type { AuthContext } from "@rcs/auth";
-import { orders, billing, printing } from "@rcs/domain";
+import { orders, billing, printing, workstations, agentPrinting } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -48,6 +48,19 @@ async function createFixture(): Promise<Fixture> {
     },
   });
   return { restaurantId: restaurant.id, otherRestaurantId: otherRestaurant.id, locationId: location.id, tableId: table.id, menuItemId: menuItem.id };
+}
+
+/** Pairs a computer with a live, enabled RECEIPT route and a recent
+ * heartbeat — mirrors print-routes.test.ts's pairComputer, needed here to
+ * prove BUG #11/#12: a manual reprint must be pollable/claimable by a real
+ * Print Agent, not just created as an inert database row. */
+async function pairReceiptWorkstation(fixture: Fixture, owner: AuthContext) {
+  const pairing = await workstations.createPairing(owner, { locationId: fixture.locationId, name: "Kasa" });
+  const registered = await workstations.registerAgentFromPairing({ code: pairing.code });
+  await prisma.workstation.update({ where: { id: registered.workstationId }, data: { lastSeenAt: new Date() } });
+  await workstations.upsertPrintRoute(owner, registered.workstationId, "RECEIPT", { printerName: "POS-58", paperWidthMm: 58 });
+  await prisma.workstationPrintRoute.updateMany({ where: { workstationId: registered.workstationId }, data: { printerAvailable: true } });
+  return { workstationId: registered.workstationId, restaurantId: registered.restaurantId, locationId: registered.locationId, station: registered.station };
 }
 
 async function payOrder(fixture: Fixture, waiter: AuthContext) {
@@ -255,5 +268,99 @@ describe("primary waiter print dispatch (printReceipt): reuses the authoritative
     const outsider = context(fixture, "MANAGER", "outsider");
     outsider.restaurantId = fixture.otherRestaurantId;
     await expect(printing.printReceipt(outsider, order.id)).rejects.toThrow("nije pronađena");
+  });
+});
+
+// BUG #11/#12 — before this fix, dispatchReceiptPrintJob unconditionally set
+// isAutomatic:false on every reprint, which agentPrinting.pollAndClaim's
+// candidate query (isAutomatic:true only) can never see — "Ponovo štampaj
+// račun" created a real, correctly-audited PrintJob row that no Agent would
+// ever physically print. These tests prove the actual Agent-claim path, not
+// just the row's existence (already covered above), mirroring the same
+// pairComputer + upsertPrintRoute + pollAndClaim pattern print-routes.test.ts
+// already uses to prove the automatic RECEIPT path is Agent-claimable.
+describe("receipt reprint is Agent-claimable when a live Print Agent owns the RECEIPT route (BUG #11/#12)", () => {
+  it("a genuine new reprint click is immediately pollable/claimable by the paired Agent — not just created", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, "OWNER", "owner-1", ["workstations.manage", "orders.print"]);
+    const wsCtx = await pairReceiptWorkstation(fixture, owner);
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+
+    // The automatic payment-time RECEIPT job is claimed first (same as a
+    // real Agent's poll loop would do) so it can't be mistaken for the
+    // reprint we're about to prove is ALSO claimable.
+    const autoClaim = await agentPrinting.pollAndClaim(wsCtx);
+    expect(autoClaim?.type).toBe("RECEIPT");
+
+    const reprintJob = await printing.reprintReceipt(waiter, order.id, randomUUID());
+    expect(reprintJob.isAutomatic).toBe(true);
+
+    const reprintClaim = await agentPrinting.pollAndClaim(wsCtx);
+    expect(reprintClaim?.id).toBe(reprintJob.id);
+    expect(reprintClaim?.isReprint).toBe(true);
+  });
+
+  it("two separate intentional reprint clicks each become their own claimable PrintJob — exactly one physical copy per click", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, "OWNER", "owner-1", ["workstations.manage", "orders.print"]);
+    const wsCtx = await pairReceiptWorkstation(fixture, owner);
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+    await agentPrinting.pollAndClaim(wsCtx); // claims the automatic dispatch out of the way
+
+    const firstReprint = await printing.reprintReceipt(waiter, order.id, randomUUID());
+    const firstClaim = await agentPrinting.pollAndClaim(wsCtx);
+    expect(firstClaim?.id).toBe(firstReprint.id);
+
+    const secondReprint = await printing.reprintReceipt(waiter, order.id, randomUUID());
+    expect(secondReprint.id).not.toBe(firstReprint.id);
+    const secondClaim = await agentPrinting.pollAndClaim(wsCtx);
+    expect(secondClaim?.id).toBe(secondReprint.id);
+
+    // No phantom third job — exactly two reprints were requested.
+    expect(await agentPrinting.pollAndClaim(wsCtx)).toBeNull();
+    expect(await prisma.printJob.count({ where: { orderId: order.id, isReprint: true } })).toBe(2);
+  });
+
+  it("retrying the SAME reprint click (same idempotency key) never produces a second claimable job", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, "OWNER", "owner-1", ["workstations.manage", "orders.print"]);
+    const wsCtx = await pairReceiptWorkstation(fixture, owner);
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await payOrder(fixture, waiter);
+    await agentPrinting.pollAndClaim(wsCtx); // claims the automatic dispatch out of the way
+
+    const clickKey = randomUUID();
+    const first = await printing.reprintReceipt(waiter, order.id, clickKey);
+    const retryOfSameClick = await printing.reprintReceipt(waiter, order.id, clickKey);
+    expect(retryOfSameClick.id).toBe(first.id);
+
+    // Only ONE claim is available for this one genuine click, no matter how
+    // many times the network/UI retried the same request.
+    const claim = await agentPrinting.pollAndClaim(wsCtx);
+    expect(claim?.id).toBe(first.id);
+    expect(await agentPrinting.pollAndClaim(wsCtx)).toBeNull();
+  });
+
+  it("KITCHEN/BAR automatic dispatch and claim are unaffected by the RECEIPT reprint fix", async () => {
+    const fixture = await createFixture();
+    const owner = context(fixture, "OWNER", "owner-1", ["workstations.manage", "orders.print"]);
+    const registered = await (async () => {
+      const pairing = await workstations.createPairing(owner, { locationId: fixture.locationId, name: "Kuhinja" });
+      const r = await workstations.registerAgentFromPairing({ code: pairing.code });
+      await prisma.workstation.update({ where: { id: r.workstationId }, data: { lastSeenAt: new Date() } });
+      await workstations.upsertPrintRoute(owner, r.workstationId, "KITCHEN", { printerName: "POS-58", paperWidthMm: 58 });
+      await prisma.workstationPrintRoute.updateMany({ where: { workstationId: r.workstationId }, data: { printerAvailable: true } });
+      return { workstationId: r.workstationId, restaurantId: r.restaurantId, locationId: r.locationId, station: r.station };
+    })();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.menuItemId, quantity: 1 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    const claim = await agentPrinting.pollAndClaim(registered);
+    expect(claim?.station).toBe("KITCHEN");
+    expect(claim?.isAutomatic).toBe(true);
   });
 });

@@ -261,22 +261,51 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     expect(putCalls.some((p) => p.endsWith("/routes/RECEIPT"))).toBe(true);
   });
 
-  it("Ponovo upari no longer prefills or implies a station for the new pairing", async () => {
+  // Admin re-pair dead-end fix (physical QA finding) — "Ponovo upari" used
+  // to only reveal a form with its OWN separate "Generiši kod" button,
+  // which the Admin visibly clicked to create a pending pairing without
+  // ever seeing a code (workstation ends up under "Uparivanja na čekanju"
+  // with no code and no obvious next step). It now creates the pairing AND
+  // reveals the code in a single click, through the exact same
+  // justCreatedCode panel "Dodaj računar" already used — no new mechanism,
+  // still implies no station/route (Printing V2: routes are independent
+  // of the pairing session, configured after, per workstation).
+  it("Ponovo upari immediately creates a pairing and reveals the code — no dead end, no implied station", async () => {
     workstationsResponse = [
       workstation({ lastSeenAt: new Date().toISOString(), printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true, paperWidthMm: 58 })] }),
     ];
+    let createBody: unknown = null;
+    // Mirrors mockFetchWithPairingCreation below — the real server keeps a
+    // freshly created pairing in pendingPairings until consumed/cancelled;
+    // WorkstationsPanel's own load() nulls justCreatedCode the instant the
+    // pairing ID it's showing stops appearing there (see the load() effect),
+    // so a mock that always returns an empty list would immediately (and
+    // incorrectly) hide the very code this test exists to prove is shown.
+    let pending: { id: string; name: string | null; locationId: string; location: { id: string; name: string }; expiresAt: string; createdAt: string }[] = [];
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      const path = String(input).split("?")[0];
+      if (path === "/api/admin/workstations") return response({ workstations: workstationsResponse, pendingPairings: pending, printingMode: printingModeResponse });
+      if (path === "/api/admin/workstations/agent-download") return response({ available: false, url: null, version: "1.0.0-pilot.2", supportedOS: "Windows 10/11" });
+      if (path === "/api/admin/workstations/pairings" && options?.method === "POST") {
+        createBody = JSON.parse(options.body as string);
+        const expiresAt = new Date(Date.now() + 600_000).toISOString();
+        pending = [...pending, { id: "p-1", name: (createBody as { name?: string }).name ?? null, locationId: "l1", location: { id: "l1", name: "Glavna" }, expiresAt, createdAt: new Date().toISOString() }];
+        return response({ pairing: { pairingId: "p-1", code: "AAAA-BBBB-CCCC", expiresAt } });
+      }
+      throw new Error(`Unexpected request ${input}`);
+    });
     await mount();
     await act(async () => {
       const rePairButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Ponovo upari");
       rePairButton!.click();
     });
+    // No form/select step — the request went out with the workstation's
+    // own name, no station/route implied.
+    expect(createBody).toEqual({ locationId: "l1", name: "Kuhinjski računar" });
     expect(host.textContent).not.toContain("Namena");
-    // Scope to the pairing form itself — the existing workstation card above
-    // it legitimately still has route <select>s; only the FORM must have none.
-    const generateButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Generiši kod za uparivanje");
-    expect(generateButton).toBeTruthy();
-    const pairingForm = generateButton!.closest("div")!;
-    expect(pairingForm.querySelector("select")).toBeNull();
+    // The code is visible immediately, same panel as "Dodaj računar".
+    expect(host.textContent).toContain("AAAA-BBBB-CCCC");
+    expect(host.textContent).toContain("Otvori TableCore Print Agent");
   });
 });
 

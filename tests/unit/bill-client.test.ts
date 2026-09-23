@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 //
-// Print Agent physical QA fix — the waiter /bill "Štampaj račun" button
-// used to call printAndConfirm() with the default (browser) transport,
-// which opens Chrome's own print dialog (window.print()) on the WAITER'S
-// device — completely wrong for a receipt meant to print silently on
-// POS-58 via the Windows Print Agent on a different computer. These tests
-// pin: the primary action never calls window.print(), it dispatches the
-// authoritative RECEIPT PrintJob instead, and the browser-print path is
-// preserved ONLY as an explicit, secondary fallback button.
+// Print Agent physical QA fix — the waiter /bill print action used to call
+// printAndConfirm() with the default (browser) transport, which opens
+// Chrome's own print dialog (window.print()) on the WAITER'S device —
+// completely wrong for a receipt meant to print silently on POS-58 via the
+// Windows Print Agent on a different computer. These tests pin: it never
+// calls window.print(), it dispatches an authoritative RECEIPT PrintJob
+// instead, and the browser-print path is preserved ONLY as an explicit,
+// secondary fallback button.
+//
+// BUG #11 — payment already auto-dispatches the receipt automatically; a
+// separate normal "Štampaj račun" action was redundant/confusing and has
+// been removed. "Ponovo štampaj račun" is now the ONE normal post-payment
+// print action (always an intentional NEW copy, never the automatic one).
 import React, { act, createElement as h } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,33 +120,46 @@ async function click(text: string) {
 }
 
 describe("BillClient — primary receipt print goes through the Print Agent, never the browser dialog", () => {
-  it("'Štampaj račun' never calls window.print and dispatches the authoritative RECEIPT PrintJob", async () => {
+  // BUG #11 — payment already auto-dispatches the receipt (billing-service.ts/
+  // split-bill-service.ts); a separate normal "Štampaj račun" action next to
+  // it was redundant and confusing. There must be exactly ONE normal
+  // post-payment print action now.
+  it("(A) does NOT expose the redundant 'Štampaj račun' action", async () => {
     await mount();
-    await click("Štampaj račun");
+    const button = [...host.querySelectorAll("button")].find((b) => b.textContent === "Štampaj račun");
+    expect(button).toBeUndefined();
+  });
+
+  it("(B) exposes exactly one normal print action: 'Ponovo štampaj račun'", async () => {
+    await mount();
+    const button = [...host.querySelectorAll("button")].find((b) => b.textContent === "Ponovo štampaj račun");
+    expect(button).toBeTruthy();
+  });
+
+  it("'Ponovo štampaj račun' never calls window.print and dispatches the reprint endpoint (fresh idempotency key)", async () => {
+    await mount();
+    await click("Ponovo štampaj račun");
 
     expect(windowPrint).not.toHaveBeenCalled();
-    const dispatchCalls = fetchMock.mock.calls.filter(([url, opts]) => url === "/api/pos/orders/order-1/receipt/print" && opts?.method === "POST");
+    const dispatchCalls = fetchMock.mock.calls.filter(([url, opts]) => url === "/api/pos/orders/order-1/receipt/reprint" && opts?.method === "POST");
     expect(dispatchCalls).toHaveLength(1);
+    const body = JSON.parse((dispatchCalls[0][1] as RequestInit).body as string);
+    expect(typeof body.idempotencyKey).toBe("string");
+    expect(body.idempotencyKey.length).toBeGreaterThan(0);
     // Never the browser-transport claim/start/confirm sequence.
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/print-jobs/job-1/begin"))).toBe(false);
-  });
-
-  it("shows immediate 'Šaljem na štampač…' feedback, then 'Račun poslat na štampu' once dispatched — never blocking on physical print", async () => {
-    await mount();
-    const button = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Štampaj račun"))!;
-    await act(async () => {
-      button.click();
-    });
     expect(host.textContent).toContain("Račun poslat na štampu");
   });
 
-  it("'Ponovo štampaj' dispatches the reprint endpoint and also never opens the browser print dialog", async () => {
+  it("two separate clicks on 'Ponovo štampaj račun' each dispatch their own reprint request", async () => {
     await mount();
-    await click("Ponovo štampaj");
+    await click("Ponovo štampaj račun");
+    await click("Ponovo štampaj račun");
 
-    expect(windowPrint).not.toHaveBeenCalled();
-    expect(fetchMock.mock.calls.some(([url, opts]) => url === "/api/pos/orders/order-1/receipt/reprint" && opts?.method === "POST")).toBe(true);
-    expect(host.textContent).toContain("Račun poslat na štampu");
+    const dispatchCalls = fetchMock.mock.calls.filter(([url, opts]) => url === "/api/pos/orders/order-1/receipt/reprint" && opts?.method === "POST");
+    expect(dispatchCalls).toHaveLength(2);
+    const keys = dispatchCalls.map(([, opts]) => JSON.parse((opts as RequestInit).body as string).idempotencyKey);
+    expect(keys[0]).not.toBe(keys[1]); // a genuinely new click is a genuinely new intent
   });
 
   it("the browser-print fallback is secondary, requires an existing PrintJob, and DOES use window.print when explicitly clicked", async () => {

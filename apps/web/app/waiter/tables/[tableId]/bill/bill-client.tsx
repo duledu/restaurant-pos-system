@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { LogoutButton } from "../../../../../components/ui/LogoutButton";
 import { QuickLockButton } from "../../../../../components/ui/QuickLockButton";
 import { TicketPrintPanel, type TicketContent } from "../../../../../components/printing/TicketPrintPanel";
-import { fetchPrintJobs, printReceipt, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
+import { fetchPrintJobs, reprintReceipt, printAndConfirm, type PrintJob } from "../../../../../lib/print-client";
 
 interface BillItem {
   id: string;
@@ -111,31 +111,18 @@ export function BillClient({ tableId }: { tableId: string }) {
       .catch(() => {});
   }, [result, orderId]);
 
-  // Print Agent physical QA fix — the primary action must NEVER open the
-  // browser's own print dialog (window.print()/BrowserPrintTransport). It
-  // only asks the server to guarantee the authoritative RECEIPT PrintJob
-  // exists (idempotent — safe to call even if payment already auto-dispatched
-  // it, and safe to retry/double-click); the already-running Windows Print
-  // Agent claims and physically prints it independently, on its own poll
-  // loop, on whatever computer its RECEIPT route points to. This call never
-  // waits for that physical print to finish — only for the dispatch itself.
-  async function handlePrint() {
-    if (!orderId || printBusy) return;
-    setPrintBusy(true);
-    setPrintError(null);
-    setPrintFeedback("Šaljem na štampač…");
-    try {
-      const job = await printReceipt(orderId);
-      setPrintJob(job);
-      setPrintFeedback("Račun poslat na štampu");
-    } catch (e) {
-      setPrintFeedback(null);
-      setPrintError(e instanceof Error ? e.message : "Greška pri štampi");
-    } finally {
-      setPrintBusy(false);
-    }
-  }
-
+  // BUG #11/#12 — this is now the ONE normal post-payment print action
+  // ("Ponovo štampaj račun"). Payment already auto-dispatches the original
+  // RECEIPT PrintJob server-side (billing-service.ts/split-bill-service.ts),
+  // so a separate "Štampaj račun" primary action was redundant; this button
+  // is always an intentional, explicit NEW copy. Never opens the browser's
+  // own print dialog — only asks the server to create a fresh reprint
+  // PrintJob (a NEW dispatchKey per genuine click, see reprintReceipt); the
+  // already-running Windows Print Agent claims and physically prints it
+  // independently, same silent flow as the automatic receipt (see BUG #11/
+  // #12 fix in print-service.ts dispatchReceiptPrintJob — reprints are now
+  // Agent-claimable whenever a live Agent owns this RECEIPT route). This
+  // call never waits for that physical print to finish — only for dispatch.
   async function handleReprint() {
     if (!orderId || printBusy) return;
     setPrintBusy(true);
@@ -259,22 +246,20 @@ export function BillClient({ tableId }: { tableId: string }) {
           )}
           {printError && <div className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{printError}</div>}
 
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={handlePrint}
-              disabled={printBusy}
-              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
-            >
-              {printBusy ? "…" : "Štampaj račun"}
-            </button>
+          {/* BUG #11 — payment already triggers an automatic receipt print
+              (see billing-service.ts/split-bill-service.ts dispatching
+              dispatchReceiptPrintJob with isReprint:false); a separate
+              "Štampaj račun" action here was redundant and confusing right
+              next to it. This is now the ONE normal post-payment print
+              action — an intentional NEW physical copy. */}
+          <div className="mt-4">
             <button
               type="button"
               onClick={handleReprint}
               disabled={printBusy}
-              className="rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
+              className="w-full rounded-md border-2 border-line bg-white py-3 text-sm font-semibold text-ink disabled:opacity-40"
             >
-              Ponovo štampaj
+              {printBusy ? "…" : "Ponovo štampaj račun"}
             </button>
           </div>
 

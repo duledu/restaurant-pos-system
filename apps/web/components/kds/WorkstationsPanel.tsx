@@ -245,6 +245,18 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [justCreatedCode, setJustCreatedCode] = useState<{ pairingId: string; code: string; expiresAt: string } | null>(null);
+  // Admin re-pair dead-end fix — "Ponovo upari"/"Novi kod" are clicked from
+  // a workstation card or the pending-pairings list, both BELOW where this
+  // panel renders; without this it can reveal a code off-screen above the
+  // current scroll position, looking identical to "nothing happened".
+  const justCreatedCodeRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    // jsdom (unit tests) has no scrollIntoView implementation — guard so
+    // this stays a pure visual nicety in real browsers, never a crash risk.
+    if (justCreatedCode && typeof justCreatedCodeRef.current?.scrollIntoView === "function") {
+      justCreatedCodeRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [justCreatedCode?.pairingId]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [downloadInfo, setDownloadInfo] = useState<AgentDownloadInfo | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -491,23 +503,40 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     }
   }
 
-  async function createPairing() {
-    if (!locationId) return;
+  // Admin re-pair dead-end fix — the backend already returns everything
+  // needed (a one-time-reveal raw pairing code; only its hash is ever
+  // persisted, see workstation-service.ts hashPairingCode/codeHash, so a
+  // lost code can never be looked back up — a fresh one must be created).
+  // This is the ONE place that actually calls POST /pairings and reveals
+  // the code; createPairing() (the "Dodaj računar" button) and rePair()/
+  // regeneratePairing() (below) now all go through it, instead of rePair
+  // previously only pre-filling a form and leaving the actual creation to
+  // a second, easy-to-miss click.
+  async function createPairingFor(name: string | undefined) {
+    if (!locationId) return null;
     setCreating(true);
     setError(null);
     try {
       const res = await apiFetch("/api/admin/workstations/pairings", {
         method: "POST",
-        body: JSON.stringify({ locationId, name: newName.trim() || undefined }),
+        body: JSON.stringify({ locationId, name: name?.trim() || undefined }),
       });
       setJustCreatedCode({ pairingId: res.pairing.pairingId, code: res.pairing.code, expiresAt: res.pairing.expiresAt });
-      setNewName("");
-      setShowAddForm(false);
       await load();
+      return res.pairing;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Greška pri kreiranju uparivanja");
+      return null;
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function createPairing() {
+    const created = await createPairingFor(newName);
+    if (created) {
+      setNewName("");
+      setShowAddForm(false);
     }
   }
 
@@ -541,6 +570,27 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
     } finally {
       setBusyId(null);
     }
+  }
+
+  // Admin re-pair dead-end fix — a pending pairing whose one-time code was
+  // already shown (and then lost — e.g. an Admin page refresh; justCreatedCode
+  // is plain React state, never persisted) has NO way to recover that exact
+  // code (only its hash is stored server-side). The only safe recovery is a
+  // fresh code: cancel the old session, immediately create a new one for the
+  // same name/location. Uses the SAME create/cancel endpoints already used
+  // elsewhere on this page — no pairing-protocol change.
+  async function regeneratePairing(p: PendingPairing) {
+    setBusyId(p.id);
+    setError(null);
+    try {
+      await apiFetch(`/api/admin/workstations/pairings/${p.id}`, { method: "DELETE" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Greška pri otkazivanju starog koda");
+      setBusyId(null);
+      return;
+    }
+    setBusyId(null);
+    await createPairingFor(p.name ?? undefined);
   }
 
   async function revoke(id: string) {
@@ -581,15 +631,23 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   }
 
   // "Ponovo upari" ne dira postojeći red (agent zadržava stari kredencijal
-  // dok se ne opozove) — samo unapred popunjava formu za NOVO uparivanje
-  // istim nazivom, korisno kad se agent ponovo instalira na istom ili
-  // zamenskom računaru. Rute štampe OSTAJU nepromenjene na postojećem
-  // računaru — ovo samo generiše kod za uspostavljanje NOVOG identiteta
-  // (npr. reinstall), nikad ne menja Kuhinja/Šank/Račun podešavanja.
-  function rePair(w: Workstation) {
-    setNewName(w.name);
-    setShowAddForm(true);
-    setJustCreatedCode(null);
+  // dok se ne opozove) — generiše kod za uspostavljanje NOVOG identiteta
+  // (npr. reinstall), nikad ne menja Kuhinja/Šank/Račun podešavanja na
+  // postojećem računaru, koji ostaje potpuno funkcionalan i "Povezan" dok
+  // se eksplicitno ne opozove ili dok novi agent ne iskoristi ovaj kod.
+  //
+  // Admin re-pair dead-end fix (physical QA finding) — this USED TO only
+  // pre-fill and reveal the "Dodaj računar" form, requiring a second,
+  // easy-to-miss "Generiši kod za uparivanje" click before any code
+  // existed. The result: a pending pairing could exist (visible under
+  // "Uparivanja na čekanju") while the Admin who clicked "Ponovo upari"
+  // never saw a code and had no obvious next step. Now a single click
+  // creates the pairing AND reveals the code immediately, through the
+  // exact same createPairingFor/justCreatedCode panel the "Dodaj računar"
+  // flow already uses — no new mechanism, no backend/protocol change.
+  async function rePair(w: Workstation) {
+    setShowAddForm(false);
+    await createPairingFor(w.name);
   }
 
   // Printing V2 — professional Admin -> Agent pairing handoff. Only works
@@ -1276,7 +1334,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       )}
 
       {justCreatedCode && (
-        <div className="mb-4 rounded-md border border-gold/40 bg-gold-soft p-3">
+        <div ref={justCreatedCodeRef} className="mb-4 rounded-md border border-gold/40 bg-gold-soft p-3">
           <p className="mb-1 text-xs font-semibold text-ink">Kod za uparivanje (unesi na Windows računaru)</p>
           <div className="flex flex-wrap items-center gap-3">
             <p className="font-mono text-2xl font-bold tracking-wider text-ink">{justCreatedCode.code}</p>
@@ -1330,15 +1388,33 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                       <span className="ml-2 text-xs text-inkSoft">
                         {p.location.name} · ističe za {remainingMinutes(p.expiresAt)} min
                       </span>
+                      {/* Admin re-pair dead-end fix — the raw code was only ever
+                          shown once (justCreatedCode, plain client state); it
+                          cannot be looked up again (server keeps a hash, never
+                          the code itself). If it's gone (e.g. Admin was
+                          refreshed), this is the only safe next step. */}
+                      {justCreatedCode?.pairingId !== p.id && (
+                        <p className="mt-0.5 text-xs text-inkSoft">Kod je već prikazan i sklonjen — klikni „Novi kod” za novi.</p>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => cancelPairing(p.id)}
-                      disabled={busyId === p.id}
-                      className="text-xs font-semibold text-danger disabled:opacity-40"
-                    >
-                      Otkaži
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => regeneratePairing(p)}
+                        disabled={busyId === p.id || creating}
+                        className="text-xs font-semibold text-graphite underline disabled:opacity-40"
+                      >
+                        Novi kod
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => cancelPairing(p.id)}
+                        disabled={busyId === p.id}
+                        className="text-xs font-semibold text-danger disabled:opacity-40"
+                      >
+                        Otkaži
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
