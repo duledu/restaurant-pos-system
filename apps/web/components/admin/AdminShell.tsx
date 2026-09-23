@@ -54,12 +54,12 @@ function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onCl
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cream-300/40">Operativni sistem</p>
           <p className="mt-0.5 text-xs text-white/65">Bezbedna administratorska sesija</p>
         </div>
-        <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-2">
-          <p className="text-[10px] text-cream-300/30 tracking-wide">{APP_NAME} · v0.1</p>
-          <div className="flex items-center gap-1">
+        <div className="border-t border-white/10 pt-2">
+          <div className="flex items-center justify-between gap-2">
             <QuickLockButton theme="dark" />
             <LogoutButton theme="dark" />
           </div>
+          <p className="mt-1 px-1 text-[10px] text-cream-300/30 tracking-wide">{APP_NAME} · v0.1</p>
         </div>
       </div>
     </>
