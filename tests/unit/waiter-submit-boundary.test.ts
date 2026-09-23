@@ -20,7 +20,13 @@ const drafts = ['KITCHEN', 'BAR'].map((preparationStation, i) => ({ id: `new-${i
 function transaction() {
   return { orderItem: { findMany: vi.fn().mockResolvedValue(drafts), updateMany: vi.fn() }, menuItem: { findMany: vi.fn() }, orderItemModifier: { findMany: vi.fn().mockResolvedValue([]) }, orderItemStation: { createMany: vi.fn() }, orderEvent: { create: vi.fn() } };
 }
-beforeEach(() => { vi.resetAllMocks(); mocks.db.order.findFirst.mockResolvedValue({ ...order, items: [] }); });
+// P0.6 performance pass — submitOrder now chains .catch() directly onto the
+// dispatchStationPrintJobs call (run concurrently with getOrder() via
+// Promise.all, instead of sequentially) — that only works because the REAL
+// function is async and always returns a Promise. mocks.dispatch is a bare
+// vi.fn(), which returns undefined unless given a resolved value, unlike
+// the real function it replaces.
+beforeEach(() => { vi.resetAllMocks(); mocks.db.order.findFirst.mockResolvedValue({ ...order, items: [] }); mocks.dispatch.mockResolvedValue(undefined); });
 describe('real Submit service boundary with database and dispatch mocked', () => {
   it('commits only selected draft IDs and routes both stations before downstream acknowledgement', async () => {
     const tx = transaction(); let release!: () => void; let transactionFinished!: () => void;

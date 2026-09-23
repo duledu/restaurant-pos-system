@@ -356,16 +356,21 @@ export async function confirmPickup(ctx: AuthContext, orderId: string, itemId: s
     });
     if (advanced.count === 0) throw new Error("Stavka je već preuzeta — osveži prikaz");
 
-    const updatedItem = await tx.orderItem.update({ where: { id: itemId }, data: { status: "SERVED" } });
-
-    await tx.orderEvent.create({
-      data: {
-        orderId,
-        type: "order_item.picked_up",
-        createdBy: ctx.employeeId,
-        payload: { itemId, name: item.name },
-      },
-    });
+    // P0.6 performance pass — same independent-writes pattern already fixed
+    // in advanceItemStatus above: neither write reads the other's result
+    // (orderEvent's payload uses the ALREADY-read `item.name` from above,
+    // not updatedItem), so they're sent concurrently instead of sequentially.
+    const [updatedItem] = await Promise.all([
+      tx.orderItem.update({ where: { id: itemId }, data: { status: "SERVED" } }),
+      tx.orderEvent.create({
+        data: {
+          orderId,
+          type: "order_item.picked_up",
+          createdBy: ctx.employeeId,
+          payload: { itemId, name: item.name },
+        },
+      }),
+    ]);
 
     return updatedItem;
   });

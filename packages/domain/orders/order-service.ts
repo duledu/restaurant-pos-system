@@ -679,22 +679,28 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
         })
       : order;
 
-    await tx.orderEvent.create({
-      data: {
-        orderId,
-        type: isFirstSubmission ? "order_submitted" : "order_items_resubmitted",
-        createdBy: ctx.employeeId,
-        payload: { itemCount: items.length, itemIds: draftItemIds },
-      },
-    });
-
-    await recordAuditEntry(ctx, {
-      entityType: "Order",
-      entityId: orderId,
-      action: isFirstSubmission ? "order.submitted" : "order.items_resubmitted",
-      newValue: { itemCount: items.length, itemIds: draftItemIds },
-      locationId: order.locationId,
-    }, tx);
+    // P0.6 performance pass — orderEvent and the audit log entry are two
+    // independent inserts into two different tables; neither reads the
+    // other's result. Sent concurrently instead of sequentially, same
+    // pattern already established above for menuItem/orderItemModifier
+    // reads in this same transaction.
+    await Promise.all([
+      tx.orderEvent.create({
+        data: {
+          orderId,
+          type: isFirstSubmission ? "order_submitted" : "order_items_resubmitted",
+          createdBy: ctx.employeeId,
+          payload: { itemCount: items.length, itemIds: draftItemIds },
+        },
+      }),
+      recordAuditEntry(ctx, {
+        entityType: "Order",
+        entityId: orderId,
+        action: isFirstSubmission ? "order.submitted" : "order.items_resubmitted",
+        newValue: { itemCount: items.length, itemIds: draftItemIds },
+        locationId: order.locationId,
+      }, tx),
+    ]);
 
     return { order: updatedOrder, draftItemIds };
   }, TX_OPTIONS);
@@ -723,14 +729,27 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
   // unazadna kompatibilnost), a za NAREDNE krugove je idempotencyKey OVOG
   // zahteva — različit ključ = odvojen, nov tiket po krugu; isti ključ na
   // retry = isti tiket, nikad dupliran.
-  try {
-    await dispatchStationPrintJobs(ctx, orderId, {
+  //
+  // P0.6 performance pass — this dispatch and the final getOrder() re-read
+  // below used to run SEQUENTIALLY, but neither depends on the other's
+  // result: dispatchStationPrintJobs writes PrintJob rows only (a separate
+  // dispatch-tracking table, never a source of truth for Order/OrderItem
+  // data — see the file-level doc comment on print-service.ts), and
+  // getOrder() only reads Order/OrderItem/table state, which this dispatch
+  // never touches. Running them concurrently keeps the exact same
+  // "print failure never blocks the order response" behavior (the .catch
+  // below still swallows a dispatch failure into `undefined`, same as the
+  // previous try/catch) while removing one full sequential wait from the
+  // Send response — this was the single largest remaining wait in the Send
+  // pipeline once the request reaches the server.
+  const [, freshOrder] = await Promise.all([
+    dispatchStationPrintJobs(ctx, orderId, {
       orderItemIds: submitted.draftItemIds,
       dispatchKeySuffix: isFirstSubmission ? undefined : input.idempotencyKey,
-    });
-  } catch (err) {
-    console.error("[printing] dispatchStationPrintJobs failed for order", orderId, err);
-  }
-
-  return getOrder(ctx, orderId);
+    }).catch((err) => {
+      console.error("[printing] dispatchStationPrintJobs failed for order", orderId, err);
+    }),
+    getOrder(ctx, orderId),
+  ]);
+  return freshOrder;
 }

@@ -151,6 +151,53 @@ describe("multi-round ordering: submit semantics", () => {
     expect(round2Omlet.submittedAt?.getTime()).toBe(round1Omlet.submittedAt?.getTime());
   });
 
+  // P0.6 performance pass — submitOrder now writes the orderEvent row and
+  // the audit log entry concurrently (Promise.all) instead of sequentially,
+  // since neither reads the other's result. This proves both independent
+  // writes still land correctly for BOTH the first submission and a later
+  // round, not just one of them silently dropped by the concurrency change.
+  it("both the orderEvent and the audit log entry are recorded for every round, first and subsequent", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const { order } = await openAndSubmit(fixture, waiter, fixture.omletId, 2);
+
+    const round1Events = await prisma.orderEvent.findMany({ where: { orderId: order.id, type: "order_submitted" } });
+    const round1Audit = await prisma.auditLog.findMany({ where: { entityId: order.id, action: "order.submitted" } });
+    expect(round1Events).toHaveLength(1);
+    expect(round1Audit).toHaveLength(1);
+
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.biftekId, quantity: 1 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    const round2Events = await prisma.orderEvent.findMany({ where: { orderId: order.id, type: "order_items_resubmitted" } });
+    const round2Audit = await prisma.auditLog.findMany({ where: { entityId: order.id, action: "order.items_resubmitted" } });
+    expect(round2Events).toHaveLength(1);
+    expect(round2Audit).toHaveLength(1);
+  });
+
+  // P0.6 performance pass — the PrintJob dispatch and the final getOrder()
+  // re-read at the end of submitOrder now run concurrently instead of
+  // sequentially (neither depends on the other — PrintJob is a separate
+  // dispatch-tracking table, never a source of truth for Order/OrderItem
+  // data). This proves the returned order still carries full item data
+  // AND the PrintJob is still durably created before submitOrder resolves,
+  // not a race where the response could return before the print job exists.
+  it("the returned order has full item data and the PrintJob is durably created before submitOrder resolves", async () => {
+    const fixture = await createFixture();
+    const waiter = context(fixture, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: fixture.tableId });
+    await orders.addItem(waiter, order.id, { menuItemId: fixture.omletId, quantity: 2 });
+
+    const result = await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].menuItemId).toBe(fixture.omletId);
+    expect(result.items[0].status).toBe("SUBMITTED");
+    // No race: by the time submitOrder's promise resolves, the job already exists.
+    const jobs = await prisma.printJob.findMany({ where: { orderId: order.id, type: "KITCHEN" } });
+    expect(jobs).toHaveLength(1);
+  });
+
   it("increasing quantity of an already-submitted item is rejected; a repeat add creates a separate new DRAFT row instead", async () => {
     const fixture = await createFixture();
     const waiter = context(fixture, "WAITER", "waiter-1");
