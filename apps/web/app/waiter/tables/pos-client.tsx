@@ -53,12 +53,24 @@ function tileStyle(table: Table, isMine: boolean, hasReady: boolean): string {
   }
 }
 
+// P0.6 finding #4 — the table CARD (not just the post-tap blocked-table
+// modal, already fixed) should say WHO before the waiter even taps. First
+// name only, on purpose: the card grid goes down to 2 columns on mobile
+// (see the grid className below), and a first name reads safely at that
+// width where a full "Ime Prezime" risks fighting the card for space even
+// with truncation. The modal after a tap keeps using the fuller
+// activeOrderOwnerName directly — this is a card-only concession.
+function ownerFirstName(fullName: string): string {
+  return fullName.trim().split(/\s+/)[0] ?? fullName;
+}
+
 function statusLabel(table: Table, isMine: boolean): string {
   switch (table.status) {
     case "FREE":
       return "Slobodan";
     case "OCCUPIED":
-      return isMine ? "Tvoj sto" : "Zauzeo kolega";
+      if (isMine) return "Tvoj sto";
+      return table.activeOrderOwnerName ? `Zauzeo: ${ownerFirstName(table.activeOrderOwnerName)}` : "Zauzeo kolega";
     case "AWAITING_BILL":
       return "Čeka račun";
     case "NEEDS_CLEANING":
@@ -304,7 +316,10 @@ export function PosClient() {
                   <span className={`absolute right-3 top-3 h-2 w-2 rounded-full ${STATUS_DOT[table.status]}`} aria-hidden="true" />
                   <span className="text-2xl font-bold tracking-tight">{table.label}</span>
                   <span>
-                    <span className="block text-xs font-semibold opacity-80">{statusLabel(table, isMine)}</span>
+                    {/* truncate (overflow-hidden + ellipsis + nowrap) is a
+                        safety net, not the primary defense — ownerFirstName
+                        above already keeps this short in the normal case. */}
+                    <span className="block truncate text-xs font-semibold opacity-80">{statusLabel(table, isMine)}</span>
                     {hasReady ? (
                       <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-gold px-2 py-0.5 text-[11px] font-bold text-white">
                         {table.readyItems.length} spremno

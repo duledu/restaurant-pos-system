@@ -445,6 +445,39 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     // mount, without re-subscribing on every subsequent order update.
   }, [hasOrder]);
 
+  // P0.6 finding #5 — mobile-only collapse for the current-order panel; see
+  // orderPanelRef effect below for why this is decoupled from draft state.
+  // Desktop (xl:) ignores this entirely via CSS (the panel there is a
+  // permanent side column, never a fixed bottom overlay) — see the
+  // className split on the panel below.
+  const [draftExpanded, setDraftExpanded] = useState(false);
+  const orderPanelRef = useRef<HTMLDivElement>(null);
+  // P0.6 finding #5 — root cause of "draft panel covers the menu": the page
+  // reserved a STATIC pb-[28rem] (448px) for this fixed-bottom panel, but
+  // the panel's own real max-h is min(62dvh,34rem) = up to 544px BEFORE
+  // even adding its header/footer/button chrome — i.e. the reservation was
+  // smaller than the panel could actually grow to, so on a real phone with
+  // enough draft items the panel's bottom edge sat below the reserved
+  // padding and covered the last menu rows no amount of page-scrolling
+  // could get past. Same fix pattern as --waiter-header-h above: measure
+  // the ACTUAL rendered panel (collapsed bar OR expanded sheet, whichever
+  // is showing) via ResizeObserver and reserve exactly that, instead of a
+  // guessed constant. This one mechanism also automatically solves the
+  // collapse/expand case for free — collapsing the panel changes its real
+  // offsetHeight, so the reserved page padding shrinks with it, no extra
+  // logic needed.
+  useLayoutEffect(() => {
+    const panelEl = orderPanelRef.current;
+    const rootEl = rootRef.current;
+    if (!panelEl || !rootEl) return;
+    const sync = () => rootEl.style.setProperty("--waiter-order-panel-h", `${panelEl.offsetHeight}px`);
+    sync();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(sync);
+    observer.observe(panelEl);
+    return () => observer.disconnect();
+  }, [hasOrder, draftExpanded]);
+
   const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
   const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
@@ -905,14 +938,15 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   const { historyItems: sentItems, hasEverSubmitted, draftItems, readyItems, draftCount, draftTotal } = view;
   const allServed = sentItems.length > 0 && sentItems.every((i) => i.status === "SERVED" || i.status === "CANCELLED");
 
-  // pb-[28rem]: rezervisan prostor na dnu STRANICE (ne panela) da meni-grid
-  // ne završi vizuelno ispod fiksnog panela — mora biti VEĆI od panelovog
-  // realnog max-h (min(62dvh,34rem)) plus header/footer da bi poslednji red
-  // menija ostao dostižan skrolom stranice čak i kad je panel pun. Nepotrebno
-  // (i pogrešno) na desktop split-view-u (xl:) — panel tamo više nije fiksni
-  // preklop preko dna stranice, već sticky desna kolona pored menija.
+  // P0.6 finding #5 — was a static pb-[28rem] that could be SMALLER than
+  // the panel's own real max height (see the orderPanelRef effect above for
+  // the full explanation); now reserves exactly the panel's measured
+  // height, with a collapsed-bar-sized fallback (7rem) for the brief window
+  // before the effect first runs. Unnecessary (and previously actively
+  // wrong) on desktop split-view (xl:) — the panel there is a sticky column
+  // beside the menu, never a fixed overlay under it.
   return (
-    <div ref={rootRef} className="flex min-h-screen flex-col bg-cream-200 pb-[28rem] xl:pb-0">
+    <div ref={rootRef} className="flex min-h-screen flex-col bg-cream-200 pb-[var(--waiter-order-panel-h,7rem)] xl:pb-0">
       <div ref={headerRef} className="sticky top-0 z-20 border-b border-line bg-white/95 px-3 py-2.5 shadow-card backdrop-blur">
         <button onClick={goToTables} className="mb-1 inline-flex min-h-11 items-center text-xs font-semibold text-gold-dark transition-colors hover:text-gold">
           ← Stolovi
@@ -1106,8 +1140,66 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           nema tu granicu. min-w/max-w garantuju čitljivu širinu
           (naziv/količina/cena/total) na bilo kojoj desktop rezoluciji —
           nikad se ne skuplja ispod min-w bez obzira na flex-shrink. */}
-      <div className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:static xl:inset-auto xl:h-full xl:max-h-none xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
-        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line bg-cream-200/70 px-3 py-2.5 xl:mx-0 xl:max-w-none xl:rounded-t-lg"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p><span className="rounded-full bg-ink/[.07] px-2.5 py-1 text-xs font-semibold tabular-nums text-ink/80">{draftCount} stavki</span></div>
+      <div ref={orderPanelRef} className="fixed bottom-0 left-0 right-0 z-20 flex max-h-[min(62dvh,34rem)] flex-col border-t border-line bg-white shadow-[0_-12px_32px_rgba(10,25,49,.12)] xl:static xl:inset-auto xl:h-full xl:max-h-none xl:w-[32%] xl:min-w-[320px] xl:max-w-[420px] xl:shrink-0 xl:flex-[32] xl:rounded-lg xl:border xl:border-line xl:shadow-card">
+        {/* P0.6 finding #5 — compact collapsed bar, MOBILE ONLY (xl:hidden;
+            desktop's panel is a permanent side column and has no collapsed
+            state at all). This is the default state so the menu — the
+            primary item-selection surface — stays fully reachable
+            regardless of how many items are in the draft. The whole row is
+            the tap target, not just a small chevron, per the touch-target
+            requirement; live count/total update here even while collapsed
+            since they read the same draft state as the expanded view. */}
+        {!draftExpanded && (
+          <button
+            type="button"
+            onClick={() => setDraftExpanded(true)}
+            aria-label="Otvori tekuću porudžbinu"
+            className="mx-auto flex min-h-14 w-full max-w-5xl items-center justify-between gap-3 px-4 py-2.5 text-left active:bg-ink/[.03] xl:hidden"
+          >
+            <span>
+              <span className="block text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</span>
+              <span className="block text-sm font-semibold text-ink">
+                {draftCount > 0 ? `${draftCount} stavki` : hasEverSubmitted ? "Nema novih stavki" : "Nema stavki još"}
+              </span>
+            </span>
+            <span className="flex items-center gap-2">
+              {draftCount > 0 && (
+                <span className="text-lg font-bold tabular-nums tracking-tight text-ink">
+                  {draftTotal.toFixed(2)} <span className="text-xs font-semibold text-inkSoft">RSD</span>
+                </span>
+              )}
+              <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0 text-ink/50">
+                <path d="m5 12 5-5 5 5" />
+              </svg>
+            </span>
+          </button>
+        )}
+        {/* Full panel — expanded on mobile (draftExpanded), always shown on
+            desktop (xl:flex regardless of draftExpanded, which mobile-only
+            state never even changes on a desktop-width session). min-h-0
+            lets it shrink within the outer max-h so the items list below
+            (itself flex-1 min-h-0 overflow-y-auto, unchanged) keeps getting
+            its own internal scroll instead of growing the whole panel. */}
+        <div className={`${draftExpanded ? "flex" : "hidden"} min-h-0 w-full flex-1 flex-col xl:flex`}>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-b border-line bg-cream-200/70 px-3 py-2.5 xl:mx-0 xl:max-w-none xl:rounded-t-lg">
+          <p className="text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Tekuća porudžbina</p>
+          <span className="flex items-center gap-1">
+            <span className="rounded-full bg-ink/[.07] px-2.5 py-1 text-xs font-semibold tabular-nums text-ink/80">{draftCount} stavki</span>
+            {/* Collapse control — mobile only (xl:hidden); desktop's panel
+                is permanent, collapsing it is not a concept there. A real
+                44px-ish tap target, not a bare icon glyph. */}
+            <button
+              type="button"
+              onClick={() => setDraftExpanded(false)}
+              aria-label="Sakrij tekuću porudžbinu"
+              className="flex h-9 w-9 items-center justify-center rounded-full text-ink/50 active:bg-ink/[.06] xl:hidden"
+            >
+              <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                <path d="m5 8 5 5 5-5" />
+              </svg>
+            </button>
+          </span>
+        </div>
         {/* overscroll-contain sprečava da skrol "procuri" na stranicu iza;
             -webkit-overflow-scrolling: touch je neophodan na starijem iOS
             Safari-ju da bi ugnježdeni overflow-y-auto UNUTAR position:fixed
@@ -1153,6 +1245,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
               {releasingTable ? "Oslobađanje…" : "Oslobodi sto"}
             </button>
           )}
+        </div>
         </div>
       </div>
       </div>

@@ -958,4 +958,91 @@ describe("P0.6 findings", () => {
     expect(routerPrefetch).toHaveBeenCalledWith("/waiter/tables/5");
     expect(routerPush).not.toHaveBeenCalled();
   });
+
+  // Real-device follow-up — Finding #4: the TABLE CARD itself (not just the
+  // blocked-tap modal from the tests above) must name the colleague, first
+  // name only (card grid goes down to 2 columns on mobile).
+  it("the table card shows the colleague's first name, not just the blocked-tap modal", async () => {
+    // status: "OCCUPIED" is required too — statusLabel's "Zauzeo"/"Tvoj sto"
+    // branch reads table.status, independently of activeOrderOwnerId (which
+    // only drives the tap-blocking check). The base fixture defaults both
+    // tables to "FREE" for the pre-existing modal tests above, which don't
+    // care about status at all.
+    custom = url => url.startsWith("/api/pos/tables") ? response({
+      floors: [{ ...floors[0], tables: [floors[0].tables[0], { ...floors[0].tables[1], status: "OCCUPIED", activeOrderOwnerId: "e2", activeOrderOwnerName: "Marko Jovanović" }] }],
+    }) : undefined;
+    await render(h(PosClient));
+    const card = [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Table 12"));
+    expect(card?.textContent).toContain("Zauzeo: Marko");
+    expect(card?.textContent).not.toContain("Jovanović");
+  });
+
+  it("the table card falls back to 'Zauzeo kolega' when the owner's name isn't resolvable, never a raw ID", async () => {
+    custom = url => url.startsWith("/api/pos/tables") ? response({
+      floors: [{ ...floors[0], tables: [floors[0].tables[0], { ...floors[0].tables[1], status: "OCCUPIED", activeOrderOwnerId: "e2", activeOrderOwnerName: null }] }],
+    }) : undefined;
+    await render(h(PosClient));
+    const card = [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Table 12"));
+    expect(card?.textContent).toContain("Zauzeo kolega");
+    expect(card?.textContent).not.toContain("e2");
+  });
+
+  it("the current waiter's own table card never shows a colleague label", async () => {
+    // Default fixture table "5" is already owned by "e1" (the logged-in
+    // employee); only status needs overriding to OCCUPIED for this check.
+    custom = url => url.startsWith("/api/pos/tables") ? response({
+      floors: [{ ...floors[0], tables: [{ ...floors[0].tables[0], status: "OCCUPIED" }, floors[0].tables[1]] }],
+    }) : undefined;
+    await render(h(PosClient));
+    const card = [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Table 5"));
+    expect(card?.textContent).toContain("Tvoj sto");
+    expect(card?.textContent).not.toContain("Zauzeo");
+  });
+
+  // Finding #5 — mobile current-order panel must not permanently cover the
+  // menu. The compact bar is a real JS conditional ({!draftExpanded && ...}),
+  // so its presence/absence in the DOM is a reliable signal of the actual
+  // draftExpanded state (unlike the always-mounted, CSS-only-hidden
+  // expanded wrapper, which jsdom's lack of real layout can't distinguish).
+  it("the mobile order panel starts collapsed as soon as an item is added, and expands on tap", async () => {
+    // The shared order() fixture already ships one DRAFT "Coffee" line by
+    // default; clicking Coffee here adds a second, so the count is 2.
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Coffee");
+    const openBar = host.querySelector('[aria-label="Otvori tekuću porudžbinu"]');
+    expect(openBar).toBeTruthy();
+    expect(openBar!.textContent).toContain("2 stavki");
+    await labelClick("Otvori tekuću porudžbinu");
+    expect(host.querySelector('[aria-label="Otvori tekuću porudžbinu"]')).toBeFalsy();
+  });
+
+  it("collapsing the expanded panel returns the compact bar without losing the draft or the menu", async () => {
+    await render(h(OrderClient, { tableId: "5" }));
+    await click("Coffee");
+    await labelClick("Otvori tekuću porudžbinu");
+    // Draft item controls remain reachable and functional while expanded —
+    // same Instant Local Draft handlers as before this change (P0.6 must
+    // not introduce a server call for +/-/remove/expand/collapse).
+    expect(host.textContent).toContain("Coffee");
+    await labelClick("Sakrij tekuću porudžbinu");
+    const openBar = host.querySelector('[aria-label="Otvori tekuću porudžbinu"]');
+    expect(openBar).toBeTruthy();
+    expect(openBar!.textContent).toContain("2 stavki"); // draft state survived the round-trip
+    // The menu itself was never remounted/removed — same DOM, same item.
+    expect(host.textContent).toContain("Coffee");
+  });
+
+  it("an empty draft's compact bar reads as empty, not '0 stavki'", async () => {
+    // The shared `order()` fixture ships with one DRAFT "Coffee" line by
+    // default (used by most other tests in this file); override with a
+    // genuinely empty item list for this one.
+    custom = url => url === "/api/pos/orders/o5" ? response({ table: { id: "5", locationId: "l1" }, order: { ...order("5"), items: [] } }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    const openBar = host.querySelector('[aria-label="Otvori tekuću porudžbinu"]');
+    // order() fixture's base status is SUBMITTED, so hasEverSubmitted is
+    // true here even with an empty items override — the realistic "already
+    // sent a round, nothing new drafted yet" case, same wording the full
+    // panel already used for this state before this change.
+    expect(openBar!.textContent).toContain("Nema novih stavki");
+  });
 });
