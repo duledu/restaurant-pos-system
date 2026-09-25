@@ -164,19 +164,22 @@ export function RecipeModal({
         className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-lg sm:rounded-lg"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h2 className="text-lg font-bold text-ink">
-            Normativ — {item.name}
-            {readOnly && <span className="ml-2 align-middle text-xs font-normal text-ink/40">(samo za pregled)</span>}
-          </h2>
-          <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        <div className="border-b border-line px-5 py-4">
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="text-lg font-bold text-ink">
+              Normativ — {item.name}
+              {readOnly && <span className="ml-2 align-middle text-xs font-normal text-ink/40">(samo za pregled)</span>}
+            </h2>
+            <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+          </div>
+          <p className="mt-0.5 text-xs text-ink/50">Koliko sirovine se troši po JEDNOJ prodatoj jedinici ovog artikla.</p>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
         {loading ? (
           <p className="text-sm text-inkSoft">Učitavanje…</p>
         ) : lines.length === 0 ? (
-          <p className="mb-3 text-sm text-inkSoft">Normativ nije definisan.</p>
+          <p className="mb-3 text-sm text-inkSoft">Normativ još nije definisan — dodajte prvi sastojak ispod.</p>
         ) : (
           <>
             {/* Mobile: stacked cards — a 4-column table doesn't fit a phone. */}
@@ -256,14 +259,13 @@ export function RecipeModal({
           </p>
         ) : (
           <div className="rounded-md border border-line bg-cream-100 p-3">
-            <p className="mb-2 text-xs font-semibold text-ink">Dodaj sirovinu</p>
             <div className="flex flex-col gap-2">
               <select
-                className="w-full rounded-sm border border-line px-2 py-2 text-sm"
+                className="w-full rounded-md border border-line px-2 py-2 text-sm"
                 value={ingredientId}
                 onChange={(e) => onSelectIngredient(e.target.value)}
               >
-                <option value="">Sirovina…</option>
+                <option value="">Izaberite sirovinu…</option>
                 {ingredients.map((i) => (
                   <option key={i.id} value={i.id}>{i.name} ({UNIT_LABELS_SR[i.unit] ?? i.unit})</option>
                 ))}
@@ -276,17 +278,17 @@ export function RecipeModal({
                   placeholder="Količina"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
-                  className="w-24 rounded-sm border border-line px-2 py-2 text-sm"
+                  className="w-24 rounded-md border border-line px-2 py-2 text-sm"
                 />
                 {unitOptions.length > 1 ? (
-                  <select value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="rounded-sm border border-line px-2 py-2 text-sm">
+                  <select value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="rounded-md border border-line px-2 py-2 text-sm">
                     {unitOptions.map((u) => <option key={u} value={u}>{UNIT_LABELS_SR[u] ?? u}</option>)}
                   </select>
                 ) : selectedIngredient ? (
                   <span className="flex items-center px-1 text-sm text-ink/60">{UNIT_LABELS_SR[selectedIngredient.unit] ?? selectedIngredient.unit}</span>
                 ) : null}
-                <button onClick={addLine} className="min-h-11 flex-1 rounded-sm bg-gold px-3 py-2 text-sm font-medium text-white hover:bg-gold-dark sm:flex-none">
-                  Sačuvaj
+                <button onClick={addLine} className="min-h-11 flex-1 rounded-md bg-gold px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-gold-dark sm:flex-none">
+                  + Dodaj sastojak
                 </button>
               </div>
             </div>
@@ -308,15 +310,28 @@ export function RecipeButton({
   item,
   onChanged,
   readOnly = false,
+  emphasis = false,
 }: {
   item: { id: string; name: string };
   onChanged?: () => void;
   readOnly?: boolean;
+  /** Phase 2.5: filled pill when this is the item's active tracking method
+   * (RECIPE), quiet text link otherwise — same access path either way, just
+   * visual weight matching relevance (reduces row noise without hiding it). */
+  emphasis?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button onClick={() => setOpen(true)} className="text-ink/65 transition-colors hover:text-ink" title={readOnly ? "Normativ (pregled)" : "Normativ (receptura)"}>
+      <button
+        onClick={() => setOpen(true)}
+        className={
+          emphasis
+            ? "rounded-full bg-gold-soft px-2.5 py-1 font-medium text-gold-dark transition-colors hover:bg-gold/20"
+            : "text-ink/55 transition-colors hover:text-ink"
+        }
+        title={readOnly ? "Normativ (pregled)" : "Normativ (receptura)"}
+      >
         {readOnly ? "Normativ (pregled)" : "Normativ"}
       </button>
       {open && <RecipeModal item={item} onClose={() => setOpen(false)} onChanged={onChanged} readOnly={readOnly} />}

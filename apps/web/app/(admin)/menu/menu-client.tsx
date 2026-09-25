@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { RecipeButton } from "../../../components/admin/RecipeModal";
+import { RecipeButton, RecipeModal } from "../../../components/admin/RecipeModal";
 
 interface Category {
   id: string;
@@ -30,10 +30,21 @@ interface MenuItem {
   inventoryTrackingMethod: "NO_TRACKING" | "DIRECT_STOCK" | "RECIPE";
 }
 
+// Phase 2.5 UX polish — shortened from "Gotov proizvod / direktno stanje" /
+// "Receptura / normativ" (the long forms were truncating in the table
+// column during real PREPROD QA). Enum values themselves are unchanged.
 const TRACKING_METHOD_LABEL: Record<MenuItem["inventoryTrackingMethod"], string> = {
   NO_TRACKING: "Ne prati zalihe",
-  DIRECT_STOCK: "Gotov proizvod / direktno stanje",
-  RECIPE: "Receptura / normativ",
+  DIRECT_STOCK: "Direktno stanje",
+  RECIPE: "Normativ",
+};
+
+// Phase 2.5 UX polish — the tracking-method control reads as a status badge
+// (color communicates state at a glance), not a plain grey form control.
+const TRACKING_METHOD_BADGE: Record<MenuItem["inventoryTrackingMethod"], string> = {
+  NO_TRACKING: "border-line bg-cream-200 text-ink/55",
+  DIRECT_STOCK: "border-info/30 bg-info-soft text-info",
+  RECIPE: "border-gold/40 bg-gold-soft text-gold-dark",
 };
 
 const STATION_LABEL: Record<MenuItem["preparationStation"], string> = {
@@ -44,6 +55,23 @@ const STATION_LABEL: Record<MenuItem["preparationStation"], string> = {
 };
 
 const UNCAT = "__uncategorized__";
+
+// Phase 2.5 UX fix — pure decision function for the guided flow, extracted
+// so it's directly unit-testable without mounting this whole admin page
+// (no existing component-mount test harness covers menu-client.tsx, same
+// as inventory-client.tsx/normativi-client.tsx/inventura-client.tsx).
+// Called ONLY after a tracking-method save has already succeeded — see
+// setTrackingMethod below, where this sits after the awaited apiFetch/load,
+// inside the try block, so a failed save never reaches it.
+export type GuidedFlowAction = "OPEN_RECIPE" | "OPEN_DIRECT_STOCK" | "NONE";
+export function decideGuidedFlowAction(
+  method: MenuItem["inventoryTrackingMethod"],
+  alreadyLinkedForDirectStock: boolean
+): GuidedFlowAction {
+  if (method === "RECIPE") return "OPEN_RECIPE";
+  if (method === "DIRECT_STOCK" && !alreadyLinkedForDirectStock) return "OPEN_DIRECT_STOCK";
+  return "NONE";
+}
 
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, {
@@ -70,6 +98,17 @@ export function MenuManagementClient() {
   const [roles, setRoles] = useState<string[]>([]);
   const canManageRecipes = roles.some((r) => RECIPE_MANAGE_ROLES.has(r));
 
+  // Phase 2.5 UX fix — which MenuItems already have an InventoryItem row
+  // (DIRECT_STOCK already linked), so the guided flow below only
+  // auto-opens DirectStockModal when configuration is genuinely missing —
+  // never re-forces it on an item that's already configured.
+  const [directStockLinkedIds, setDirectStockLinkedIds] = useState<Set<string>>(new Set());
+  // Guided flow: which item to automatically open Recipe/DirectStock
+  // configuration for, set ONLY after the tracking-method change has
+  // actually persisted (see setTrackingMethod below) — never optimistically.
+  const [autoOpenRecipeItem, setAutoOpenRecipeItem] = useState<MenuItem | null>(null);
+  const [autoOpenDirectStockItem, setAutoOpenDirectStockItem] = useState<MenuItem | null>(null);
+
   useEffect(() => {
     fetch("/api/pos/me").then((r) => r.json()).then((j) => setRoles(j.roles ?? [])).catch(() => {});
   }, []);
@@ -95,12 +134,14 @@ export function MenuManagementClient() {
       if (search) params.set("search", search);
       if (stationFilter) params.set("station", stationFilter);
 
-      const [itemsRes, categoriesRes] = await Promise.all([
+      const [itemsRes, categoriesRes, inventoryRes] = await Promise.all([
         apiFetch(`/api/admin/menu/items?${params}`),
         apiFetch(`/api/admin/menu/categories`),
+        apiFetch(`/api/admin/inventory`).catch(() => ({ items: [] })), // inventory.view may be absent for some roles; guided flow degrades gracefully
       ]);
       setItems(itemsRes.items);
       setCategories(categoriesRes.categories);
+      setDirectStockLinkedIds(new Set((inventoryRes.items ?? []).map((i: { menuItem: { id: string } }) => i.menuItem.id)));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Neočekivana greška");
     } finally {
@@ -256,7 +297,19 @@ export function MenuManagementClient() {
         method: "POST",
         body: JSON.stringify({ method, ...confirm_ }),
       });
-      await load();
+      await load(); // authoritative state first — modal only opens AFTER this succeeds
+      // Guided flow (Phase 2.5 UX fix): the tracking-method change alone left
+      // the owner with no obvious next step. Persist succeeds -> open the
+      // exact next screen they need, using the SAME RecipeModal/
+      // DirectStockModal every manual "Normativ"/"Zaliha" action already
+      // uses — never a new modal, never opened before the save is confirmed
+      // (this whole block is unreachable if apiFetch above threw).
+      const guided = decideGuidedFlowAction(method, directStockLinkedIds.has(item.id));
+      if (guided === "OPEN_RECIPE") {
+        setAutoOpenRecipeItem({ ...item, inventoryTrackingMethod: "RECIPE" });
+      } else if (guided === "OPEN_DIRECT_STOCK") {
+        setAutoOpenDirectStockItem({ ...item, inventoryTrackingMethod: "DIRECT_STOCK" });
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Greška";
       // P1.6: dve odvojene bezbednosne provere (DirectStockStillPresentError
@@ -436,6 +489,26 @@ export function MenuManagementClient() {
           onClose={() => setShowAddForm(false)}
           onCreated={async () => { setShowAddForm(false); await load(); }}
           setError={setError}
+        />
+      )}
+
+      {/* Guided flow (Phase 2.5 UX fix) — opened automatically right after a
+          tracking-method change persists successfully; same components the
+          manual "Normativ"/"Zaliha" actions use, never a separate modal. */}
+      {autoOpenRecipeItem && (
+        <RecipeModal
+          item={autoOpenRecipeItem}
+          readOnly={!canManageRecipes}
+          onClose={() => setAutoOpenRecipeItem(null)}
+          onChanged={load}
+        />
+      )}
+      {autoOpenDirectStockItem && (
+        <DirectStockModal
+          item={autoOpenDirectStockItem}
+          readOnly={!canManageRecipes}
+          onClose={() => setAutoOpenDirectStockItem(null)}
+          onChanged={load}
         />
       )}
     </div>
@@ -672,9 +745,12 @@ function DirectStockModal({ item, readOnly, onClose, onChanged }: { item: { id: 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={onClose}>
       <div className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-md sm:rounded-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h2 className="text-lg font-bold text-ink">Zaliha — {item.name}</h2>
-          <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        <div className="border-b border-line px-5 py-4">
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="text-lg font-bold text-ink">Zaliha — {item.name}</h2>
+            <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+          </div>
+          <p className="mt-0.5 text-xs text-ink/50">1 prodata jedinica troši tačno 1 jedinicu sa fizičke zalihe.</p>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {loading ? (
@@ -684,9 +760,9 @@ function DirectStockModal({ item, readOnly, onClose, onChanged }: { item: { id: 
               <p className="mb-3 text-sm text-inkSoft">Trenutno stanje po lokaciji:</p>
               <div className="mb-3 space-y-1.5">
                 {existing.map((i) => (
-                  <div key={i.id} className="flex items-center justify-between rounded-md border border-line/70 px-3 py-2 text-sm">
+                  <div key={i.id} className="flex items-center justify-between rounded-md border border-line/70 bg-cream-100 px-3 py-2.5 text-sm">
                     <span className="text-ink">{i.location.name}</span>
-                    <span className="font-mono font-semibold text-ink">{i.currentStock} {i.unit}</span>
+                    <span className="font-mono text-base font-semibold text-ink">{i.currentStock} <span className="text-xs font-normal text-ink/55">{i.unit}</span></span>
                   </div>
                 ))}
               </div>
@@ -729,7 +805,7 @@ function DirectStockModal({ item, readOnly, onClose, onChanged }: { item: { id: 
             <button
               onClick={link}
               disabled={saving}
-              className="w-full rounded-sm bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
+              className="w-full rounded-md bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
             >
               {saving ? "Čuvanje…" : "Poveži i sačuvaj"}
             </button>
@@ -744,7 +820,11 @@ function DirectStockButton({ item, readOnly, onChanged }: { item: { id: string; 
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button onClick={() => setOpen(true)} className="text-ink/65 transition-colors hover:text-ink" title={readOnly ? "Zaliha (pregled)" : "Poveži/prikaži zalihu"}>
+      <button
+        onClick={() => setOpen(true)}
+        className="rounded-full bg-info-soft px-2.5 py-1 font-medium text-info transition-colors hover:bg-info/20"
+        title={readOnly ? "Zaliha (pregled)" : "Poveži/prikaži zalihu"}
+      >
         Zaliha
       </button>
       {open && <DirectStockModal item={item} readOnly={readOnly} onClose={() => setOpen(false)} onChanged={onChanged} />}
@@ -891,11 +971,15 @@ function ItemRow({
         />
       </td>
 
-      {/* Inventory tracking method — P1.6: nikad izvedeno iz kategorije, po artiklu. */}
+      {/* Inventory tracking method — P1.6: nikad izvedeno iz kategorije, po artiklu.
+          Phase 2.5: displayed as a status badge (color = state, full label
+          always visible, no truncation) instead of a plain grey select. The
+          old "next step" hint text is gone — selecting Normativ/Direktno
+          stanje now opens the right modal automatically (see setTrackingMethod). */}
       <td className="px-4 py-2.5">
         {canManageRecipes ? (
           <select
-            className="w-full rounded-sm border border-line bg-transparent px-1.5 py-1 text-xs text-ink/75 focus:outline-none hover:border-ink/30"
+            className={`w-full min-w-[8.5rem] cursor-pointer rounded-full border px-3 py-1.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-gold/30 ${TRACKING_METHOD_BADGE[item.inventoryTrackingMethod]}`}
             value={item.inventoryTrackingMethod}
             onChange={(e) => setTrackingMethod(item, e.target.value as MenuItem["inventoryTrackingMethod"])}
           >
@@ -904,13 +988,9 @@ function ItemRow({
             ))}
           </select>
         ) : (
-          <span className="text-xs text-ink/60">{TRACKING_METHOD_LABEL[item.inventoryTrackingMethod]}</span>
-        )}
-        {item.inventoryTrackingMethod === "RECIPE" && (
-          <p className="mt-0.5 text-[10px] text-ink/50">Uredi sastojke preko dugmeta &quot;Normativ&quot;</p>
-        )}
-        {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
-          <p className="mt-0.5 text-[10px] text-ink/50">Poveži zalihu preko dugmeta &quot;Zaliha&quot;</p>
+          <span className={`inline-block rounded-full border px-3 py-1.5 text-xs font-medium ${TRACKING_METHOD_BADGE[item.inventoryTrackingMethod]}`}>
+            {TRACKING_METHOD_LABEL[item.inventoryTrackingMethod]}
+          </span>
         )}
       </td>
 
@@ -928,30 +1008,34 @@ function ItemRow({
         </select>
       </td>
 
-      {/* Actions */}
+      {/* Actions — Phase 2.5 hierarchy: contextual config (filled pill, only
+          the action relevant to the current tracking method) | secondary
+          (quiet text links) | destructive (separated by a divider so it's
+          never adjacent to a routine click). */}
       <td className="px-4 py-2.5">
-        <div className="flex gap-2 text-xs">
-          <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />
+        <div className="flex items-center gap-2.5 text-xs">
+          <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} emphasis={item.inventoryTrackingMethod === "RECIPE"} />
           {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
             <DirectStockButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />
           )}
           <button
             onClick={() => duplicateItem(item.id)}
-            className="text-ink/65 transition-colors hover:text-ink"
+            className="text-ink/55 transition-colors hover:text-ink"
             title="Napravi kopiju"
           >
             Kopiraj
           </button>
           <button
             onClick={() => archiveItem(item.id)}
-            className="text-ink/65 transition-colors hover:text-ink"
+            className="text-ink/55 transition-colors hover:text-ink"
             title="Arhiviraj"
           >
             Arh.
           </button>
+          <span className="h-4 w-px bg-line" aria-hidden="true" />
           <button
             onClick={() => deleteItem(item.id)}
-            className="text-danger/60 transition-colors hover:text-danger"
+            className="text-danger/70 transition-colors hover:text-danger"
             title="Trajno obriši"
           >
             Obriši
