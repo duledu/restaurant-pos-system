@@ -22,20 +22,30 @@
  * against Development or Test (use db:migrate:deploy directly there; those
  * environments don't need this gate's friction).
  *
- * Run: npm run db:premigration-check -- --confirm-target=<db-name>
+ * Run: npm run db:premigration-check -- --confirm-production --confirm-target=<db-name>
  */
 import { Client } from "pg";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { execFileSync } from "child_process";
-import { loadEnv, repoRoot } from "./lib/env-loader.mjs";
+import { repoRoot } from "./lib/env-loader.mjs";
 import { parseDbIdentity, redactConnectionString } from "./lib/db-identity.mjs";
 import { getCriticalTables } from "./lib/schema-tables.mjs";
 import { assertProductionDatabaseIsSafe } from "./lib/db-environment.mjs";
+import { resolveDatabaseTarget, buildChildEnv } from "./lib/resolve-db-target.mjs";
 
-loadEnv();
+// Objective 1 (Production release tooling hardening): resolves its target
+// through resolveDatabaseTarget() instead of a bare `loadEnv()` +
+// `process.env.DATABASE_URL` read — this script is exclusively for
+// Production (see file docstring), so it always forces --env=production
+// regardless of what argv says; the caller only needs --confirm-production
+// on top of that (same friction as before, just anchored to a target that
+// can no longer be silently wrong). Every child process this script spawns
+// (prisma migrate status, db-backup.mjs) receives the resolved credentials
+// through its OWN environment object only — never written to process.env,
+// never written to any .env file.
 
-const args = process.argv.slice(2);
+const args = ["--env=production", ...process.argv.slice(2)];
 const confirmTarget = args.find((a) => a.startsWith("--confirm-target="))?.split("=")[1];
 const maxBackupAgeMinutes = Number(args.find((a) => a.startsWith("--max-backup-age-minutes="))?.split("=")[1] ?? 60);
 const backupsDir = join(repoRoot, "backups");
@@ -65,8 +75,8 @@ function latestBackupMeta() {
 }
 
 async function main() {
-  const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
-  if (!connectionString) throw new Error("DIRECT_URL / DATABASE_URL not set.");
+  const target = await resolveDatabaseTarget({ argv: args });
+  const connectionString = target.directUrl || target.databaseUrl;
 
   const identity = parseDbIdentity(connectionString);
 
@@ -103,7 +113,7 @@ async function main() {
     migrateStatusOutput = execFileSync(
       "npx",
       ["prisma", "migrate", "status", "--schema", join(repoRoot, "packages", "db", "prisma", "schema.prisma")],
-      { cwd: repoRoot, encoding: "utf8", env: process.env, shell: process.platform === "win32" }
+      { cwd: repoRoot, encoding: "utf8", env: buildChildEnv(target), shell: process.platform === "win32" }
     );
   } catch (err) {
     migrateStatusOutput = (err.stdout ?? "") + (err.stderr ?? "");
@@ -129,7 +139,11 @@ async function main() {
         ? `Newest backup is ${ageMinutes.toFixed(1)}min old (max allowed ${maxBackupAgeMinutes}min) — taking a fresh one.`
         : `No backup found — taking one now.`
     );
-    execFileSync(process.execPath, [join(repoRoot, "scripts", "db-backup.mjs")], { stdio: "inherit" });
+    execFileSync(
+      process.execPath,
+      [join(repoRoot, "scripts", "db-backup.mjs"), "--env=production", "--confirm-production"],
+      { stdio: "inherit" }
+    );
     meta = latestBackupMeta();
   } else {
     console.log(`Using existing backup (${ageMinutes.toFixed(1)}min old): ${meta.filename}`);
@@ -154,8 +168,8 @@ async function main() {
 
   console.log(`\n=== READY ===`);
   console.log(`Backup verified and integrity snapshot saved. Safe to run:`);
-  console.log(`  npx prisma migrate deploy`);
-  console.log(`Then run: npm run db:postmigration-check -- --since=${snapshotPath}`);
+  console.log(`  npm run db:migrate:deploy -- --env=production --confirm-production`);
+  console.log(`Then run: npm run db:postmigration-check -- --env=production --confirm-production --since=${snapshotPath}`);
 }
 
 main().catch((err) => {

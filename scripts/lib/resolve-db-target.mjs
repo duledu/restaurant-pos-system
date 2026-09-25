@@ -133,10 +133,36 @@ export async function resolveDatabaseTarget({
           : "")
     );
   }
-  const databaseUrl = parsed.DATABASE_URL;
-  const directUrl = parsed.DIRECT_URL;
-  if (!databaseUrl || !directUrl) {
-    throw new DatabaseTargetError(`${envFile} is missing DATABASE_URL and/or DIRECT_URL.`);
+  // Production credentials live under PRODUCTION_DATABASE_URL/
+  // PRODUCTION_DIRECT_URL inside .env — NEVER the plain DATABASE_URL/
+  // DIRECT_URL, which stay reserved for the developer's ordinary local
+  // session (PREPROD, via .env.local reads that never touch this branch).
+  // This is now the ONLY place in the codebase that reads the PRODUCTION_*
+  // keys, so every caller (db-studio.mjs, db-premigration-check.mjs, the
+  // migrate-deploy wrapper, etc.) gets a correctly-resolved Production
+  // target for free, with no risk of silently falling back to whatever
+  // .env's plain vars happen to hold that day.
+  //
+  // Their names are also historically inverted from their actual roles
+  // (independently verified against Neon by connecting through both):
+  // PRODUCTION_DATABASE_URL is the DIRECT/non-pooler connection string,
+  // PRODUCTION_DIRECT_URL is the POOLED one. Corrected here, once — no
+  // caller needs to know about this.
+  let databaseUrl, directUrl;
+  if (environment === "production") {
+    const rawDatabaseUrl = parsed.PRODUCTION_DATABASE_URL; // actually direct/non-pooler
+    const rawDirectUrl = parsed.PRODUCTION_DIRECT_URL; // actually pooled
+    if (!rawDatabaseUrl || !rawDirectUrl) {
+      throw new DatabaseTargetError(`${envFile} is missing PRODUCTION_DATABASE_URL and/or PRODUCTION_DIRECT_URL.`);
+    }
+    databaseUrl = rawDirectUrl; // pooled -> DATABASE_URL (runtime/query convention)
+    directUrl = rawDatabaseUrl; // direct -> DIRECT_URL (migration convention)
+  } else {
+    databaseUrl = parsed.DATABASE_URL;
+    directUrl = parsed.DIRECT_URL;
+    if (!databaseUrl || !directUrl) {
+      throw new DatabaseTargetError(`${envFile} is missing DATABASE_URL and/or DIRECT_URL.`);
+    }
   }
 
   const dbEndpoint = extractNeonEndpointId(parseDbIdentity(databaseUrl).host);
@@ -181,4 +207,19 @@ export async function resolveDatabaseTarget({
   console.log(`[db-target] env=${environment} file=${envFile} endpoint=${masked} marker=${marker}`);
 
   return { environment, databaseUrl, directUrl, endpointId: dbEndpoint, envFile };
+}
+
+/**
+ * Builds a child-process environment object with DATABASE_URL/DIRECT_URL
+ * set to the resolved target, for spawning Prisma CLI, pg_dump, or any
+ * other child process that expects those conventional variable names.
+ * NEVER mutates the caller's own process.env, and never writes to any
+ * .env/.env.local file — the substitution exists only for the spawned
+ * child. Same pattern already proven by db-studio.mjs's local
+ * buildStudioSpawnEnv; shared here so every other Production-capable
+ * script (premigration check, migrate-deploy, backup, postmigration
+ * check) uses the identical mechanism instead of five reimplementations.
+ */
+export function buildChildEnv(target, baseEnv = process.env) {
+  return { ...baseEnv, DATABASE_URL: target.databaseUrl, DIRECT_URL: target.directUrl };
 }

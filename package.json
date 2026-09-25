@@ -18,7 +18,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:generate": "npm run generate --workspace=packages/db",
     "db:migrate": "dotenv -e .env -- npm run migrate --workspace=packages/db",
-    "db:migrate:deploy": "dotenv -e .env -- npm run migrate:deploy --workspace=packages/db",
+    "db:migrate:deploy": "node scripts/db-migrate-deploy.mjs",
     "db:migrate:status": "dotenv -e .env -- node scripts/db-migrate-status-check.mjs",
     "db:mark-environment": "dotenv -e .env -- node scripts/mark-database-environment.mjs",
     "deploy:check": "dotenv -e .env -- node scripts/deploy-check.mjs",

@@ -67,7 +67,10 @@ describe("resolveStudioTarget — same safety gate as every other write-capable 
   });
 
   it("--env=production WITH --confirm-production succeeds against a correctly-marked Production fixture", async () => {
-    writeEnvFile(".env", { DATABASE_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }), DIRECT_URL: fakeUrl(PROD_ENDPOINT) });
+    // PRODUCTION_DATABASE_URL is the DIRECT/non-pooler string,
+    // PRODUCTION_DIRECT_URL is the POOLED one — inverted from their names,
+    // verified against Neon (see resolve-db-target.mjs).
+    writeEnvFile(".env", { PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT), PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }) });
     const target = await resolveDatabaseTarget({
       argv: ["--env=production", "--confirm-production"],
       repoRoot: dir,

@@ -10,23 +10,33 @@
  * see docs/database-backup-recovery.md), with an immutable timestamped
  * filename that is never overwritten.
  *
- * Run: npm run db:backup
- *      npm run db:backup -- --source=DATABASE_URL   (default: DIRECT_URL)
+ * Run: npm run db:backup -- --env=preprod
+ *      npm run db:backup -- --env=production --confirm-production
+ *      npm run db:backup -- --env=production --confirm-production --source=DATABASE_URL   (default: DIRECT_URL)
  */
 import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
-import { loadEnv, repoRoot } from "./lib/env-loader.mjs";
+import { repoRoot } from "./lib/env-loader.mjs";
 import { redactConnectionString } from "./lib/db-identity.mjs";
 import { requireTool, INSTALL_HINT } from "./lib/pg-tools.mjs";
 import { getAllTables, getCriticalTables } from "./lib/schema-tables.mjs";
 import { listBackupContents } from "./lib/backup-verify-core.mjs";
+import { resolveDatabaseTarget } from "./lib/resolve-db-target.mjs";
 
-loadEnv();
+// Objective 1 (Production release tooling hardening): resolves its target
+// through resolveDatabaseTarget() — the SAME mechanism db-studio.mjs,
+// db-premigration-check.mjs, and the migrate-deploy wrapper use — instead
+// of a bare `loadEnv()` + `process.env.DATABASE_URL` read. Requires an
+// explicit --env=<preprod|production|test> on every invocation; there is
+// no default that could silently back up the wrong database. The
+// connection string is used directly as a pg_dump argument — never written
+// to process.env, never written to any .env file.
 
 const args = process.argv.slice(2);
 const sourceVar = (args.find((a) => a.startsWith("--source="))?.split("=")[1]) || "DIRECT_URL";
-const connectionString = process.env[sourceVar] || process.env.DATABASE_URL;
+const target = await resolveDatabaseTarget({ argv: args });
+const connectionString = sourceVar === "DATABASE_URL" ? target.databaseUrl : target.directUrl;
 
 function timestamp() {
   const d = new Date();

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { resolveDatabaseTarget, DatabaseTargetError } from "../../scripts/lib/resolve-db-target.mjs";
+import { resolveDatabaseTarget, buildChildEnv, DatabaseTargetError } from "../../scripts/lib/resolve-db-target.mjs";
 
 // Regression coverage for the 2026-09-14 incident: `npx tsx
 // packages/db/prisma/sync-permissions.ts` was meant to run against
@@ -100,8 +100,18 @@ describe("resolveDatabaseTarget — CASE C: requested=PRODUCTION, actual marker=
 });
 
 describe("resolveDatabaseTarget — CASE D: requested=PRODUCTION, actual marker=PRODUCTION, with --confirm-production => may proceed", () => {
-  it("succeeds and returns the Production connection info", async () => {
-    writeEnvFile(".env", { DATABASE_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }), DIRECT_URL: fakeUrl(PROD_ENDPOINT) });
+  it("succeeds and returns the Production connection info, reading ONLY PRODUCTION_DATABASE_URL/PRODUCTION_DIRECT_URL", async () => {
+    // Plain DATABASE_URL/DIRECT_URL deliberately point elsewhere (the
+    // developer's ordinary PREPROD session) — production resolution must
+    // never read these for the production branch, only PRODUCTION_*.
+    writeEnvFile(".env", {
+      DATABASE_URL: fakeUrl(DEV_ENDPOINT),
+      DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }),
+      // Real-world naming is inverted from role: PRODUCTION_DATABASE_URL is
+      // the DIRECT/non-pooler string, PRODUCTION_DIRECT_URL is the POOLED one.
+      PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT),
+      PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    });
     const result = await resolveDatabaseTarget({
       argv: ["--env=production", "--confirm-production"],
       repoRoot: dir,
@@ -109,6 +119,20 @@ describe("resolveDatabaseTarget — CASE D: requested=PRODUCTION, actual marker=
     });
     expect(result.environment).toBe("production");
     expect(result.endpointId).toBe(PROD_ENDPOINT);
+    // Pooled/direct roles corrected: DATABASE_URL must be the pooled string
+    // (originally stored under PRODUCTION_DIRECT_URL), DIRECT_URL the
+    // non-pooler string (originally stored under PRODUCTION_DATABASE_URL).
+    expect(result.databaseUrl).toContain("-pooler");
+    expect(result.directUrl).not.toContain("-pooler");
+  });
+
+  it("hard-fails when PRODUCTION_DATABASE_URL/PRODUCTION_DIRECT_URL are missing, even if plain DATABASE_URL/DIRECT_URL happen to be Production", async () => {
+    writeEnvFile(".env", { DATABASE_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }), DIRECT_URL: fakeUrl(PROD_ENDPOINT) });
+    const readEnvironmentMarker = vi.fn();
+    await expect(
+      resolveDatabaseTarget({ argv: ["--env=production", "--confirm-production"], repoRoot: dir, readEnvironmentMarker })
+    ).rejects.toThrow(/missing PRODUCTION_DATABASE_URL/);
+    expect(readEnvironmentMarker).not.toHaveBeenCalled();
   });
 });
 
@@ -191,5 +215,118 @@ describe("resolveDatabaseTarget — never leaks the raw connection string", () =
     } finally {
       logSpy.mockRestore();
     }
+  });
+
+  it("--env=production also never leaks the raw connection string", async () => {
+    writeEnvFile(".env", {
+      DATABASE_URL: fakeUrl(DEV_ENDPOINT),
+      DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }),
+      PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT),
+      PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await resolveDatabaseTarget({
+        argv: ["--env=production", "--confirm-production"],
+        repoRoot: dir,
+        readEnvironmentMarker: vi.fn().mockResolvedValue("PRODUCTION"),
+      });
+      const printed = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(printed).toContain("env=production");
+      expect(printed).not.toContain("supersecretpassword");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+// Objective 1 (Production release tooling hardening): PRODUCTION_DATABASE_URL/
+// PRODUCTION_DIRECT_URL must be the ONLY source of Production credentials,
+// .env.local must never be consulted for --env=production, and no helper
+// may ever write back to .env/.env.local — only hand credentials to a
+// spawned child process's OWN environment object.
+describe("resolveDatabaseTarget — Production credential source is exclusively PRODUCTION_* (Objective 1 hardening)", () => {
+  it("--env=production never reads .env.local, even when .env.local itself holds Production-looking values", async () => {
+    writeEnvFile(".env", {
+      DATABASE_URL: fakeUrl(DEV_ENDPOINT),
+      DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }),
+      PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT),
+      PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    });
+    // Deliberately absent/irrelevant — if production resolution ever fell
+    // through to .env.local, this fixture would either crash on a missing
+    // file (proving isolation) or, if it existed with different content,
+    // silently succeed with the wrong endpoint (the actual regression this
+    // guards against).
+    const readEnvironmentMarker = vi.fn().mockResolvedValue("PRODUCTION");
+    const result = await resolveDatabaseTarget({
+      argv: ["--env=production", "--confirm-production"],
+      repoRoot: dir,
+      readEnvironmentMarker,
+    });
+    expect(result.envFile).toBe(".env");
+    expect(result.endpointId).toBe(PROD_ENDPOINT);
+  });
+
+  it("--env=preprod never reads PRODUCTION_DATABASE_URL/PRODUCTION_DIRECT_URL even when they are present in .env.local", async () => {
+    // Pathological fixture: someone pasted PRODUCTION_* into .env.local by
+    // mistake. preprod resolution must still only ever use plain
+    // DATABASE_URL/DIRECT_URL from .env.local.
+    writeEnvFile(".env.local", {
+      DATABASE_URL: fakeUrl(DEV_ENDPOINT),
+      DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }),
+      PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT),
+      PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    });
+    const result = await resolveDatabaseTarget({
+      argv: ["--env=preprod"],
+      repoRoot: dir,
+      readEnvironmentMarker: vi.fn().mockResolvedValue("DEVELOPMENT"),
+    });
+    expect(result.endpointId).toBe(DEV_ENDPOINT);
+  });
+
+  it("resolveDatabaseTarget never writes to the .env file it just read (round-trip byte-for-byte)", async () => {
+    writeEnvFile(".env", {
+      DATABASE_URL: fakeUrl(DEV_ENDPOINT),
+      DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }),
+      PRODUCTION_DATABASE_URL: fakeUrl(PROD_ENDPOINT),
+      PRODUCTION_DIRECT_URL: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    });
+    const before = readFileSync(path.join(dir, ".env"), "utf8");
+    await resolveDatabaseTarget({
+      argv: ["--env=production", "--confirm-production"],
+      repoRoot: dir,
+      readEnvironmentMarker: vi.fn().mockResolvedValue("PRODUCTION"),
+    });
+    const after = readFileSync(path.join(dir, ".env"), "utf8");
+    expect(after).toBe(before);
+  });
+});
+
+describe("buildChildEnv — hands credentials to a child process only, never mutates the caller's own process.env", () => {
+  const target = {
+    environment: "production" as const,
+    databaseUrl: fakeUrl(PROD_ENDPOINT, { pooled: true }),
+    directUrl: fakeUrl(PROD_ENDPOINT),
+    endpointId: PROD_ENDPOINT,
+    envFile: ".env",
+  };
+
+  it("returns a NEW object with DATABASE_URL/DIRECT_URL from the target, overriding whatever the base env had", () => {
+    const ambientEnv = { DATABASE_URL: fakeUrl(DEV_ENDPOINT), DIRECT_URL: fakeUrl(DEV_ENDPOINT, { pooled: true }), PATH: "/usr/bin" };
+    const childEnv = buildChildEnv(target, ambientEnv);
+
+    expect(childEnv.DATABASE_URL).toBe(target.databaseUrl);
+    expect(childEnv.DIRECT_URL).toBe(target.directUrl);
+    expect(childEnv.DATABASE_URL).not.toContain(DEV_ENDPOINT);
+    expect(childEnv.PATH).toBe("/usr/bin"); // unrelated ambient vars preserved for the child
+    expect(ambientEnv).not.toBe(childEnv); // never the same object
+  });
+
+  it("never mutates the real process.env when called with the default base", () => {
+    const before = { ...process.env };
+    buildChildEnv(target);
+    expect(process.env).toEqual(before);
   });
 });

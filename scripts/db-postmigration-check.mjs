@@ -7,15 +7,21 @@
  * already reviewed) — this script does not auto-decide, it makes the
  * before/after impossible to miss so a human decides.
  *
- * Run: npm run db:postmigration-check -- --since=backups/<ts>-premigration-counts.json
+ * Run: npm run db:postmigration-check -- --env=production --confirm-production --since=backups/<ts>-premigration-counts.json
  */
 import { Client } from "pg";
 import { readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
-import { loadEnv, repoRoot } from "./lib/env-loader.mjs";
+import { repoRoot } from "./lib/env-loader.mjs";
 import { getCriticalTables } from "./lib/schema-tables.mjs";
+import { resolveDatabaseTarget } from "./lib/resolve-db-target.mjs";
 
-loadEnv();
+// Objective 1 (Production release tooling hardening): resolves its target
+// through resolveDatabaseTarget() (explicit --env=<preprod|production|test>
+// required, no default) instead of a bare `loadEnv()` +
+// `process.env.DATABASE_URL` read. The resolved connection string is used
+// directly for the pg.Client — never written to process.env, never
+// written to any .env file.
 
 const args = process.argv.slice(2);
 let sincePath = args.find((a) => a.startsWith("--since="))?.split("=")[1];
@@ -52,8 +58,8 @@ async function main() {
   }
   const before = JSON.parse(readFileSync(sincePath, "utf8"));
 
-  const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
-  if (!connectionString) throw new Error("DIRECT_URL / DATABASE_URL not set.");
+  const target = await resolveDatabaseTarget({ argv: args });
+  const connectionString = target.directUrl || target.databaseUrl;
 
   const after = await countCriticalTables(connectionString);
 
