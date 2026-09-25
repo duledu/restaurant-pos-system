@@ -601,6 +601,157 @@ function CategorySection({
   );
 }
 
+// ── DirectStockButton / DirectStockModal ─────────────────────────────────────
+//
+// Inventory Phase 2.5 — DIRECT_STOCK's audit-confirmed gap: apart from a
+// bare "Upravljaj zalihama →" link, DIRECT_STOCK configuration ("Coca-Cola
+// → 1 kom") was only reachable from the separate /inventory admin page,
+// never from Menu → MenuItem itself. This closes that gap by reusing the
+// EXACT existing backend as-is — GET/POST /api/admin/inventory
+// (inventory.listInventory / inventory.initializeTracking, the same
+// functions inventory-client.tsx's InitModal already calls) — no new
+// domain logic, no new endpoint, no schema change. initializeTracking
+// already atomically sets inventoryTrackingMethod=DIRECT_STOCK itself, so
+// this is the single action needed to both link AND record opening stock.
+
+interface DirectStockLocation { id: string; name: string; }
+interface DirectStockInventoryItem {
+  id: string;
+  currentStock: string;
+  unit: string;
+  location: DirectStockLocation;
+  menuItem: { id: string };
+}
+
+function DirectStockModal({ item, readOnly, onClose, onChanged }: { item: { id: string; name: string; unit: string | null }; readOnly: boolean; onClose: () => void; onChanged: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [locations, setLocations] = useState<DirectStockLocation[]>([]);
+  const [existing, setExisting] = useState<DirectStockInventoryItem[]>([]);
+  const [locationId, setLocationId] = useState("");
+  const [initialStock, setInitialStock] = useState("0");
+  const [unit, setUnit] = useState(item.unit || "kom");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/admin/locations").then((r) => r.json()),
+      fetch("/api/admin/inventory").then((r) => r.json()),
+    ]).then(([locJson, invJson]) => {
+      const locs: DirectStockLocation[] = locJson.locations ?? [];
+      setLocations(locs);
+      if (locs.length > 0) setLocationId(locs[0].id);
+      const items: DirectStockInventoryItem[] = (invJson.items ?? []).filter((i: DirectStockInventoryItem) => i.menuItem.id === item.id);
+      setExisting(items);
+      if (items.length > 0) setUnit(items[0].unit);
+    }).finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
+
+  async function link() {
+    setErr("");
+    const stock = Number(initialStock);
+    if (!locationId) { setErr("Izaberite lokaciju"); return; }
+    if (!Number.isFinite(stock) || stock < 0) { setErr("Unesite ispravno početno stanje"); return; }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/admin/inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ menuItemId: item.id, locationId, initialStock: stock, unit }),
+      });
+      const j = await res.json();
+      if (!res.ok) { setErr(j.error ?? "Greška"); return; }
+      onChanged();
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-md sm:rounded-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h2 className="text-lg font-bold text-ink">Zaliha — {item.name}</h2>
+          <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <p className="text-sm text-inkSoft">Učitavanje…</p>
+          ) : existing.length > 0 ? (
+            <>
+              <p className="mb-3 text-sm text-inkSoft">Trenutno stanje po lokaciji:</p>
+              <div className="mb-3 space-y-1.5">
+                {existing.map((i) => (
+                  <div key={i.id} className="flex items-center justify-between rounded-md border border-line/70 px-3 py-2 text-sm">
+                    <span className="text-ink">{i.location.name}</span>
+                    <span className="font-mono font-semibold text-ink">{i.currentStock} {i.unit}</span>
+                  </div>
+                ))}
+              </div>
+              <a href="/inventory" className="text-sm text-gold-dark hover:underline">Upravljaj zalihama (prijem, korekcija, otpis) →</a>
+            </>
+          ) : readOnly ? (
+            <p className="rounded-md border border-line bg-cream-100 p-3 text-xs text-inkSoft">
+              Artikal još nije povezan sa fizičkim stanjem zaliha. Nemate dozvolu za povezivanje (potrebna je OWNER/ADMIN/MANAGER uloga).
+            </p>
+          ) : (
+            <>
+              <p className="mb-3 text-sm text-inkSoft">
+                Ovaj artikal još nije povezan sa fizičkim stanjem zaliha. Unesite stvarno stanje da biste ga povezali —
+                npr. <strong>Coca-Cola → 1 kom</strong> po prodatoj jedinici.
+              </p>
+              {locations.length > 1 && (
+                <>
+                  <label className="mb-1 block text-sm font-medium text-ink">Lokacija</label>
+                  <select value={locationId} onChange={(e) => setLocationId(e.target.value)} className="mb-3 w-full rounded-md border border-line px-3 py-2 text-sm">
+                    {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                  </select>
+                </>
+              )}
+              <div className="mb-3 flex gap-2">
+                <div className="flex-1">
+                  <label className="mb-1 block text-sm font-medium text-ink">Početno stanje</label>
+                  <input type="number" inputMode="decimal" min={0} step="any" value={initialStock} onChange={(e) => setInitialStock(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+                </div>
+                <div className="w-24">
+                  <label className="mb-1 block text-sm font-medium text-ink">Jedinica</label>
+                  <input type="text" value={unit} onChange={(e) => setUnit(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+                </div>
+              </div>
+              {err && <p className="mb-2 text-sm text-danger">{err}</p>}
+            </>
+          )}
+        </div>
+        {existing.length === 0 && !loading && !readOnly && (
+          <div className="border-t border-line px-5 py-4">
+            <button
+              onClick={link}
+              disabled={saving}
+              className="w-full rounded-sm bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
+            >
+              {saving ? "Čuvanje…" : "Poveži i sačuvaj"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DirectStockButton({ item, readOnly, onChanged }: { item: { id: string; name: string; unit: string | null }; readOnly: boolean; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="text-ink/65 transition-colors hover:text-ink" title={readOnly ? "Zaliha (pregled)" : "Poveži/prikaži zalihu"}>
+        Zaliha
+      </button>
+      {open && <DirectStockModal item={item} readOnly={readOnly} onClose={() => setOpen(false)} onChanged={onChanged} />}
+    </>
+  );
+}
+
 // ── ItemRow ───────────────────────────────────────────────────────────────────
 
 function ItemRow({
@@ -759,7 +910,7 @@ function ItemRow({
           <p className="mt-0.5 text-[10px] text-ink/50">Uredi sastojke preko dugmeta &quot;Normativ&quot;</p>
         )}
         {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
-          <a href="/inventory" className="mt-0.5 block text-[10px] text-gold-dark hover:underline">Upravljaj zalihama →</a>
+          <p className="mt-0.5 text-[10px] text-ink/50">Poveži zalihu preko dugmeta &quot;Zaliha&quot;</p>
         )}
       </td>
 
@@ -781,6 +932,9 @@ function ItemRow({
       <td className="px-4 py-2.5">
         <div className="flex gap-2 text-xs">
           <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />
+          {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
+            <DirectStockButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />
+          )}
           <button
             onClick={() => duplicateItem(item.id)}
             className="text-ink/65 transition-colors hover:text-ink"
