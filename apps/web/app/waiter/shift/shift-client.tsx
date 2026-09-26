@@ -13,6 +13,10 @@ interface OpenOrderRef {
   tableLabel: string;
   status: string;
 }
+interface MyOpenTableRef {
+  orderId: string;
+  tableLabel: string;
+}
 interface ShiftSummary {
   shift: { id: string; openedAt: string; status: "OPEN" | "CLOSED" };
   openingCash: string;
@@ -22,6 +26,7 @@ interface ShiftSummary {
   totalRevenue: string;
   orderCount: number;
   openOrders: OpenOrderRef[];
+  myOpenTables: MyOpenTableRef[];
   canClose: boolean;
 }
 interface ClosedShift {
@@ -227,12 +232,28 @@ export function ShiftClient() {
 
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
 
-      {summary.openOrders.length > 0 && (
+      {summary.myOpenTables.length > 0 ? (
+        // Shift Handover V1 — the specific, actionable case: THIS employee
+        // is still responsible for open tables. Generic "ima otvorenih
+        // računa" phrasing is replaced with a direct next step.
+        <div className="mb-3 rounded-md bg-warn-soft px-3 py-3 text-sm text-warn">
+          <p className="mb-2 font-medium">
+            Imaš {summary.myOpenTables.length} otvoren{summary.myOpenTables.length === 1 ? "" : "ih"} sto{summary.myOpenTables.length === 1 ? "" : "ova"}: {summary.myOpenTables.map((t) => t.tableLabel).join(", ")}.
+          </p>
+          <p className="mb-3">Pre završetka smene potrebno je predati otvorene stolove drugom konobaru.</p>
+          <button
+            onClick={() => router.push("/waiter/handover?tab=handoff")}
+            className="w-full rounded-md bg-warn px-4 py-3 text-sm font-semibold text-white transition-colors hover:opacity-90"
+          >
+            Predaj stolove
+          </button>
+        </div>
+      ) : summary.openOrders.length > 0 ? (
         <div className="mb-3 rounded-md bg-warn-soft px-3 py-3 text-sm text-warn">
           Ne može se zatvoriti smena — otvoreni računi na stolovima: {summary.openOrders.map((o) => o.tableLabel).join(", ")}.
-          Naplati ili zatvori te račune prvo.
+          Naplati ih ili sačekaj da ih preuzme drugi konobar.
         </div>
-      )}
+      ) : null}
 
       <div className="rounded-md border border-line bg-white p-4 shadow-sm">
         <div className="space-y-1.5 text-sm">

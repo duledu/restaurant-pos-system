@@ -113,6 +113,26 @@ export const transferOrderItemsSchema = z.object({
 });
 export type TransferOrderItemsInput = z.infer<typeof transferOrderItemsSchema>;
 
+// ── Shift Handover V1: table ownership transfer ──────────────────────────
+
+export const tableOwnershipTransferLineSchema = z.object({
+  orderId: z.string().uuid(),
+  expectedPreviousOwnerId: z.string().uuid(),
+  newOwnerId: z.string().uuid(),
+});
+
+export const transferTablesSchema = z.object({
+  transfers: z.array(tableOwnershipTransferLineSchema).min(1).max(100),
+  reason: z.enum(["SHIFT_HANDOVER", "MANUAL_TABLE_TRANSFER"]),
+});
+export type TransferTablesInput = z.infer<typeof transferTablesSchema>;
+
+export const forceTransferTableSchema = z.object({
+  orderId: z.string().uuid(),
+  newOwnerId: z.string().uuid(),
+});
+export type ForceTransferTableInput = z.infer<typeof forceTransferTableSchema>;
+
 // ── Operativna dostupnost (Kuhinja/Šank "Nije dostupno") ─────────────────
 
 export const setMenuItemAvailabilitySchema = z

@@ -753,6 +753,7 @@ model Order {
   printJobs        PrintJob[]
   itemTransfersOut OrderItemTransfer[] @relation("TransferSourceOrder")
   itemTransfersIn  OrderItemTransfer[] @relation("TransferDestinationOrder")
+  ownershipTransfers TableOwnershipTransfer[]
 
   // Idempotency key je jedinstven PO RESTORANU kad je postavljen — dupli
   // submit sa istim ključem (npr. duplo-kliknuto dugme, retry mreže) pada
@@ -1168,6 +1169,72 @@ model OrderItemTransfer {
   @@index([destinationOrderItemId])
   @@index([transferredAt])
   @@map("order_item_transfers")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SHIFT HANDOVER V1 — vlasništvo nad OTVORENIM stolom/porudžbinom
+// (Order.openedBy) je jedini signal vlasništva u celom sistemu (vidi
+// napomenu uz Order.openedBy) — koristi se i za display ("Zauzeo: Marko" u
+// listTables()) i za DRAFT-only autorizaciju (order-access.ts
+// requireDraftOwnership). Za SUBMITTED+ porudžbine ne postoji per-konobar
+// ograničenje (bilo koji WAITER sa pristupom lokaciji već sme da menja/
+// naplati/prebaci tuđ sto — order-access.ts, transfer-service.ts) — Shift
+// Handover NAMERNO ne uvodi stroži autorizacioni model, samo menja KO je
+// evidentiran kao trenutno odgovoran konobar, atomično i sa audit tragom.
+//
+// Ova tabela je NAMERNO odvojena od generičkog AuditLog (ista odluka kao
+// OrderItemTransfer iznad, iz istog razloga) — Handover Overview ekran mora
+// brzo da agregira/filtrira "koji stolovi su već preuzeti, od koga, ko je
+// preuzeo" bez parsiranja JSON payload-a; recordAuditEntry se I DALJE
+// poziva paralelno (ista konvencija kao transfer-service.ts) za
+// restoran-wide audit vidljivost.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum TableOwnershipTransferReason {
+  SHIFT_HANDOVER
+  MANUAL_TABLE_TRANSFER
+  MANAGER_FORCED_TRANSFER
+}
+
+model TableOwnershipTransfer {
+  id           String @id @default(uuid())
+  restaurantId String
+  locationId   String
+
+  orderId String
+  // Snapshot (String, ne FK) — ista konvencija kao OrderItemTransfer.sourceTableLabel:
+  // sto se može kasnije preimenovati/deaktivirati, istorijski zapis ostaje čitljiv.
+  tableId    String
+  tableLabel String
+
+  // employeeId, bez FK — ista konvencija kao Order.openedBy/transferredBy.
+  // Imena su snapshot (zaposleni se može kasnije preimenovati/deaktivirati).
+  previousOwnerId   String
+  previousOwnerName String
+  newOwnerId        String
+  newOwnerName      String
+
+  // initiatedBy = ko je pokrenuo akciju (obično isto kao newOwnerId za
+  // samostalno preuzimanje; menadžer za MANAGER_FORCED_TRANSFER).
+  // acceptedBy = eksplicitna potvrda novog vlasnika (isto kao newOwnerId
+  // kod samostalnog preuzimanja/predaje; null kod forced transfera BEZ
+  // učešća novog vlasnika u trenutku akcije — nikad izmišljeno "prihvatanje").
+  initiatedBy     String
+  initiatedByRole String
+  acceptedBy      String?
+
+  reason TableOwnershipTransferReason
+
+  transferredAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([restaurantId])
+  @@index([locationId])
+  @@index([orderId])
+  @@index([tableId])
+  @@index([transferredAt])
+  @@map("table_ownership_transfers")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

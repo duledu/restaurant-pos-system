@@ -9,6 +9,7 @@ export * as recipes from "./menu/recipe-service";
 export * as availability from "./menu/availability-service";
 export * as shifts from "./shifts/shift-service";
 export * as tables from "./tables/table-service";
+export * as tableOwnership from "./tables/ownership-transfer-service";
 export * as orders from "./orders/order-service";
 export * as voids from "./orders/void-service";
 export * as transfers from "./orders/transfer-service";

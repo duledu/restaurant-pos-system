@@ -206,6 +206,12 @@ export function PosClient() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => router.push("/waiter/handover")}
+            className="min-h-11 rounded-md border border-line px-3 py-2 text-xs font-semibold text-ink/70 transition-colors hover:bg-ink/[0.04]"
+          >
+            Predaja stolova
+          </button>
+          <button
             onClick={() => router.push("/waiter/shift")}
             className="min-h-11 rounded-md border border-success/20 bg-success-soft px-3 py-2 text-xs font-semibold text-success transition-colors hover:border-success/40"
           >
@@ -261,6 +267,16 @@ export function PosClient() {
               className="fixed inset-0 z-40 bg-transparent"
             />
             <div className="absolute right-0 top-11 z-50 w-56 overflow-hidden rounded-md border border-line bg-white shadow-elevated">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  router.push("/waiter/handover");
+                }}
+                className="block w-full px-4 py-3 text-left text-sm font-medium text-ink hover:bg-ink/[0.04]"
+              >
+                Predaja stolova
+              </button>
               <button
                 type="button"
                 onClick={() => {

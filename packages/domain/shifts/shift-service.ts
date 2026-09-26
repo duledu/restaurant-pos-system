@@ -7,6 +7,23 @@ import type { OpenShiftInput, CloseShiftInput } from "@rcs/shared";
 const SHIFTS_MANAGE = "shifts.manage";
 
 /**
+ * SHIFT HANDOVER V1 — thrown by closeShift when the CLOSING employee
+ * personally still has open tables (openedBy === ctx.employeeId), so the
+ * UI can show the dedicated "PREDAJ STOLOVE" CTA instead of the generic
+ * "postoje otvoreni računi" message. Deliberately checked BEFORE the
+ * existing location-wide open-orders guard below, which still fires
+ * unchanged for the general case (other waiters' tables not yet handed
+ * off) — this never weakens the existing invariant that a shift cannot
+ * close with ANY open order; it only makes the message specific when the
+ * closing employee is themselves one of the owners.
+ */
+export class OwnedOpenTablesError extends Error {
+  constructor(public readonly tables: Array<{ orderId: string; tableLabel: string }>) {
+    super(`Imaš ${tables.length} otvoren${tables.length === 1 ? "" : "ih"} sto${tables.length === 1 ? "" : "ova"} — prvo ih predaj drugom konobaru.`);
+  }
+}
+
+/**
  * Konobar/kuhinja/šank ne smeju raditi bez aktivne smene na svojoj lokaciji
  * (vidi v2 plan, pravilo #6). Ova funkcija je ono što svaki POS/KDS/bar
  * endpoint poziva PRE bilo koje operacije da dobije shiftId.
@@ -110,6 +127,13 @@ export async function getShiftSummary(ctx: AuthContext, shiftId: string) {
   ]);
   const expectedCash = new Prisma.Decimal(shift.openingCash).add(cashTotal);
 
+  // Shift Handover V1: split open orders into "mine" (the employee CALLING
+  // this, i.e. the one about to try closing) vs. others' — lets the UI
+  // proactively show "PREDAJ STOLOVE" before the employee even attempts to
+  // close, rather than only after a failed call. openedBy is the same sole
+  // ownership field read everywhere else (table-service.ts, order-access.ts).
+  const myOpenOrders = openOrders.filter((o) => o.openedBy === ctx.employeeId);
+
   return {
     shift,
     openingCash: shift.openingCash.toString(),
@@ -119,6 +143,7 @@ export async function getShiftSummary(ctx: AuthContext, shiftId: string) {
     totalRevenue: cashTotal.add(cardTotal).toString(),
     orderCount,
     openOrders: openOrders.map((o) => ({ id: o.id, tableLabel: o.table.label, status: o.status })),
+    myOpenTables: myOpenOrders.map((o) => ({ orderId: o.id, tableLabel: o.table.label })),
     canClose: shift.status === "OPEN" && openOrders.length === 0,
   };
 }
@@ -140,6 +165,16 @@ export async function closeShift(ctx: AuthContext, shiftId: string, input: Close
     include: { table: { select: { label: true } } },
   });
   if (openOrders.length > 0) {
+    // Shift Handover V1: give the specific, actionable error when the
+    // CLOSING employee is themselves one of the current owners — see
+    // OwnedOpenTablesError above. Falls through to the existing generic
+    // message, UNCHANGED, when the remaining open orders belong to other
+    // waiters — the underlying safety invariant (no close with ANY open
+    // order) is identical either way.
+    const myOpenOrders = openOrders.filter((o) => o.openedBy === ctx.employeeId);
+    if (myOpenOrders.length > 0) {
+      throw new OwnedOpenTablesError(myOpenOrders.map((o) => ({ orderId: o.id, tableLabel: o.table.label })));
+    }
     const labels = openOrders.map((o) => o.table.label).join(", ");
     throw new Error(`Ne može se zatvoriti smena — postoje otvoreni računi: ${labels}`);
   }
