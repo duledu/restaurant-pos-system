@@ -11,6 +11,7 @@ import { requireDraftOwnership, requireOrderOperator } from "./order-access";
 import { getModifierGroupsForMenuItem, validateAndPriceModifierSelection } from "../menu/modifier-service";
 import { getBlockedAvailability } from "../menu/availability-service";
 import { assertIngredientStockAvailable } from "../inventory/ingredient-service";
+import { resolveEffectivePrice, resolveEffectivePrices } from "../promotions/promotion-service";
 import type { OpenOrderInput, AddOrderItemInput, UpdateOrderItemInput, UpdateOrderItemModifiersInput, SubmitOrderInput } from "@rcs/shared";
 
 const ORDER_ITEM_INCLUDE = {
@@ -222,13 +223,23 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
   // izabrani dodaci) — vidi napomenu na vrhu schema.prisma modela.
   const groups = await getModifierGroupsForMenuItem(ctx.restaurantId, menuItem.id);
   const { priceDelta, snapshotRows } = validateAndPriceModifierSelection(groups, input.modifierOptionIds);
-  const effectivePrice = new Prisma.Decimal(menuItem.price).add(priceDelta).toDecimalPlaces(2);
 
-  // Snapshot se pravi OVDE, pri dodavanju u draft — ne pri submit-u — jer
-  // konobar treba da vidi tačnu cenu u pregledu porudžbine pre slanja.
-  // Cena se PONOVO snapshot-uje (ne menja) pri submitOrder ispod, na
-  // slučaj da je cena (osnovna ili dodataka) promenjena između dodavanja u
-  // draft i slanja.
+  // PROMOTIONS & PRICING ENGINE V1: snapshot se pravi OVDE, pri dodavanju u
+  // draft — ne pri submit-u — jer konobar treba da vidi tačnu (eventualno
+  // promotivnu) cenu u pregledu porudžbine pre slanja. Cena (I promocija) se
+  // PONOVO evaluira pri submitOrder ispod, na slučaj da se osnovna cena,
+  // dodaci, ILI aktivna promocija promene između dodavanja u draft i slanja
+  // — server-acceptance (submit) je autoritativan trenutak, ne add.
+  const priced = await resolveEffectivePrice({
+    restaurantId: ctx.restaurantId,
+    locationId: order.locationId,
+    menuItemId: menuItem.id,
+    categoryId: menuItem.categoryId,
+    basePrice: menuItem.price,
+    modifierDelta: priceDelta,
+    at: new Date(),
+  });
+
   try {
     return await prisma.$transaction(async (tx) => {
       const item = await tx.orderItem.create({
@@ -236,7 +247,12 @@ export async function addItem(ctx: AuthContext, orderId: string, input: AddOrder
           orderId,
           menuItemId: menuItem.id,
           name: menuItem.name,
-          price: effectivePrice,
+          price: priced.effectivePrice,
+          regularPrice: priced.regularPrice,
+          promotionId: priced.promotion?.id,
+          promotionName: priced.promotion?.name,
+          promotionType: priced.promotion?.type,
+          promotionValue: priced.promotion?.value,
           taxRate: menuItem.taxRate,
           quantity: input.quantity,
           note: input.note,
@@ -578,11 +594,9 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       modifiersByItem.set(m.orderItemId, list);
     }
 
+    const modifierTotalByItem = new Map<string, Prisma.Decimal>();
     for (const item of items) {
-      if (!item.menuItemId) continue;
-      const currentMenuItem = menuItemById.get(item.menuItemId);
-      if (!currentMenuItem) continue; // artikal u međuvremenu obrisan — zadrži poslednji poznati snapshot
-
+      if (!item.menuItemId || !menuItemById.has(item.menuItemId)) continue;
       let modifierTotal = new Prisma.Decimal(0);
       for (const m of modifiersByItem.get(item.id) ?? []) {
         // Opcija u međuvremenu deaktivirana/obrisana: nema živog izvora za
@@ -595,12 +609,48 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
           await tx.orderItemModifier.update({ where: { id: m.id }, data: { priceDelta: currentDelta } });
         }
       }
+      modifierTotalByItem.set(item.id, modifierTotal);
+    }
 
-      const newEffectivePrice = new Prisma.Decimal(currentMenuItem.price).add(modifierTotal).toDecimalPlaces(2);
-      if (!newEffectivePrice.equals(item.price) || Number(currentMenuItem.taxRate) !== Number(item.taxRate)) {
+    // PROMOTIONS & PRICING ENGINE V1: server-acceptance (OVAJ trenutak, ne
+    // trenutak dodavanja u draft) je autoritativan za cenu I promociju —
+    // ista filozofija kao postojeći re-snapshot osnovne cene/poreza iznad
+    // (P3.2), sada proširena i na promociju. Batch-ovano (JEDAN upit za sve
+    // stavke ovog kruga) — nikad po-stavci unutar kritične submit transakcije.
+    const now = new Date();
+    const pricingLines = items
+      .filter((item) => item.menuItemId && menuItemById.has(item.menuItemId))
+      .map((item) => {
+        const currentMenuItem = menuItemById.get(item.menuItemId!)!;
+        return {
+          key: item.id,
+          menuItemId: currentMenuItem.id,
+          categoryId: currentMenuItem.categoryId,
+          basePrice: currentMenuItem.price,
+          modifierDelta: modifierTotalByItem.get(item.id) ?? new Prisma.Decimal(0),
+        };
+      });
+    const pricedByItem = await resolveEffectivePrices({ restaurantId: ctx.restaurantId, locationId: order.locationId, lines: pricingLines, at: now });
+
+    for (const item of items) {
+      if (!item.menuItemId) continue;
+      const currentMenuItem = menuItemById.get(item.menuItemId);
+      if (!currentMenuItem) continue; // artikal u međuvremenu obrisan — zadrži poslednji poznati snapshot
+
+      const priced = pricedByItem.get(item.id)!;
+      const promotionChanged = (item.promotionId ?? null) !== (priced.promotion?.id ?? null);
+      if (!priced.effectivePrice.equals(item.price) || Number(currentMenuItem.taxRate) !== Number(item.taxRate) || promotionChanged) {
         await tx.orderItem.update({
           where: { id: item.id },
-          data: { price: newEffectivePrice, taxRate: currentMenuItem.taxRate },
+          data: {
+            price: priced.effectivePrice,
+            regularPrice: priced.regularPrice,
+            taxRate: currentMenuItem.taxRate,
+            promotionId: priced.promotion?.id ?? null,
+            promotionName: priced.promotion?.name ?? null,
+            promotionType: priced.promotion?.type ?? null,
+            promotionValue: priced.promotion?.value ?? null,
+          },
         });
       }
     }
@@ -647,7 +697,9 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     // OVOG kruga, ni jedna više. Već poslate/spremne/servirane/plaćene
     // stavke iz ranijih krugova se OVIM ne dodiruju.
     const draftItemIds = items.map((item) => item.id);
-    const submittedAt = new Date();
+    // Isti trenutak korišćen gore za promociju (`now`) — jedan autoritativan
+    // "sada" za ceo submit, nikad dva blago različita poziva new Date().
+    const submittedAt = now;
     await tx.orderItem.updateMany({ where: { id: { in: draftItemIds } }, data: { status: "SUBMITTED", submittedAt } });
     await tx.orderItem.updateMany({
       where: { id: { in: draftItemIds }, preparationStation: "NONE" },

@@ -4,6 +4,7 @@ import { waiterTiming } from "./waiter-performance";
 import { useRef, useState } from "react";
 import { readAvailability, type Category, type StaticMenuItem, type LiveAvailability } from "./waiter-menu";
 import type { FloorWithTables } from "./waiter-tables";
+import type { PromotionRule } from "./promotion-preview";
 
 async function apiFetch<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
@@ -43,6 +44,16 @@ export interface PreparationResult {
    * menu.getWaiterMenuSnapshot. Još se ne koristi za rekonsilijaciju (to je
    * P0.2c/P0.3), samo je preneta ovde da bude dostupna kad zatreba. */
   menuVersion: number | null;
+  /** PROMOTIONS & PRICING ENGINE V1 — raw, unevaluated schedule rules (see
+   * promotion-service.ts's listActivePromotionRulesForSnapshot). The client
+   * evaluates activeness/precedence itself, via the exact same pure logic
+   * the server uses (packages/shared/promotion-schedule.ts) — see
+   * apps/web/lib/promotion-preview.ts. Preview only; server remains
+   * authoritative at addItem/submitOrder. */
+  promotions: PromotionRule[];
+  /** Restaurant.timezone — required to evaluate `promotions` correctly;
+   * Happy Hour must never depend on the browser/phone's own timezone. */
+  restaurantTimezone: string;
 }
 
 /**
@@ -97,7 +108,7 @@ export async function prepareShift(onStage: (stage: PreparationStage) => void): 
   }
 
   const requests = [
-    trackedFetch<Pick<PreparationResult, "restaurantId" | "locationId" | "categories" | "items" | "menuVersion">>(`/api/pos/menu/snapshot?locationId=${locationId}`, "menu"),
+    trackedFetch<Pick<PreparationResult, "restaurantId" | "locationId" | "categories" | "items" | "menuVersion" | "promotions" | "restaurantTimezone">>(`/api/pos/menu/snapshot?locationId=${locationId}`, "menu"),
     trackedFetch<unknown>(`/api/pos/menu/availability?locationId=${locationId}`, "availability"),
     trackedFetch<{ shift: PreparationResult["shift"] }>(`/api/pos/shift?locationId=${locationId}`, "shift"),
     trackedFetch<{ floors: PreparationResult["floors"] }>(`/api/pos/tables?locationId=${locationId}`, "tables"),
@@ -123,6 +134,8 @@ export async function prepareShift(onStage: (stage: PreparationStage) => void): 
     items: snapshot.items,
     availabilityByItemId,
     menuVersion: snapshot.menuVersion ?? null,
+    promotions: snapshot.promotions ?? [],
+    restaurantTimezone: snapshot.restaurantTimezone,
   };
 }
 

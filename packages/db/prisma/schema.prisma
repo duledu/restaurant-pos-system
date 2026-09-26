@@ -96,6 +96,7 @@ model Restaurant {
   ingredients         Ingredient[]
   ingredientStocks    IngredientStock[]
   inventoryCategories InventoryCategory[]
+  promotions          Promotion[]
 
   @@index([tenantId])
   @@index([status])
@@ -141,6 +142,7 @@ model Location {
   orders              Order[]
   inventoryItems      InventoryItem[]
   ingredientStocks    IngredientStock[]
+  promotions          Promotion[]
 
   @@index([restaurantId])
   @@map("locations")
@@ -396,8 +398,9 @@ model MenuCategory {
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
-  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
-  items      MenuItem[]
+  restaurant       Restaurant        @relation(fields: [restaurantId], references: [id])
+  items            MenuItem[]
+  promotionTargets PromotionTarget[]
 
   // Slug je stabilan identifikator za UPSERT u seed skripti — jedinstven
   // po restoranu, ne globalno (isti "grill" slug može postojati u dva
@@ -486,6 +489,7 @@ model MenuItem {
   inventoryItems    InventoryItem[]
   modifierGroups    MenuItemModifierGroup[]
   recipeLines       MenuItemIngredient[]
+  promotionTargets  PromotionTarget[]
 
   @@unique([restaurantId, slug])
   @@index([restaurantId])
@@ -494,6 +498,117 @@ model MenuItem {
   @@index([categoryId])
   @@index([preparationStation])
   @@map("menu_items")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PROMOTIONS & PRICING ENGINE V1 — vremenski zakazane promocije (Happy Hour
+// i slično). NAMERNO ne koristi postojeći Order.discountAmount/discountReason
+// (ručni, jednokratni popust na nivou porudžbine — vidi napomenu uz Order) —
+// ovo je PRAVILO (zakazano, ponovljivo, po artiklu/kategoriji), potpuno
+// druga stvar. Promotion NIKAD ne menja MenuItem.price direktno — resolver
+// (packages/domain/promotions/promotion-service.ts, resolveEffectivePrice)
+// samo IZRAČUNAVA efektivnu cenu u trenutku dodavanja/slanja porudžbine, a
+// rezultat se ZAMRZAVA na OrderItem (polja ispod) — kasnija izmena/brisanje/
+// deaktivacija Promotion reda NIKAD retroaktivno ne menja već snapshot-ovanu
+// cenu (isti obrazac kao MenuItem.name/price snapshot na OrderItem).
+//
+// SCHEDULE: startTime/endTime su MINUTI OD PONOĆI (0-1439), ne DateTime —
+// ovo je pravilo koje se ponavlja svake nedelje ("17:00-19:00"), ne
+// apsolutni trenutak. endTime <= startTime znači interval koji prelazi
+// ponoć (npr. 22:00-02:00) — vidi packages/shared/promotion-schedule.ts
+// (isScheduleActiveAt) za tačnu semantiku (start inkluzivno, end
+// ekskluzivno). daysOfWeek koristi JS Date.getDay() konvenciju (0=nedelja..
+// 6=subota). startDate/endDate su OPCIONI kalendarski datumi (bez vremena)
+// u vremenskoj zoni restorana (Restaurant.timezone, već postoji od Faze 1).
+//
+// TARGETS: zaseban PromotionTarget red po artiklu/kategoriji (ne scalar
+// niz) — isti obrazac kao svaka druga many-to-many veza u ovoj šemi
+// (MenuItemModifierGroup), radi FK integriteta i indeksirane pretrage
+// ("koje promocije važe za artikal X").
+model Promotion {
+  id           String  @id @default(uuid())
+  restaurantId String
+  // null = važi na SVIM lokacijama restorana (podrazumevano — MenuItem sam
+  // po sebi nije po-lokacijski podatak); ne-null ograničava promociju na
+  // tačno jednu lokaciju (npr. samo centar ima Happy Hour).
+  locationId   String?
+
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+
+  type  PromotionType
+  // PERCENTAGE_DISCOUNT: procenat popusta (npr. 20.00 = -20%), primenjen
+  // ISKLJUČIVO na osnovnu MenuItem.price (izabrani dodaci se NIKAD ne
+  // diskontuju — vidi resolveEffectivePrice). FIXED_PRICE: nova osnovna
+  // cena artikla (npr. 450.00 umesto 600.00); dodaci se i dalje dodaju na
+  // vrh normalno u oba slučaja.
+  value Decimal       @db.Decimal(12, 2)
+
+  // Opcioni kalendarski period (oba kraja inkluzivno, u zoni restorana).
+  startDate DateTime? @db.Date
+  endDate   DateTime? @db.Date
+
+  daysOfWeek Int[]
+  startTime  Int // minuti od ponoći, 0-1439
+  endTime    Int // minuti od ponoći, 0-1439; <= startTime znači prelazak ponoći
+
+  // Tie-break kad dve promocije istog target-tipa (obe MENU_ITEM ili obe
+  // MENU_CATEGORY) važe istovremeno za isti artikal — viši broj pobeđuje.
+  // Explicit MENU_ITEM target UVEK pobeđuje MENU_CATEGORY target, bez
+  // obzira na priority (vidi resolveEffectivePrice) — ovo polje razrešava
+  // SAMO sukob unutar istog nivoa.
+  priority Int @default(0)
+
+  createdBy  String?
+  updatedBy  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  // Meko arhiviranje umesto brisanja kad je promocija već istorijski
+  // korišćena (ima OrderItem snapshot redove koji je referenciraju) — vidi
+  // deactivatePromotion. isActive=false je "trenutno isključena, može se
+  // ponovo uključiti"; archivedAt je "trajno sklonjena iz Admin liste", ali
+  // OrderItem.promotionId ostaje netaknut (SetNull samo pri stvarnom brisanju
+  // reda, što V1 UI ne izlaže).
+  archivedAt DateTime?
+
+  restaurant Restaurant        @relation(fields: [restaurantId], references: [id])
+  location   Location?         @relation(fields: [locationId], references: [id])
+  targets    PromotionTarget[]
+  orderItems OrderItem[]
+
+  @@index([restaurantId, isActive])
+  @@index([locationId])
+  @@map("promotions")
+}
+
+enum PromotionType {
+  PERCENTAGE_DISCOUNT
+  FIXED_PRICE
+}
+
+enum PromotionTargetType {
+  MENU_ITEM
+  MENU_CATEGORY
+}
+
+model PromotionTarget {
+  id          String              @id @default(uuid())
+  promotionId String
+  targetType  PromotionTargetType
+  menuItemId  String?
+  categoryId  String?
+  createdAt   DateTime            @default(now())
+
+  promotion Promotion     @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  menuItem  MenuItem?     @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  category  MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, menuItemId])
+  @@unique([promotionId, categoryId])
+  @@index([menuItemId])
+  @@index([categoryId])
+  @@map("promotion_targets")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -735,24 +850,24 @@ model Order {
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  restaurant       Restaurant          @relation(fields: [restaurantId], references: [id])
-  location         Location            @relation(fields: [locationId], references: [id])
-  table            RestaurantTable     @relation(fields: [tableId], references: [id])
-  shift            Shift               @relation(fields: [shiftId], references: [id])
-  items            OrderItem[]
-  events           OrderEvent[]
+  restaurant         Restaurant               @relation(fields: [restaurantId], references: [id])
+  location           Location                 @relation(fields: [locationId], references: [id])
+  table              RestaurantTable          @relation(fields: [tableId], references: [id])
+  shift              Shift                    @relation(fields: [shiftId], references: [id])
+  items              OrderItem[]
+  events             OrderEvent[]
   // FAZA 8 (Split Bill): jedan Order sada može imati VIŠE Payment/Receipt
   // redova (jedan po delimičnoj naplati) — vidi napomenu uz Payment/Receipt
   // modele ispod. `payment`/`receipt` (jednina) su UKLONJENI zajedno sa
   // @unique na Payment.orderId/Receipt.orderId; svaki pozivalac koji je
   // ranije čitao `order.payment`/`order.receipt` sada čita `order.payments`/
   // `order.receipts` (niz, prazan dok porudžbina nije naplaćena ni delom).
-  payments         Payment[]
-  receipts         Receipt[]
-  itemVoids        OrderItemVoid[]
-  printJobs        PrintJob[]
-  itemTransfersOut OrderItemTransfer[] @relation("TransferSourceOrder")
-  itemTransfersIn  OrderItemTransfer[] @relation("TransferDestinationOrder")
+  payments           Payment[]
+  receipts           Receipt[]
+  itemVoids          OrderItemVoid[]
+  printJobs          PrintJob[]
+  itemTransfersOut   OrderItemTransfer[]      @relation("TransferSourceOrder")
+  itemTransfersIn    OrderItemTransfer[]      @relation("TransferDestinationOrder")
   ownershipTransfers TableOwnershipTransfer[]
 
   // Idempotency key je jedinstven PO RESTORANU kad je postavljen — dupli
@@ -790,11 +905,28 @@ model OrderItem {
   menuItemId String?
 
   name               String // snapshot naziva u trenutku slanja
-  price              Decimal            @db.Decimal(12, 2) // snapshot cene
+  price              Decimal            @db.Decimal(12, 2) // snapshot cene — STVARNO NAPLAĆENA jedinična cena (posle promocije, ako je bilo)
   taxRate            Decimal            @db.Decimal(5, 2) // snapshot poreske stope
   quantity           Int                @default(1)
   note               String? // jedna slobodna napomena po stavci (MVP)
   preparationStation PreparationStation @default(NONE) // snapshot stanice u trenutku slanja
+
+  // PROMOTIONS & PRICING ENGINE V1 — vidi napomenu uz model Promotion.
+  // regularPrice = osnovna cena + dodaci, BEZ promocije (šta bi `price` bio
+  // da promocije nema) — svi ostali izračuni (totals/Payment/Receipt) i
+  // dalje čitaju ISKLJUČIVO `price` (nula izmena nizvodno). Sva četiri polja
+  // su nullable jer su istorijski redovi kreirani pre ove faze imali samo
+  // `price` — null ovde znači "nije praćeno" (nikad se ne tumači kao "nema
+  // promocije bila aktivna", samo kao "nemamo taj podatak"). promotionId je
+  // SLABA referenca (SetNull) — brisanje Promotion reda ne sme oboriti
+  // istorijski OrderItem; naziv/tip/vrednost su SNAPSHOT-ovani odvojeno baš
+  // zato da izmena/deaktivacija/brisanje Promotion reda kasnije ne promeni
+  // ono što račun pokazuje.
+  regularPrice   Decimal?       @db.Decimal(12, 2)
+  promotionId    String?
+  promotionName  String?
+  promotionType  PromotionType?
+  promotionValue Decimal?       @db.Decimal(12, 2)
 
   // DRAFT pre-submit; afterwards this is a waiter-facing aggregate of
   // stationStates (least-advanced station). KDS never mutates it directly.
@@ -822,6 +954,7 @@ model OrderItem {
 
   order         Order               @relation(fields: [orderId], references: [id])
   menuItem      MenuItem?           @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  promotion     Promotion?          @relation(fields: [promotionId], references: [id], onDelete: SetNull)
   stationStates OrderItemStation[]
   voids         OrderItemVoid[]
   modifiers     OrderItemModifier[]
@@ -833,6 +966,7 @@ model OrderItem {
   @@index([menuItemId])
   @@index([status])
   @@index([preparationStation])
+  @@index([promotionId])
   @@map("order_items")
 }
 
@@ -1201,7 +1335,7 @@ model TableOwnershipTransfer {
   restaurantId String
   locationId   String
 
-  orderId String
+  orderId    String
   // Snapshot (String, ne FK) — ista konvencija kao OrderItemTransfer.sourceTableLabel:
   // sto se može kasnije preimenovati/deaktivirati, istorijski zapis ostaje čitljiv.
   tableId    String

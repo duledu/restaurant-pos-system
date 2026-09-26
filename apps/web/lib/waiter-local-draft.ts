@@ -143,18 +143,29 @@ export function createWaiterLocalDraft() {
       throw error;
     }
   }
-  function add(menu: MenuItem, options: string[]): OrderItem | null {
+  function add(menu: MenuItem, options: string[], effectivePrice?: string): OrderItem | null {
     const localVisible = waiterTiming("add-local-visible");
     const requestStarted = waiterTiming("add-request-start");
     if (!snapshot.order || menu.availability?.isAvailable !== true) return null;
-    const existing = snapshot.order.items.find(item => item.status === "DRAFT" && item.menuItemId === menu.id && sameModifierSelection(item.modifiers, options));
-    if (existing) return existing;
-    const mutationId = crypto.randomUUID();
-    const tempId = `local:${mutationId}`;
     const selected = menu.modifierGroups.flatMap(({ group }) => group.options.filter(option => options.includes(option.id)).map(option => ({
       id: `local:${option.id}`, modifierOptionId: option.id, groupName: group.name, optionName: option.name, priceDelta: option.priceDelta,
     })));
-    const price = (Number(menu.price) + selected.reduce((sum, option) => sum + Number(option.priceDelta), 0)).toFixed(2);
+    // PROMOTIONS & PRICING ENGINE V1 — caller may pass an already-computed
+    // (possibly promo-adjusted) preview price; falls back to the original
+    // plain base+modifiers computation when omitted (e.g. any future caller
+    // that doesn't know about promotions). Either way this is a LOCAL,
+    // OPTIMISTIC preview only — the server independently resolves and
+    // freezes the real price at addItem (order-service.ts), never trusting this.
+    const price = effectivePrice ?? (Number(menu.price) + selected.reduce((sum, option) => sum + Number(option.priceDelta), 0)).toFixed(2);
+    // Matching now ALSO requires the same price, not just the same
+    // menuItemId+modifiers — a Happy Hour boundary crossing between two
+    // still-DRAFT taps of the same item must never silently merge a
+    // pre-promo and a post-promo unit onto one row (spec: distinct pricing
+    // snapshots are never allowed to collapse into each other).
+    const existing = snapshot.order.items.find(item => item.status === "DRAFT" && item.menuItemId === menu.id && item.price === price && sameModifierSelection(item.modifiers, options));
+    if (existing) return existing;
+    const mutationId = crypto.randomUUID();
+    const tempId = `local:${mutationId}`;
     const op: Creation = { tempId, mutationId, orderId: snapshot.order.id, menuItemId: menu.id, options: [...options], quantity: 1, realItem: null, failed: false,
       requestStarted };
     creates.set(tempId, op);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { menu } from "@rcs/domain";
+import { menu, promotions } from "@rcs/domain";
 import { withApiAuth } from "../../../../../lib/api-helpers";
 
 // P0.1a — statički waiter meni snapshot (Instant Waiter Engine). Vraća
@@ -18,6 +18,16 @@ export const GET = withApiAuth(async (ctx, request) => {
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return NextResponse.json({ error: "locationId je obavezan" }, { status: 400 });
   const fresh = url.searchParams.get("fresh") === "1";
-  const snapshot = await menu.getWaiterMenuSnapshot(ctx, locationId, { fresh });
-  return NextResponse.json(snapshot);
+  // Snapshot already validates location access (getWaiterMenuSnapshot calls
+  // requireLocationAccess) — the promotions rule set below reuses that same
+  // validated locationId, no separate authorization needed. Deliberately
+  // NOT folded into menu.getWaiterMenuSnapshot itself: that would require
+  // menu-service.ts to import from promotions/promotion-service.ts, which
+  // already imports menu-service.ts (for invalidateMenuSnapshotCache) —
+  // merging here avoids a circular module dependency between the two.
+  const [snapshot, promotionRules] = await Promise.all([
+    menu.getWaiterMenuSnapshot(ctx, locationId, { fresh }),
+    promotions.listActivePromotionRulesForSnapshot(ctx.restaurantId, locationId),
+  ]);
+  return NextResponse.json({ ...snapshot, restaurantTimezone: promotionRules.timezone, promotions: promotionRules.rules });
 });

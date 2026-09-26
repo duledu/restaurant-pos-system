@@ -26,19 +26,23 @@ import { resolveDatabaseTarget } from "../../../scripts/lib/resolve-db-target.mj
 const NEW_PERMISSIONS = [
   { code: "inventory.count", description: "Fizičko prebrojavanje zaliha (Inventura) — sesija/redovi/potvrda" },
   { code: "workstations.manage", description: "Uparivanje/opoziv TableCore Print Agent radnih stanica (Faza 2A)" },
+  { code: "promotions.view", description: "Pregled promocija (Happy Hour i slično)" },
+  { code: "promotions.manage", description: "Kreiranje/izmena/aktivacija/deaktivacija promocija" },
 ] as const;
 
 export const NEW_ROLE_GRANTS: Record<string, string[]> = {
-  OWNER: ["inventory.count", "workstations.manage"],
-  ADMIN: ["inventory.count", "workstations.manage"],
-  MANAGER: ["inventory.count", "workstations.manage"],
+  OWNER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
+  ADMIN: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
+  MANAGER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
   // Inventory Phase 2 fix — INVENTORY_MANAGER je propušten u originalnom
   // Fazi 2A grantu (samo inventory.count je bio nameravan za tu ulogu, vidi
   // istoriju ovog fajla), sada dodato. workstations.manage pripada istoj
   // "operativni menadžment lokacije" grupi permisija kao
   // settings.manage/production.manage — KITCHEN/BAR NAMERNO ostaju bez ovoga
   // (operativne uloge koje PRIMAJU/štampaju tikete, ne administriraju radne
-  // stanice).
+  // stanice). promotions.* NAMERNO izostavljeno za INVENTORY_MANAGER —
+  // cenovna/promotivna politika nije deo te uloge (isti razlog kao
+  // menu.manage isključenje za WAITER/KITCHEN/BAR/INVENTORY_MANAGER u seed.ts).
   INVENTORY_MANAGER: ["inventory.count", "workstations.manage"],
 };
 

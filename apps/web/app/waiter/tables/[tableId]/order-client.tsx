@@ -11,6 +11,7 @@ import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "..
 import { useWaiterShell } from "../../../../lib/waiter-shell";
 
 import { mergeWaiterMenu, menuSectionsForItem, type MenuItem, type MenuSection, type ModifierGroup } from "../../../../lib/waiter-menu";
+import { previewEffectivePrice, usePromotionClock, type PricePreview } from "../../../../lib/promotion-preview";
 
 import type { OrderData, OrderItem } from "../../../../lib/waiter-order-types";
 import { tableMemory, quickSuggestions, repeatRound, resolveQuickSelection } from "../../../../lib/waiter-table-memory";
@@ -362,6 +363,12 @@ export function OrderClient({ tableId }: { tableId: string }) {
   return <TableOrderClient key={tableId} tableId={tableId} />;
 }
 
+/** PROMOTIONS & PRICING ENGINE V1 — `promo` is always present after the
+ * enrichment step below (TableOrderClient's `items`), never optional on the
+ * shared MenuItem type itself (waiter-menu.ts stays untouched — pos-client.tsx
+ * and other consumers of that type know nothing about promotions). */
+type MenuItemWithPromo = MenuItem & { promo: PricePreview };
+
 function TableOrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
   useEffect(() => { waiterNavigationVisible("menu"); }, []);
@@ -372,7 +379,21 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   useLayoutEffect(() => { draft.markVisible(); }, [draft, order]);
   const categories = shell.categories;
   const roles = shell.roles;
-  const items = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
+  const mergedItems = useMemo(() => mergeWaiterMenu(shell.items, shell.availabilityByItemId), [shell.items, shell.availabilityByItemId]);
+  // PROMOTIONS & PRICING ENGINE V1 — instant client preview only (server is
+  // authoritative at addItem/submitOrder, see order-service.ts). `promoNow`
+  // only changes at an actual schedule boundary (usePromotionClock schedules
+  // exactly one timeout, never polls), so this re-derives the enriched array
+  // exactly when — and only when — a promo could plausibly have started/ended.
+  const promoNow = usePromotionClock(shell.promotions, shell.restaurantTimezone);
+  const items: MenuItemWithPromo[] = useMemo(
+    () =>
+      mergedItems.map((item) => ({
+        ...item,
+        promo: previewEffectivePrice(Number(item.price), 0, item.id, item.categoryId, shell.promotions, promoNow, shell.restaurantTimezone),
+      })),
+    [mergedItems, shell.promotions, shell.restaurantTimezone, promoNow]
+  );
   const itemById = useMemo(() => new Map(items.map(item => [item.id, item])), [items]);
   const view = useMemo(() => activeOrderView(order), [order]);
 
@@ -640,7 +661,17 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     if (submittingRef.current || !draft.getSnapshot().order) return false;
     const menu = itemById.get(menuItemId);
     if (!menu || menu.availability?.isAvailable !== true) return false;
-    const existing = draft.add(menu, modifierOptionIds);
+    // PROMOTIONS & PRICING ENGINE V1 — `menu.promo` above was precomputed
+    // for ZERO modifiers (it's shared by every possible modifier selection
+    // on the menu card); THIS tap's actual selection may add its own delta,
+    // so the effective price is re-previewed here with the real modifierDelta.
+    // Preview only — the server independently re-derives and freezes the
+    // authoritative price at addItem (order-service.ts), never trusting this.
+    const modifierDelta = menu.modifierGroups
+      .flatMap(({ group }) => group.options.filter((option) => modifierOptionIds.includes(option.id)))
+      .reduce((sum, option) => sum + Number(option.priceDelta), 0);
+    const priced = previewEffectivePrice(Number(menu.price), modifierDelta, menu.id, menu.categoryId, shell.promotions, promoNow, shell.restaurantTimezone);
+    const existing = draft.add(menu, modifierOptionIds, priced.effectivePrice.toFixed(2));
     if (existing && existing.quantity >= 50) return false;
     if (existing) void changeQuantity(existing, existing.quantity + 1);
     favorites.record(menuItemId, modifierOptionIds);
@@ -1307,7 +1338,7 @@ const QuickActionSlider = memo(function QuickActionSlider({ title, selections, i
       && sameModifierSelection(selection.options.map(modifierOptionId => ({ modifierOptionId })), other.options);
   }));
 
-const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMenuItem }: { visibleItems: MenuItem[]; submitting: boolean; handleTapMenuItem: (item: MenuItem) => void }) {
+const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMenuItem }: { visibleItems: MenuItemWithPromo[]; submitting: boolean; handleTapMenuItem: (item: MenuItemWithPromo) => void }) {
   return (
         <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
           {visibleItems.map((item) => {
@@ -1348,9 +1379,19 @@ const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMen
                   {item.modifierGroups.length > 0 && <span className="ml-1.5 align-middle text-[10px] font-medium text-inkSoft">· dodaci</span>}
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-2">
-                  <span className="text-base font-bold tabular-nums text-gold-dark">
-                    {Number(item.price).toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
+                  <span className="flex items-baseline gap-1.5">
+                    {item.promo.promotion && (
+                      <span className="text-xs font-medium text-ink/40 line-through">{item.promo.regularPrice.toFixed(2)}</span>
+                    )}
+                    <span className="text-base font-bold tabular-nums text-gold-dark">
+                      {item.promo.effectivePrice.toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
+                    </span>
                   </span>
+                  {item.promo.promotion && (
+                    <span className="rounded-full bg-gold-soft px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gold-dark">
+                      {item.promo.promotion.name}
+                    </span>
+                  )}
                   {isUnavailable && (
                     <span className="rounded-full bg-danger px-2 py-0.5 text-[10px] font-bold text-white">NIJE DOSTUPNO</span>
                   )}
@@ -1531,9 +1572,9 @@ const SectionSwitch = memo(function SectionSwitch({ section, setSection }: { sec
 });
 
 // Browsing state is local to the menu: category/search/section never rebuild the order panel.
-const MenuBrowser = memo(function MenuBrowser({ items, categories, submitting, tapMenu, searchInputRef }: { items: MenuItem[]; categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; submitting: boolean; tapMenu: (item: MenuItem) => void; searchInputRef: React.RefObject<HTMLInputElement> }) {
+const MenuBrowser = memo(function MenuBrowser({ items, categories, submitting, tapMenu, searchInputRef }: { items: MenuItemWithPromo[]; categories: ReturnType<typeof useWaiterShell>["data"]["categories"]; submitting: boolean; tapMenu: (item: MenuItemWithPromo) => void; searchInputRef: React.RefObject<HTMLInputElement> }) {
   const categoryTypeById = useMemo(() => new Map(categories.map((c) => [c.id, c.type])), [categories]);
-  const sectionsOf = useCallback((item: MenuItem) => menuSectionsForItem(item, item.categoryId ? categoryTypeById.get(item.categoryId) : undefined), [categoryTypeById]);
+  const sectionsOf = useCallback((item: MenuItemWithPromo) => menuSectionsForItem(item, item.categoryId ? categoryTypeById.get(item.categoryId) : undefined), [categoryTypeById]);
   // KUHINJA is the default unless the menu has no kitchen items at all — a
   // pure-bar location should not open on a permanently empty tab.
   const [section, setSection] = useState<MenuSection>(() => (items.some((item) => sectionsOf(item).includes("KITCHEN")) ? "KITCHEN" : "BAR"));
