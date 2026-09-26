@@ -8,13 +8,14 @@
  * snapshot preservation and downstream (Payment/Receipt/KDS/Inventory)
  * side-effect safety).
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError, type AuthContext } from "@rcs/auth";
-import { orders, billing, promotions } from "@rcs/domain";
+import { orders, billing, promotions, printing, transfers } from "@rcs/domain";
 import { resolveEffectivePrice } from "../../packages/domain/promotions/promotion-service";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
+import { previewEffectivePrice } from "../../apps/web/lib/promotion-preview";
 
 interface Fixture {
   restaurantId: string;
@@ -79,10 +80,26 @@ function happyHourInput(overrides: Partial<Parameters<typeof promotions.createPr
 }
 
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-01-05T17:30:00.000Z"));
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
 });
+afterEach(() => vi.useRealTimers());
 
 describe("Promotion CRUD — authorization & audit", () => {
+  it("creates and edits a calendar range, and audits schedule, targets and priority", async () => {
+    const fixture = await createFixture();
+    const ctx = managerCtx(fixture);
+    const input = happyHourInput({ startDate: "2026-01-01", endDate: "2026-01-31", targets: { menuItemIds: [fixture.menuItemId], categoryIds: [] } });
+    const promo = await promotions.createPromotion(ctx, input);
+    expect(promo.startDate?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    const updated = await promotions.updatePromotion(ctx, promo.id, { ...input, endDate: "2026-02-28", startTime: 600, priority: 3, targets: { menuItemIds: [], categoryIds: [fixture.categoryId] } });
+    expect(updated.endDate?.toISOString()).toBe("2026-02-28T00:00:00.000Z");
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityId: promo.id, action: "promotion.edited" } });
+    expect(audit.previousValue).toMatchObject({ startTime: 0, priority: 0, targets: input.targets });
+    expect(audit.newValue).toMatchObject({ startTime: 600, priority: 3, targets: { menuItemIds: [], categoryIds: [fixture.categoryId] } });
+  });
+
   it("WAITER cannot create a promotion (promotions.manage required)", async () => {
     const fixture = await createFixture();
     const ctx = context(fixture, "WAITER", "w1", new Set()); // no promotions.manage
@@ -122,6 +139,28 @@ describe("Promotion CRUD — authorization & audit", () => {
 
 describe("resolveEffectivePrice — core pricing math (Decimal, never float)", () => {
   const AT = new Date("2026-01-05T17:30:00.000Z"); // 18:30 Belgrade time, Monday
+
+  it("uses Restaurant.timezone and exposes matching preview rules for that location", async () => {
+    const fixture = await createFixture();
+    await prisma.restaurant.update({ where: { id: fixture.restaurantId }, data: { timezone: "Asia/Tokyo" } });
+    await promotions.createPromotion(managerCtx(fixture), happyHourInput({ daysOfWeek: [2], startTime: 120, endTime: 180, targets: { menuItemIds: [fixture.menuItemId], categoryIds: [] } }));
+    const input = { restaurantId: fixture.restaurantId, locationId: fixture.locationId, menuItemId: fixture.menuItemId, categoryId: fixture.categoryId, basePrice: "600", modifierDelta: "50", at: AT };
+    const result = await resolveEffectivePrice(input); // Tuesday 02:30 Tokyo, Monday 18:30 Belgrade
+    const snapshot = await promotions.listActivePromotionRulesForSnapshot(fixture.restaurantId, fixture.locationId);
+    const preview = previewEffectivePrice(600, 50, fixture.menuItemId, fixture.categoryId, snapshot.rules, AT, snapshot.timezone);
+    expect(snapshot.timezone).toBe("Asia/Tokyo");
+    expect(result.effectivePrice.toString()).toBe("530");
+    expect(preview.effectivePrice).toBe(530);
+    expect(preview.promotion?.id).toBe(result.promotion?.id);
+  });
+
+  it("rounds fractional money once using Decimal, with undiscounted modifiers", async () => {
+    const fixture = await createFixture();
+    await promotions.createPromotion(managerCtx(fixture), happyHourInput({ value: 15, targets: { menuItemIds: [fixture.menuItemId], categoryIds: [] } }));
+    const result = await resolveEffectivePrice({ restaurantId: fixture.restaurantId, locationId: fixture.locationId, menuItemId: fixture.menuItemId, categoryId: fixture.categoryId, basePrice: "12.35", modifierDelta: "0.10", at: AT });
+    expect(result.regularPrice.toFixed(2)).toBe("12.45");
+    expect(result.effectivePrice.toFixed(2)).toBe("10.60");
+  });
 
   it("PERCENTAGE_DISCOUNT: 600 -20% = 480.00 exactly", async () => {
     const fixture = await createFixture();
@@ -242,6 +281,64 @@ describe("resolveEffectivePrice — core pricing math (Decimal, never float)", (
 });
 
 describe("Order pricing pipeline — snapshot discipline (addItem + submitOrder)", () => {
+  it("reprices every unsent unit at actual schedule expiry, including a quantity increment, without duplicate dispatch", async () => {
+    const fixture = await createFixture();
+    const ctx = waiterCtx(fixture);
+    await promotions.createPromotion(managerCtx(fixture), happyHourInput({ startTime: 1020, endTime: 1140, targets: { menuItemIds: [fixture.menuItemId], categoryIds: [] } }));
+    const order = await openOrder(fixture, ctx);
+    const first = await orders.addItem(ctx, order.id, { menuItemId: fixture.menuItemId, quantity: 1, modifierOptionIds: [] });
+    expect(first.price.toString()).toBe("480");
+    vi.setSystemTime(new Date("2026-01-05T18:00:00.000Z")); // 19:00, exclusive end
+    await orders.updateItem(ctx, order.id, first.id, { quantity: 2 });
+    const second = await orders.addItem(ctx, order.id, { menuItemId: fixture.menuItemId, quantity: 1, modifierOptionIds: [] });
+    const accepted = await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
+    expect(accepted.items).toHaveLength(2);
+    expect(accepted.items.every(i => i.price.toString() === "600" && i.promotionId === null)).toBe(true);
+    expect(accepted.items.find(i => i.id === first.id)?.quantity).toBe(2);
+    expect(accepted.items.find(i => i.id === second.id)?.quantity).toBe(1);
+    await expect(orders.updateItem(ctx, order.id, first.id, { quantity: 3 })).rejects.toThrow(/već poslata/);
+    await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
+    expect(await prisma.printJob.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await prisma.orderItemStation.count({ where: { orderItemId: { in: [first.id, second.id] } } })).toBe(2);
+  });
+
+  it("partial table transfer preserves the full accepted promotion snapshot", async () => {
+    const fixture = await createFixture();
+    const ctx = waiterCtx(fixture);
+    const promo = await promotions.createPromotion(managerCtx(fixture), happyHourInput({ targets: { menuItemIds: [fixture.menuItemId], categoryIds: [] } }));
+    const order = await openOrder(fixture, ctx);
+    const item = await orders.addItem(ctx, order.id, { menuItemId: fixture.menuItemId, quantity: 2, modifierOptionIds: [] });
+    await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
+    await promotions.deactivatePromotion(managerCtx(fixture), promo.id);
+    const destination = await newTable(fixture);
+    await transfers.transferOrderItems(ctx, order.id, { destinationTableId: destination.id, lines: [{ orderItemId: item.id, quantity: 1 }] });
+    const copied = await prisma.orderItem.findFirstOrThrow({ where: { menuItemId: fixture.menuItemId, id: { not: item.id } } });
+    expect(copied.price.toString()).toBe("480");
+    expect(copied.regularPrice?.toString()).toBe("600");
+    expect(copied.promotionId).toBe(promo.id);
+    expect(copied.promotionName).toBe("Happy Hour");
+    expect(copied.promotionType).toBe("PERCENTAGE_DISCOUNT");
+    expect(copied.promotionValue?.toString()).toBe("20");
+  });
+
+  it("submit freezes changed metadata and regular price even when the charged price and promotion ID are unchanged", async () => {
+    const fixture = await createFixture();
+    const ctx = waiterCtx(fixture);
+    const targets = { menuItemIds: [fixture.menuItemId], categoryIds: [] };
+    const promo = await promotions.createPromotion(managerCtx(fixture), happyHourInput({ targets }));
+    const order = await openOrder(fixture, ctx);
+    const item = await orders.addItem(ctx, order.id, { menuItemId: fixture.menuItemId, quantity: 1, modifierOptionIds: [] });
+    await promotions.updatePromotion(managerCtx(fixture), promo.id, happyHourInput({ name: "New name", type: "FIXED_PRICE", value: 480, targets }));
+    await prisma.menuItem.update({ where: { id: fixture.menuItemId }, data: { price: "700" } });
+    await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
+    const accepted = await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(accepted.price.toString()).toBe("480");
+    expect(accepted.regularPrice?.toString()).toBe("700");
+    expect(accepted.promotionName).toBe("New name");
+    expect(accepted.promotionType).toBe("FIXED_PRICE");
+    expect(accepted.promotionValue?.toString()).toBe("480");
+  });
+
   it("addItem freezes the promo price and full snapshot (regularPrice/promotionId/Name/Type/Value) onto OrderItem", async () => {
     const fixture = await createFixture();
     const ctx = waiterCtx(fixture);
@@ -398,6 +495,12 @@ describe("Downstream safety — Payment/Receipt/KDS/Inventory never re-derive pr
     const items = receipt.items as Array<{ name: string; price: string; lineTotal: string }>;
     expect(items[0].price).toBe("480");
     expect(items[0].lineTotal).toBe("1440");
+    await prisma.promotion.deleteMany({ where: { restaurantId: fixture.restaurantId } });
+    await prisma.menuItem.update({ where: { id: fixture.menuItemId }, data: { price: "999" } });
+    await printing.reprintReceipt(managerPaymentCtx, order.id, randomUUID());
+    const reprint = await prisma.printJob.findFirstOrThrow({ where: { orderId: order.id, isReprint: true } });
+    expect((reprint.content as { items: Array<{ unitPrice: string }> }).items[0].unitPrice).toBe("480");
+    expect((await prisma.receipt.findUniqueOrThrow({ where: { id: receipt.id } })).items).toEqual(receipt.items);
   });
 
   it("dispatches exactly one KDS PrintJob for the promo-priced line — no duplicate dispatch caused by pricing logic", async () => {

@@ -4,6 +4,7 @@ import { waiterTiming } from "./waiter-performance";
 import { shareWaiterSnapshot } from "./waiter-snapshot";
 import type { MenuItem } from "./waiter-menu";
 import type { OrderData, OrderItem } from "./waiter-order-types";
+import type { PricePreview } from "./promotion-preview";
 
 class RejectedAdd extends Error {}
 async function request(url: string, method: string, body?: unknown) {
@@ -19,6 +20,7 @@ async function request(url: string, method: string, body?: unknown) {
 type Creation = {
   tempId: string; mutationId: string; orderId: string; menuItemId: string;
   options: string[]; quantity: number; realItem: OrderItem | null; failed: boolean;
+  note: string | null;
   requestStarted: () => void;
 };
 
@@ -87,7 +89,7 @@ export function createWaiterLocalDraft() {
     try {
       if (!op.realItem) {
         // A lost response is retried with the SAME immutable logical-add input.
-        const body = { clientMutationId: op.mutationId, menuItemId: op.menuItemId, quantity: 1, modifierOptionIds: op.options };
+        const body = { clientMutationId: op.mutationId, menuItemId: op.menuItemId, quantity: 1, modifierOptionIds: op.options, ...(op.note ? { note: op.note } : {}) };
         for (let attempt = 0; ; attempt++) {
           try {
             const result = await request(`/api/pos/orders/${op.orderId}/items`, "POST", body);
@@ -143,7 +145,7 @@ export function createWaiterLocalDraft() {
       throw error;
     }
   }
-  function add(menu: MenuItem, options: string[], effectivePrice?: string): OrderItem | null {
+  function add(menu: MenuItem, options: string[], preview?: PricePreview, note: string | null = null): OrderItem | null {
     const localVisible = waiterTiming("add-local-visible");
     const requestStarted = waiterTiming("add-request-start");
     if (!snapshot.order || menu.availability?.isAvailable !== true) return null;
@@ -156,23 +158,28 @@ export function createWaiterLocalDraft() {
     // that doesn't know about promotions). Either way this is a LOCAL,
     // OPTIMISTIC preview only — the server independently resolves and
     // freezes the real price at addItem (order-service.ts), never trusting this.
-    const price = effectivePrice ?? (Number(menu.price) + selected.reduce((sum, option) => sum + Number(option.priceDelta), 0)).toFixed(2);
+    const price = preview?.effectivePrice.toFixed(2) ?? (Number(menu.price) + selected.reduce((sum, option) => sum + Number(option.priceDelta), 0)).toFixed(2);
     // Matching now ALSO requires the same price, not just the same
     // menuItemId+modifiers — a Happy Hour boundary crossing between two
     // still-DRAFT taps of the same item must never silently merge a
     // pre-promo and a post-promo unit onto one row (spec: distinct pricing
     // snapshots are never allowed to collapse into each other).
-    const existing = snapshot.order.items.find(item => item.status === "DRAFT" && item.menuItemId === menu.id && item.price === price && sameModifierSelection(item.modifiers, options));
+    const existing = snapshot.order.items.find(item => item.status === "DRAFT" && item.menuItemId === menu.id
+      && Number(item.price) === Number(price) && (item.promotionId ?? null) === (preview?.promotion?.id ?? null)
+      && (item.note ?? null) === note && sameModifierSelection(item.modifiers, options));
     if (existing) return existing;
     const mutationId = crypto.randomUUID();
     const tempId = `local:${mutationId}`;
-    const op: Creation = { tempId, mutationId, orderId: snapshot.order.id, menuItemId: menu.id, options: [...options], quantity: 1, realItem: null, failed: false,
+    const op: Creation = { tempId, mutationId, orderId: snapshot.order.id, menuItemId: menu.id, options: [...options], note, quantity: 1, realItem: null, failed: false,
       requestStarted };
     creates.set(tempId, op);
     visibleTimings.push(localVisible);
     setError(null);
     setOrder(previous => previous ? { ...previous, items: [...previous.items, { id: tempId, menuItemId: menu.id, name: menu.name, price, quantity: 1,
-      note: null, status: "DRAFT", modifiers: selected, localStatus: "pending" }] } : previous);
+      regularPrice: preview?.regularPrice.toFixed(2), promotionId: preview?.promotion?.id ?? null,
+      promotionName: preview?.promotion?.name ?? null, promotionType: preview?.promotion?.type ?? null,
+      promotionValue: preview?.promotion?.value ?? null,
+      note, status: "DRAFT", modifiers: selected, localStatus: "pending" }] } : previous);
     void mutations.enqueue(() => sendCreation(op)).catch(() => {});
     return null;
   }

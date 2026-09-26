@@ -36,6 +36,8 @@ export const PERMISSIONS = [
   { code: "employees.manage", description: "Kreiranje/izmena zaposlenih, rola i dozvola" },
   { code: "menu.view", description: "Pregled menija (kategorije i artikli)" },
   { code: "menu.manage", description: "Izmena cena, kreiranje/brisanje/arhiviranje artikala i kategorija" },
+  { code: "promotions.view", description: "Pregled promocija" },
+  { code: "promotions.manage", description: "Kreiranje/izmena/aktivacija/deaktivacija promocija" },
   { code: "shifts.manage", description: "Otvaranje i zatvaranje smene" },
   { code: "production.view", description: "Pregled tiketa kuhinje/šanka" },
   { code: "production.manage", description: "Promena statusa stavki na kuhinji/šanku" },
@@ -50,9 +52,9 @@ export const PERMISSIONS = [
 // Ključno pravilo iz specifikacije: WAITER/KITCHEN/BAR NIKAD ne dobijaju
 // menu.manage niti employees.manage.
 export const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> = {
-  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
-  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
-  MANAGER: ["employees.view", "menu.view", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  OWNER: ["employees.view", "employees.manage", "menu.view", "menu.manage", "promotions.view", "promotions.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  ADMIN: ["employees.view", "employees.manage", "menu.view", "menu.manage", "promotions.view", "promotions.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
+  MANAGER: ["employees.view", "menu.view", "promotions.view", "promotions.manage", "shifts.manage", "production.view", "production.manage", "audit.view", "devices.manage", "orders.print", "settings.manage"],
   WAITER: ["menu.view", "shifts.manage", "orders.print"],
   KITCHEN: ["menu.view", "production.view", "production.manage"],
   BAR: ["menu.view", "production.view", "production.manage"],

@@ -78,6 +78,43 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("refreshes promotion rules through the existing availability request without altering draft prices", async () => {
+    await render(h(OrderClient, { tableId: '5' }));
+    const before = shell.getDraft('5').getSnapshot().order;
+    const promo = { id: "new-promo", name: "Happy Hour", type: "FIXED_PRICE", value: "150", priority: 0, createdAt: "2026-01-01T00:00:00Z",
+      schedule: { daysOfWeek: [1], startTime: 1020, endTime: 1140, startDate: null, endDate: null },
+      targets: [{ targetType: "MENU_ITEM", menuItemId: "m1", categoryId: null }] };
+    custom = url => url.includes('/availability') ? response({ ...overlay, restaurantTimezone: "Europe/Belgrade", promotions: [promo] }) : undefined;
+    await act(async () => shell.refreshAvailability());
+    expect(shell.data.promotions).toEqual([promo]);
+    expect(shell.getDraft('5').getSnapshot().order).toBe(before);
+    expect(calls('/api/pos/menu/snapshot')).toHaveLength(1);
+    custom = url => url.includes('/availability') ? response({ ...overlay, restaurantTimezone: "Europe/Belgrade", promotions: [] }) : undefined;
+    await act(async () => shell.refreshAvailability());
+    expect(shell.data.promotions).toEqual([]);
+  });
+
+  it("+ after Happy Hour ends adds an instant separate draft line, even before the previous create resolves", async () => {
+    vi.setSystemTime(new Date("2026-01-05T17:59:59.000Z")); // 18:59:59 Belgrade
+    const promo = { id: "promo", name: "Happy Hour", type: "FIXED_PRICE", value: "150", priority: 0, createdAt: "2026-01-01T00:00:00Z",
+      schedule: { daysOfWeek: [1], startTime: 1020, endTime: 1140, startDate: null, endDate: null },
+      targets: [{ targetType: "MENU_ITEM", menuItemId: "m1", categoryId: null }] };
+    const pending = deferred<Response>();
+    custom = (url, options) => {
+      if (url.includes('/snapshot')) return response({ ...menu, restaurantTimezone: "Europe/Belgrade", promotions: [promo] });
+      if (url === '/api/pos/orders/o5') return response({ order: { ...order(), items: [] } });
+      if (url.endsWith('/items') && options?.method === 'POST') return pending.promise;
+    };
+    await render(h(OrderClient, { tableId: '5' }));
+    const card = [...host.querySelectorAll('button')].find(b => b.className.includes('min-h-[104px]'))!;
+    await act(async () => card.click());
+    expect(shell.getDraft('5').getSnapshot().order!.items.map(i => [i.price, i.quantity])).toEqual([["150.00", 1]]);
+    // Jump the clock without firing a render timer: backgrounded devices can do this.
+    vi.setSystemTime(new Date("2026-01-05T18:01:00.000Z"));
+    await labelClick('Povećaj količinu — Coffee');
+    expect(shell.getDraft('5').getSnapshot().order!.items.map(i => [i.price, i.quantity])).toEqual([["150.00", 1], ["200.00", 1]]);
+  });
+
   it("combined Quick Actions (Kitchen + Bar together) add through the same optimistic queue and repeat a mixed round before responses", async () => {
     const food = { ...menuItem, id: 'food', name: 'Omlet', preparationStation: 'KITCHEN' };
     const history = [{ ...line, status: 'SERVED', submittedAt: '2026-09-13T10:00:00Z' }, { ...line, id: 'food-line', menuItemId: 'food', name: 'Omlet', quantity: 2, status: 'SUBMITTED', submittedAt: '2026-09-13T10:00:00Z' }];

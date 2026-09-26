@@ -11,6 +11,11 @@ export interface OrderItem {
   menuItemId: string | null;
   name: string;
   price: string;
+  regularPrice?: string | null;
+  promotionId?: string | null;
+  promotionName?: string | null;
+  promotionType?: "PERCENTAGE_DISCOUNT" | "FIXED_PRICE" | null;
+  promotionValue?: string | null;
   quantity: number;
   note: string | null;
   status: "DRAFT" | "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";

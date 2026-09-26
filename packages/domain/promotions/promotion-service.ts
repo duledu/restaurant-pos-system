@@ -71,6 +71,22 @@ const PROMOTION_INCLUDE = {
   },
 } satisfies Prisma.PromotionInclude;
 
+function auditSnapshot(row: Prisma.PromotionGetPayload<{ include: typeof PROMOTION_INCLUDE }>) {
+  return {
+    name: row.name, description: row.description, locationId: row.locationId,
+    type: row.type, value: row.value.toString(), isActive: row.isActive, priority: row.priority,
+    ...toScheduleRule(row),
+    targets: {
+      menuItemIds: row.targets.flatMap(t => t.menuItemId ? [t.menuItemId] : []).sort(),
+      categoryIds: row.targets.flatMap(t => t.categoryId ? [t.categoryId] : []).sort(),
+    },
+  };
+}
+
+// Prisma DateTime inputs require an instant even for a PostgreSQL DATE column.
+// UTC midnight preserves the entered calendar date; scheduling still uses Restaurant.timezone.
+const calendarDate = (date: string | null | undefined) => date ? new Date(`${date}T00:00:00.000Z`) : null;
+
 export async function listPromotions(ctx: AuthContext, options?: { includeArchived?: boolean }) {
   requirePermission(ctx, PROMOTIONS_VIEW);
   return prisma.promotion.findMany({
@@ -116,12 +132,12 @@ export async function createPromotion(ctx: AuthContext, input: CreatePromotionIn
         restaurantId: ctx.restaurantId,
         locationId: input.locationId ?? null,
         name: input.name,
-        description: input.description,
+        description: input.description ?? null,
         isActive: input.isActive,
         type: input.type,
         value: input.value,
-        startDate: input.startDate ?? null,
-        endDate: input.endDate ?? null,
+        startDate: calendarDate(input.startDate),
+        endDate: calendarDate(input.endDate),
         daysOfWeek: input.daysOfWeek,
         startTime: input.startTime,
         endTime: input.endTime,
@@ -138,7 +154,7 @@ export async function createPromotion(ctx: AuthContext, input: CreatePromotionIn
         entityType: "Promotion",
         entityId: created.id,
         action: "promotion.created",
-        newValue: { name: created.name, type: created.type, value: created.value.toString(), isActive: created.isActive },
+        newValue: auditSnapshot(created),
         locationId: input.locationId ?? undefined,
         category: "promotion",
       },
@@ -153,7 +169,7 @@ export async function createPromotion(ctx: AuthContext, input: CreatePromotionIn
 
 export async function updatePromotion(ctx: AuthContext, id: string, input: UpdatePromotionInput) {
   requirePermission(ctx, PROMOTIONS_MANAGE);
-  const existing = await prisma.promotion.findFirst({ where: { id, ...scopeToRestaurant(ctx) } });
+  const existing = await prisma.promotion.findFirst({ where: { id, ...scopeToRestaurant(ctx) }, include: PROMOTION_INCLUDE });
   if (!existing) throw new Error("Promocija nije pronađena");
   if (input.locationId) requireLocationAccess(ctx, input.locationId);
   await validateTargets(ctx, input.targets);
@@ -165,12 +181,12 @@ export async function updatePromotion(ctx: AuthContext, id: string, input: Updat
       data: {
         locationId: input.locationId ?? null,
         name: input.name,
-        description: input.description,
+        description: input.description ?? null,
         isActive: input.isActive,
         type: input.type,
         value: input.value,
-        startDate: input.startDate ?? null,
-        endDate: input.endDate ?? null,
+        startDate: calendarDate(input.startDate),
+        endDate: calendarDate(input.endDate),
         daysOfWeek: input.daysOfWeek,
         startTime: input.startTime,
         endTime: input.endTime,
@@ -186,8 +202,8 @@ export async function updatePromotion(ctx: AuthContext, id: string, input: Updat
         entityType: "Promotion",
         entityId: id,
         action: "promotion.edited",
-        previousValue: { name: existing.name, type: existing.type, value: existing.value.toString(), isActive: existing.isActive },
-        newValue: { name: result.name, type: result.type, value: result.value.toString(), isActive: result.isActive },
+        previousValue: auditSnapshot(existing),
+        newValue: auditSnapshot(result),
         locationId: input.locationId ?? undefined,
         category: "promotion",
       },
@@ -215,6 +231,7 @@ async function setActive(ctx: AuthContext, id: string, isActive: boolean) {
         action: isActive ? "promotion.activated" : "promotion.deactivated",
         previousValue: { isActive: existing.isActive },
         newValue: { isActive },
+        locationId: existing.locationId ?? undefined,
         category: "promotion",
       },
       tx

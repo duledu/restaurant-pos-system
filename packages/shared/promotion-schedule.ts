@@ -157,15 +157,18 @@ export function isScheduleActiveAt(rule: PromotionScheduleRule, at: Date, timeZo
  * state again (e.g. daysOfWeek is empty, or endDate is already past).
  */
 export function nextScheduleBoundary(rule: PromotionScheduleRule, at: Date, timeZone: string): Date | null {
+  if (rule.daysOfWeek.length === 0 || rule.startTime === rule.endTime) return null;
   const wc = zonedWallClock(at, timeZone);
   const todayYMD: YMD = { year: wc.year, month: wc.month, day: wc.day };
+  if (rule.endDate && ymdComparable(todayYMD) > ymdComparable(parseYMD(rule.endDate))) return null;
   const crossesMidnight = rule.endTime <= rule.startTime;
   const candidates: Date[] = [];
 
   function nextOccurrence(minuteOfDay: number, dayShift: number): Date | null {
     if (rule.daysOfWeek.length === 0) return null;
-    for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
-      const matchWeekday = (wc.weekday + dayOffset) % 7;
+    // Include yesterday's start day when finding an overnight end today.
+    for (let dayOffset = -dayShift; dayOffset <= 7; dayOffset++) {
+      const matchWeekday = (wc.weekday + dayOffset + 7) % 7;
       if (!rule.daysOfWeek.includes(matchWeekday)) continue;
       const targetYMD = addDaysYMD(todayYMD, dayOffset + dayShift);
       const instant = zonedInstant(targetYMD, minuteOfDay, timeZone);

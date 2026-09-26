@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { menu } from "@rcs/domain";
+import { menu, promotions } from "@rcs/domain";
 import { withApiAuth } from "../../../../../lib/api-helpers";
 
 // P0.2b — dedikovan, MALI live-overlay endpoint (Instant Waiter Engine).
@@ -14,6 +14,11 @@ export const GET = withApiAuth(async (ctx, request) => {
   const url = new URL(request.url);
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return NextResponse.json({ error: "locationId je obavezan" }, { status: 400 });
-  const overlay = await menu.getWaiterAvailabilityOverlay(ctx, locationId);
-  return NextResponse.json(overlay);
+  // Reuse the waiter's existing background refresh so Admin promotion changes
+  // reach an open shift without another timer or a request on item taps.
+  const [overlay, promotionRules] = await Promise.all([
+    menu.getWaiterAvailabilityOverlay(ctx, locationId),
+    promotions.listActivePromotionRulesForSnapshot(ctx.restaurantId, locationId),
+  ]);
+  return NextResponse.json({ ...overlay, promotions: promotionRules.rules, restaurantTimezone: promotionRules.timezone });
 });

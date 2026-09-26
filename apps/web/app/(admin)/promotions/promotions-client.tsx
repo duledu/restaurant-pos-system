@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { createPromotionSchema } from "@rcs/shared";
 
 interface PromotionTarget {
   id: string;
@@ -12,6 +13,7 @@ interface PromotionTarget {
 }
 interface Promotion {
   id: string;
+  locationId: string | null;
   name: string;
   description: string | null;
   isActive: boolean;
@@ -72,9 +74,11 @@ export function PromotionsClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Promotion | null | "new">(null);
+  const [toggling, setToggling] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
+    setError("");
     apiFetch("/api/admin/promotions")
       .then((j) => setItems(j.promotions))
       .catch((e) => setError(e.message))
@@ -84,11 +88,16 @@ export function PromotionsClient() {
   useEffect(() => load(), [load]);
 
   async function toggleActive(p: Promotion) {
+    if (toggling) return;
+    setToggling(p.id);
+    setError("");
     try {
       await apiFetch(`/api/admin/promotions/${p.id}/${p.isActive ? "deactivate" : "activate"}`, { method: "POST" });
       load();
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setToggling(null);
     }
   }
 
@@ -97,7 +106,7 @@ export function PromotionsClient() {
       <div className="mb-4 flex justify-end">
         <button
           onClick={() => setEditing("new")}
-          className="rounded-md bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark"
+          className="min-h-11 rounded-md bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark"
         >
           + Nova promocija
         </button>
@@ -114,9 +123,9 @@ export function PromotionsClient() {
           {items.map((p) => (
             <div key={p.id} className="rounded-md border border-line/70 bg-white p-4 shadow-sm">
               <div className="flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-ink">{p.name}</h3>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="break-words font-semibold text-ink">{p.name}</h3>
                     <span
                       className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
                         p.isActive ? "border-info/30 bg-info-soft text-info" : "border-line bg-cream-200 text-ink/55"
@@ -126,14 +135,16 @@ export function PromotionsClient() {
                     </span>
                   </div>
                   <p className="mt-1 text-sm text-inkSoft">{scheduleSummary(p)}</p>
-                  <p className="mt-0.5 text-sm text-ink/70">{targetSummary(p)}</p>
+                  {(p.startDate || p.endDate) && <p className="mt-0.5 text-xs text-inkSoft">{p.startDate?.slice(0, 10) ?? "Bez početnog datuma"} → {p.endDate?.slice(0, 10) ?? "Bez krajnjeg datuma"}</p>}
+                  <p className="mt-0.5 break-words text-sm text-ink/70">{targetSummary(p)}</p>
                   <p className="mt-0.5 text-sm font-medium text-gold-dark">{valueSummary(p)}</p>
+                  {p.priority !== 0 && <p className="mt-0.5 text-xs text-inkSoft">Prioritet: {p.priority}</p>}
                 </div>
                 <div className="flex shrink-0 gap-2">
-                  <button onClick={() => toggleActive(p)} className="rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:bg-cream-100">
+                  <button disabled={toggling !== null} onClick={() => toggleActive(p)} className="min-h-11 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:bg-cream-100 disabled:opacity-50">
                     {p.isActive ? "Deaktiviraj" : "Aktiviraj"}
                   </button>
-                  <button onClick={() => setEditing(p)} className="rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:bg-cream-100">
+                  <button onClick={() => setEditing(p)} className="min-h-11 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:bg-cream-100">
                     Izmeni
                   </button>
                 </div>
@@ -168,6 +179,17 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
   const [categoryIds, setCategoryIds] = useState<string[]>(promotion?.targets.filter((t) => t.targetType === "MENU_CATEGORY").map((t) => t.categoryId!) ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [priority, setPriority] = useState(String(promotion?.priority ?? 0));
+  const [targetSearch, setTargetSearch] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+    return () => previous?.focus();
+  }, []);
 
   useEffect(() => {
     Promise.all([apiFetch("/api/admin/menu/items?activeOnly=true"), apiFetch("/api/admin/menu/categories")])
@@ -190,11 +212,14 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
   }
 
   async function save() {
+    if (saving) return;
     setError("");
+    if (!startTime || !endTime) { setError("Unesi početak i kraj termina"); return; }
     const payload = {
       name,
       description: description || undefined,
       isActive,
+      locationId: promotion?.locationId ?? null,
       type,
       value: Number(value),
       daysOfWeek,
@@ -202,15 +227,17 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
       endTime: timeInputToMinutes(endTime),
       startDate: startDate || null,
       endDate: endDate || null,
-      priority: promotion?.priority ?? 0,
+      priority: Number(priority),
       targets: { menuItemIds, categoryIds },
     };
+    const validated = createPromotionSchema.safeParse(payload);
+    if (!validated.success) { setError(validated.error.issues[0].message); return; }
     setSaving(true);
     try {
       if (isNew) {
-        await apiFetch("/api/admin/promotions", { method: "POST", body: JSON.stringify(payload) });
+        await apiFetch("/api/admin/promotions", { method: "POST", body: JSON.stringify(validated.data) });
       } else {
-        await apiFetch(`/api/admin/promotions/${promotion!.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        await apiFetch(`/api/admin/promotions/${promotion!.id}`, { method: "PATCH", body: JSON.stringify(validated.data) });
       }
       onSaved();
       onClose();
@@ -222,56 +249,69 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={() => { if (!saving) onClose(); }}>
       <div
+        ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="promotion-dialog-title"
         className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-lg sm:rounded-lg"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={e => {
+          if (e.key === "Escape" && !saving) { e.stopPropagation(); closeRef.current(); }
+          if (e.key !== "Tab") return;
+          const controls = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), summary')).filter(el => el.getClientRects().length > 0);
+          const first = controls[0], last = controls[controls.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+        }}
       >
         <div className="border-b border-line px-5 py-4">
           <div className="flex items-start justify-between gap-3">
-            <h2 className="text-lg font-bold text-ink">{isNew ? "Nova promocija" : `Izmena — ${promotion!.name}`}</h2>
-            <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+            <h2 id="promotion-dialog-title" className="min-w-0 break-words text-lg font-bold text-ink">{isNew ? "Nova promocija" : `Izmena — ${promotion!.name}`}</h2>
+            <button disabled={saving} onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          <label className="mb-1 block text-sm font-medium text-ink">Naziv</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Happy Hour" className="mb-3 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <label htmlFor="promotion-name" className="mb-1 block text-sm font-medium text-ink">Naziv</label>
+          <input id="promotion-name" maxLength={120} value={name} onChange={(e) => setName(e.target.value)} placeholder="Happy Hour" className="mb-3 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
 
-          <label className="mb-1 block text-sm font-medium text-ink">Opis (opciono)</label>
-          <input value={description} onChange={(e) => setDescription(e.target.value)} className="mb-3 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <label htmlFor="promotion-description" className="mb-1 block text-sm font-medium text-ink">Opis (opciono)</label>
+          <input id="promotion-description" maxLength={500} value={description} onChange={(e) => setDescription(e.target.value)} className="mb-3 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
 
           <label className="mb-1 block text-sm font-medium text-ink">Status</label>
           <div className="mb-3 flex gap-2">
             <button
               onClick={() => setIsActive(true)}
-              className={`rounded-md border px-3 py-2 text-sm ${isActive ? "border-info/30 bg-info-soft text-info" : "border-line text-ink/60"}`}
+              aria-pressed={isActive}
+              className={`min-h-11 rounded-md border px-3 py-2 text-sm ${isActive ? "border-info/30 bg-info-soft text-info" : "border-line text-ink/60"}`}
             >
               Aktivna
             </button>
             <button
               onClick={() => setIsActive(false)}
-              className={`rounded-md border px-3 py-2 text-sm ${!isActive ? "border-line bg-cream-200 text-ink" : "border-line text-ink/60"}`}
+              aria-pressed={!isActive}
+              className={`min-h-11 rounded-md border px-3 py-2 text-sm ${!isActive ? "border-line bg-cream-200 text-ink" : "border-line text-ink/60"}`}
             >
               Neaktivna
             </button>
           </div>
 
           <label className="mb-1 block text-sm font-medium text-ink">Važi za</label>
+          <input aria-label="Pretraži artikle i kategorije" placeholder="Pretraži artikle i kategorije" value={targetSearch} onChange={e => setTargetSearch(e.target.value)} className="mb-2 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <p className="mb-2 text-xs text-inkSoft">Izabrano: {menuItemIds.length} artikala, {categoryIds.length} kategorija</p>
           {loadingOptions ? (
             <p className="mb-3 text-sm text-inkSoft">Učitavanje artikala…</p>
           ) : (
             <div className="mb-3 max-h-48 overflow-y-auto rounded-md border border-line p-2">
               <p className="mb-1 mt-1 text-xs font-semibold uppercase tracking-wide text-ink/50">Kategorije</p>
-              {categories.map((c) => (
-                <label key={c.id} className="flex items-center gap-2 py-1 text-sm text-ink">
+              {categories.filter(c => c.name.toLocaleLowerCase("sr-Latn").includes(targetSearch.toLocaleLowerCase("sr-Latn"))).map((c) => (
+                <label key={c.id} className="flex min-h-11 cursor-pointer items-center gap-2 py-1 text-sm text-ink">
                   <input type="checkbox" checked={categoryIds.includes(c.id)} onChange={() => toggleCategory(c.id)} />
                   {c.name}
                 </label>
               ))}
               <p className="mb-1 mt-2 text-xs font-semibold uppercase tracking-wide text-ink/50">Artikli</p>
-              {menuItems.map((i) => (
-                <label key={i.id} className="flex items-center gap-2 py-1 text-sm text-ink">
+              {menuItems.filter(i => i.name.toLocaleLowerCase("sr-Latn").includes(targetSearch.toLocaleLowerCase("sr-Latn"))).map((i) => (
+                <label key={i.id} className="flex min-h-11 cursor-pointer items-center gap-2 py-1 text-sm text-ink">
                   <input type="checkbox" checked={menuItemIds.includes(i.id)} onChange={() => toggleMenuItem(i.id)} />
                   {i.name}
                 </label>
@@ -283,20 +323,23 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
           <div className="mb-3 flex gap-2">
             <button
               onClick={() => setType("PERCENTAGE_DISCOUNT")}
-              className={`flex-1 rounded-md border px-3 py-2 text-sm ${type === "PERCENTAGE_DISCOUNT" ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
+              aria-pressed={type === "PERCENTAGE_DISCOUNT"}
+              className={`min-h-11 flex-1 rounded-md border px-3 py-2 text-sm ${type === "PERCENTAGE_DISCOUNT" ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
             >
               Popust %
             </button>
             <button
               onClick={() => setType("FIXED_PRICE")}
-              className={`flex-1 rounded-md border px-3 py-2 text-sm ${type === "FIXED_PRICE" ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
+              aria-pressed={type === "FIXED_PRICE"}
+              className={`min-h-11 flex-1 rounded-md border px-3 py-2 text-sm ${type === "FIXED_PRICE" ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
             >
               Promo cena
             </button>
           </div>
 
-          <label className="mb-1 block text-sm font-medium text-ink">{type === "PERCENTAGE_DISCOUNT" ? "Procenat popusta (%)" : "Promo cena (RSD)"}</label>
-          <input type="number" inputMode="decimal" min={0} value={value} onChange={(e) => setValue(e.target.value)} className="mb-3 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <label htmlFor="promotion-value" className="mb-1 block text-sm font-medium text-ink">{type === "PERCENTAGE_DISCOUNT" ? "Procenat popusta (%)" : "Promo cena (RSD)"}</label>
+          <input id="promotion-value" type="number" inputMode="decimal" min={0.01} step="0.01" max={type === "PERCENTAGE_DISCOUNT" ? 100 : 9999999999.99} value={value} onChange={(e) => setValue(e.target.value)} className="mb-3 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <p className="mb-3 text-xs text-inkSoft">Promocija važi za osnovnu cenu artikla. Dodaci se naplaćuju po redovnoj ceni.</p>
 
           <label className="mb-1 block text-sm font-medium text-ink">Dani</label>
           <div className="mb-3 flex flex-wrap gap-1.5">
@@ -304,7 +347,8 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
               <button
                 key={d}
                 onClick={() => toggleDay(d)}
-                className={`h-10 w-12 rounded-md border text-sm font-medium ${daysOfWeek.includes(d) ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
+                aria-pressed={daysOfWeek.includes(d)}
+                className={`h-11 w-12 rounded-md border text-sm font-medium ${daysOfWeek.includes(d) ? "border-gold/40 bg-gold-soft text-gold-dark" : "border-line text-ink/60"}`}
               >
                 {DAY_LABEL[d]}
               </button>
@@ -313,29 +357,34 @@ function PromotionModal({ promotion, onClose, onSaved }: { promotion: Promotion 
 
           <label className="mb-1 block text-sm font-medium text-ink">Vreme</label>
           <div className="mb-3 flex items-center gap-2">
-            <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+            <input aria-label="Početak termina" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="min-h-11 min-w-0 w-full rounded-md border border-line px-3 py-2 text-sm" />
             <span className="text-ink/50">→</span>
-            <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+            <input aria-label="Kraj termina" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="min-h-11 min-w-0 w-full rounded-md border border-line px-3 py-2 text-sm" />
           </div>
-          <p className="mb-3 -mt-2 text-xs text-ink/50">Kraj pre ili jednak početku znači da termin prelazi ponoć (npr. 22:00 → 02:00).</p>
+          <p className="mb-3 -mt-2 text-xs text-inkSoft">Vreme važi u vremenskoj zoni restorana. Kraj pre početka prelazi ponoć (npr. petak 22:00 → subota 02:00). Početak i kraj moraju biti različiti.</p>
 
           <details className="mb-3">
             <summary className="cursor-pointer text-sm font-medium text-ink">Period važenja (opciono)</summary>
             <div className="mt-2 flex items-center gap-2">
-              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+              <input aria-label="Početni datum" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="min-h-11 min-w-0 w-full rounded-md border border-line px-3 py-2 text-sm" />
               <span className="text-ink/50">→</span>
-              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full rounded-md border border-line px-3 py-2 text-sm" />
+              <input aria-label="Krajnji datum" type="date" min={startDate || undefined} value={endDate} onChange={(e) => setEndDate(e.target.value)} className="min-h-11 min-w-0 w-full rounded-md border border-line px-3 py-2 text-sm" />
             </div>
+            <p className="mt-2 text-xs text-inkSoft">Period važi po kalendarskim datumima, do kraja poslednjeg dana.</p>
           </details>
 
-          {error && <p className="mb-2 text-sm text-danger">{error}</p>}
+          <label htmlFor="promotion-priority" className="mb-1 block text-sm font-medium text-ink">Prioritet</label>
+          <input id="promotion-priority" type="number" step="1" value={priority} onChange={e => setPriority(e.target.value)} className="mb-2 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
+          <p className="mb-3 text-xs text-inkSoft">Promocija artikla ima prednost nad kategorijom. Unutar istog nivoa važi viši prioritet. Popusti se ne sabiraju.</p>
+
+          {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
         </div>
 
         <div className="border-t border-line px-5 py-4">
           <button
             onClick={save}
-            disabled={saving || !name || daysOfWeek.length === 0}
-            className="w-full rounded-md bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
+            disabled={saving || loadingOptions || !name.trim() || daysOfWeek.length === 0 || menuItemIds.length + categoryIds.length === 0}
+            className="min-h-11 w-full rounded-md bg-gold px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40"
           >
             {saving ? "Čuvanje…" : "Sačuvaj"}
           </button>

@@ -173,7 +173,10 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
             overlay.set(id, shared);
             if (shared !== previous.availabilityByItemId.get(id)) changed = true;
           }
-          return changed ? { ...previous, availabilityByItemId: overlay } : previous;
+          const promotions = Array.isArray(result.promotions) ? shareWaiterSnapshot(previous.promotions, result.promotions) : previous.promotions;
+          const restaurantTimezone = result.restaurantTimezone ?? previous.restaurantTimezone;
+          return changed || promotions !== previous.promotions || restaurantTimezone !== previous.restaurantTimezone
+            ? { ...previous, availabilityByItemId: overlay, promotions, restaurantTimezone } : previous;
         });
       } catch { /* Failed or incomplete snapshots must retain the last authoritative map. */ }
     })();

@@ -2,7 +2,11 @@ import { z } from "zod";
 
 const ymdSchema = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Datum mora biti u obliku GGGG-MM-DD");
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Datum mora biti u obliku GGGG-MM-DD")
+  .refine(value => {
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }, "Datum nije ispravan");
 
 const promotionTargetsSchema = z
   .object({
@@ -32,7 +36,7 @@ function refineNonZeroWindow<T extends { startTime: number; endTime: number }>(d
 
 const promotionValueFields = {
   type: z.enum(["PERCENTAGE_DISCOUNT", "FIXED_PRICE"]),
-  value: z.number().positive(),
+  value: z.number().finite().positive().max(9999999999.99).multipleOf(0.01, "Unesi najviše dve decimale"),
 };
 
 function refineValueByType<T extends { type: "PERCENTAGE_DISCOUNT" | "FIXED_PRICE"; value: number }>(
@@ -44,37 +48,46 @@ function refineValueByType<T extends { type: "PERCENTAGE_DISCOUNT" | "FIXED_PRIC
   }
 }
 
+function refineDateRange(data: { startDate?: string | null; endDate?: string | null }, ctx: z.RefinementCtx) {
+  if (data.startDate && data.endDate && data.startDate > data.endDate) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Kraj perioda ne može biti pre početka", path: ["endDate"] });
+  }
+}
+const prioritySchema = z.number().int().min(-2147483648).max(2147483647);
+
 export const createPromotionSchema = z
   .object({
-    name: z.string().min(1, "Naziv je obavezan").max(120),
+    name: z.string().trim().min(1, "Naziv je obavezan").max(120),
     description: z.string().max(500).optional(),
     isActive: z.boolean().default(true),
     // null/omitted = važi na svim lokacijama restorana.
     locationId: z.string().uuid().nullable().optional(),
     ...promotionValueFields,
     ...promotionScheduleFields,
-    priority: z.number().int().default(0),
+    priority: prioritySchema.default(0),
     targets: promotionTargetsSchema,
   })
   .superRefine((data, ctx) => {
     refineNonZeroWindow(data, ctx);
     refineValueByType(data, ctx);
+    refineDateRange(data, ctx);
   });
 export type CreatePromotionInput = z.infer<typeof createPromotionSchema>;
 
 export const updatePromotionSchema = z
   .object({
-    name: z.string().min(1).max(120),
+    name: z.string().trim().min(1).max(120),
     description: z.string().max(500).optional(),
     isActive: z.boolean(),
     locationId: z.string().uuid().nullable().optional(),
     ...promotionValueFields,
     ...promotionScheduleFields,
-    priority: z.number().int(),
+    priority: prioritySchema,
     targets: promotionTargetsSchema,
   })
   .superRefine((data, ctx) => {
     refineNonZeroWindow(data, ctx);
     refineValueByType(data, ctx);
+    refineDateRange(data, ctx);
   });
 export type UpdatePromotionInput = z.infer<typeof updatePromotionSchema>;

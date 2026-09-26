@@ -104,12 +104,24 @@ export function msUntilNextPromoBoundary(rules: readonly PromotionRule[], at: Da
 export function usePromotionClock(rules: readonly PromotionRule[], timezone: string): Date {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const ms = msUntilNextPromoBoundary(rules, now, timezone);
-    if (ms === null) return;
-    // Clamped so a distant boundary (or a stale closure) never schedules an
-    // absurdly long timer — it just re-checks and reschedules sooner instead.
-    const timer = setTimeout(() => setNow(new Date()), Math.max(1000, Math.min(ms, 24 * 60 * 60 * 1000)));
-    return () => clearTimeout(timer);
-  }, [rules, timezone, now]);
+    if (rules.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      clearTimeout(timer);
+      const current = new Date();
+      setNow(current);
+      const ms = msUntilNextPromoBoundary(rules, current, timezone);
+      if (ms !== null) timer = setTimeout(refresh, Math.max(1, Math.min(ms, 24 * 60 * 60 * 1000)));
+    };
+    const resume = () => { if (document.visibilityState !== "hidden") refresh(); };
+    refresh();
+    window.addEventListener("focus", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", resume);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, [rules, timezone]);
   return now;
 }

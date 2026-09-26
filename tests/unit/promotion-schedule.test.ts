@@ -27,6 +27,12 @@ function belgradeInstant(hour: number, minute = 0, day = 5): Date {
 }
 
 describe("zonedWallClock", () => {
+  it("uses the supplied restaurant zone, including its DST offset, rather than the host zone", () => {
+    expect(isScheduleActiveAt(happyHour(), new Date("2026-07-06T15:00:00Z"), TZ)).toBe(true); // 17:00 summer
+    expect(isScheduleActiveAt(happyHour(), new Date("2026-07-06T17:00:00Z"), TZ)).toBe(false); // 19:00 summer
+    expect(isScheduleActiveAt(happyHour(), new Date("2026-07-06T15:00:00Z"), "America/New_York")).toBe(false);
+  });
+
   it("reads the correct weekday/hour/minute in the restaurant's timezone", () => {
     const wc = zonedWallClock(belgradeInstant(17, 30), TZ);
     expect(wc.weekday).toBe(1); // Monday
@@ -205,6 +211,15 @@ describe("pickWinningPromotion — no stacking, deterministic precedence", () =>
 });
 
 describe("nextScheduleBoundary — deterministic scheduling for client-side refresh (no polling)", () => {
+  it("expires Friday's overnight window when the screen opens after midnight on Saturday", () => {
+    const rule = happyHour({ daysOfWeek: [5], startTime: 22 * 60, endTime: 2 * 60 });
+    expect(nextScheduleBoundary(rule, belgradeInstant(1, 0, 10), TZ)).toEqual(belgradeInstant(2, 0, 10));
+  });
+
+  it("does not keep scheduling timers after the date range has ended", () => {
+    expect(nextScheduleBoundary(happyHour({ endDate: "2026-01-05" }), belgradeInstant(10, 0, 6), TZ)).toBeNull();
+  });
+
   it("from before the window, the next boundary is today's start", () => {
     const rule = happyHour();
     const next = nextScheduleBoundary(rule, belgradeInstant(10, 0), TZ);

@@ -657,10 +657,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * optimistic changeQuantity path below instead of its own PATCH, so rapid
    * repeated taps on the same menu item ALSO benefit from its debounce.
    */
-  function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[]): boolean {
-    if (submittingRef.current || !draft.getSnapshot().order) return false;
-    const menu = itemById.get(menuItemId);
-    if (!menu || menu.availability?.isAvailable !== true) return false;
+  function previewSelection(menu: MenuItem, modifierOptionIds: string[]) {
     // PROMOTIONS & PRICING ENGINE V1 — `menu.promo` above was precomputed
     // for ZERO modifiers (it's shared by every possible modifier selection
     // on the menu card); THIS tap's actual selection may add its own delta,
@@ -670,8 +667,15 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     const modifierDelta = menu.modifierGroups
       .flatMap(({ group }) => group.options.filter((option) => modifierOptionIds.includes(option.id)))
       .reduce((sum, option) => sum + Number(option.priceDelta), 0);
-    const priced = previewEffectivePrice(Number(menu.price), modifierDelta, menu.id, menu.categoryId, shell.promotions, promoNow, shell.restaurantTimezone);
-    const existing = draft.add(menu, modifierOptionIds, priced.effectivePrice.toFixed(2));
+    // Re-read time at the tap: a backgrounded device may not have fired its timer.
+    return previewEffectivePrice(Number(menu.price), modifierDelta, menu.id, menu.categoryId, shell.promotions, new Date(), shell.restaurantTimezone);
+  }
+
+  function addItemWithModifiers(menuItemId: string, modifierOptionIds: string[], note: string | null = null): boolean {
+    if (submittingRef.current || !draft.getSnapshot().order) return false;
+    const menu = itemById.get(menuItemId);
+    if (!menu || menu.availability?.isAvailable !== true) return false;
+    const existing = draft.add(menu, modifierOptionIds, previewSelection(menu, modifierOptionIds), note);
     if (existing && existing.quantity >= 50) return false;
     if (existing) void changeQuantity(existing, existing.quantity + 1);
     favorites.record(menuItemId, modifierOptionIds);
@@ -753,6 +757,20 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    */
   async function changeQuantity(item: OrderItem, nextQuantity: number) {
     if (!order || submittingRef.current) return;
+    if (nextQuantity > 50) return;
+    if (nextQuantity > item.quantity && item.menuItemId) {
+      const menu = itemById.get(item.menuItemId);
+      const options = item.modifiers.flatMap(m => m.modifierOptionId ? [m.modifierOptionId] : []);
+      if (menu) {
+        const current = previewSelection(menu, options);
+        if (current.effectivePrice !== Number(item.price) || (current.promotion?.id ?? null) !== (item.promotionId ?? null)) {
+          // Existing units retain their preview identity; the new unit is instant
+          // too. Submit still authoritatively reprices ALL unsent units together.
+          addItemWithModifiers(menu.id, options, item.note);
+          return;
+        }
+      }
+    }
     if (draft.changePending(item.id, nextQuantity)) return;
     draft.markQuantity();
     if (nextQuantity <= 0) {
@@ -1250,6 +1268,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
               above — rendering them again here (as previously) duplicated
               every submitted/served row underneath itself. */}
           {draftItems.map(item => <DraftRow key={item.id} item={item} canEditModifiers={(itemById.get(item.menuItemId ?? "")?.modifierGroups.length ?? 0) > 0} cartBusy={cartBusy} submitting={submitting} hasEverSubmitted={hasEverSubmitted} setEditingModifiersFor={setEditingModifiersFor} changeQuantity={updateQuantity} removeItem={deleteItem} />)}
+          {shell.promotions.length > 0 && draftItems.length > 0 && <p className="py-2 text-xs text-inkSoft">Cena se potvrđuje pri slanju porudžbine. Ako se promocija promeni, važi cena u trenutku slanja.</p>}
         </div>
         <div className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between border-t border-line bg-cream-200/70 px-3 py-3">
           <span className="text-xs font-semibold uppercase tracking-wide text-inkSoft">Ukupno (novo)</span>
@@ -1378,17 +1397,17 @@ const MenuGrid = memo(function MenuGrid({ visibleItems, submitting, handleTapMen
                   {item.name}
                   {item.modifierGroups.length > 0 && <span className="ml-1.5 align-middle text-[10px] font-medium text-inkSoft">· dodaci</span>}
                 </div>
-                <div className="mt-3 flex items-center justify-between gap-2">
-                  <span className="flex items-baseline gap-1.5">
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex flex-wrap items-baseline gap-1.5">
                     {item.promo.promotion && (
-                      <span className="text-xs font-medium text-ink/40 line-through">{item.promo.regularPrice.toFixed(2)}</span>
+                      <span className="text-xs font-medium text-inkSoft line-through">{item.promo.regularPrice.toFixed(2)}</span>
                     )}
                     <span className="text-base font-bold tabular-nums text-gold-dark">
                       {item.promo.effectivePrice.toFixed(2)} <span className="text-[10px] font-semibold text-inkSoft">RSD</span>
                     </span>
                   </span>
                   {item.promo.promotion && (
-                    <span className="rounded-full bg-gold-soft px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gold-dark">
+                    <span className="max-w-full break-words rounded-full bg-gold-soft px-2 py-0.5 text-xs font-semibold text-gold-dark">
                       {item.promo.promotion.name}
                     </span>
                   )}
@@ -1500,6 +1519,10 @@ const DraftRow = memo(function DraftRow({ item, canEditModifiers, cartBusy, subm
                   {item.modifiers.length > 0 && (
                     <div className="text-xs text-inkSoft">{item.modifiers.map((m) => m.optionName).join(", ")}</div>
                   )}
+                  {item.promotionName && <div className="mt-1 text-xs text-gold-dark">
+                    <span className="mr-1.5 text-inkSoft line-through">{Number(item.regularPrice).toFixed(2)}</span>
+                    {Number(item.price).toFixed(2)} RSD · {item.promotionName}
+                  </div>}
                 </div>
                 <span className="shrink-0 pt-0.5 text-right font-semibold tabular-nums text-ink">
                   {(Number(item.price) * item.quantity).toFixed(2)} <span className="text-xs font-normal text-inkSoft">RSD</span>

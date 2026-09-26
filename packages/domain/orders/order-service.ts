@@ -638,8 +638,12 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
       if (!currentMenuItem) continue; // artikal u međuvremenu obrisan — zadrži poslednji poznati snapshot
 
       const priced = pricedByItem.get(item.id)!;
-      const promotionChanged = (item.promotionId ?? null) !== (priced.promotion?.id ?? null);
-      if (!priced.effectivePrice.equals(item.price) || Number(currentMenuItem.taxRate) !== Number(item.taxRate) || promotionChanged) {
+      const promotionChanged = item.promotionId !== (priced.promotion?.id ?? null)
+        || item.promotionName !== (priced.promotion?.name ?? null)
+        || item.promotionType !== (priced.promotion?.type ?? null)
+        || (item.promotionValue?.toString() ?? null) !== (priced.promotion?.value.toString() ?? null);
+      if (!priced.effectivePrice.equals(item.price) || !priced.regularPrice.equals(item.regularPrice ?? -1)
+        || !currentMenuItem.taxRate.equals(item.taxRate) || promotionChanged) {
         await tx.orderItem.update({
           where: { id: item.id },
           data: {

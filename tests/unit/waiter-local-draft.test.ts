@@ -5,6 +5,7 @@ import type { OrderItem } from "../../apps/web/lib/waiter-order-types";
 
 const menu = (id = "beer"): MenuItem => ({ id, name: id, price: "200", categoryId: "drinks", modifierGroups: [], stock: null, recipeAvailability: null, availability: { isAvailable: true, reasonCode: null, reasonLabel: null } });
 const item = (id = "real1", menuItemId = "beer", quantity = 1): OrderItem => ({ id, menuItemId, name: menuItemId, price: "210", quantity, note: null, status: "DRAFT", modifiers: [] });
+const preview = (price: number) => ({ regularPrice: 200, effectivePrice: price, promotion: null });
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 const response = (body: unknown, status = 200) => ({ ok: status === 200, status, json: async () => body });
 function session() { const draft = createWaiterLocalDraft(); draft.setOrder({ id: "o1", status: "DRAFT", guestCount: null, table: { label: "5" }, items: [] }); return draft; }
@@ -13,6 +14,24 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("instant local draft with delayed network", () => {
+  it("merges equal server Decimal and local display prices without creating another line", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const draft = session();
+    const existing = { ...item(), price: "200" };
+    draft.setOrder(previous => ({ ...previous!, items: [existing] }));
+    expect(draft.add(menu(), [], preview(200))).toEqual(existing);
+    expect(draft.getSnapshot().order!.items).toHaveLength(1);
+  });
+
+  it("keeps different draft prices and previously submitted prices on separate rows", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const draft = session();
+    draft.setOrder(previous => ({ ...previous!, items: [{ ...item(), price: "150.00", status: "SUBMITTED" }] }));
+    draft.add(menu(), [], preview(150));
+    draft.add(menu(), [], preview(200));
+    expect(draft.getSnapshot().order!.items.map(i => [i.price, i.quantity])).toEqual([["150.00", 1], ["150.00", 1], ["200.00", 1]]);
+  });
+
   it("first add is visible synchronously before any request/response and reconciles authoritative price", async () => {
     const pending = deferred<ReturnType<typeof response>>(); const fetch = vi.fn(() => pending.promise); vi.stubGlobal("fetch", fetch);
     const draft = session(); draft.add(menu(), []);
