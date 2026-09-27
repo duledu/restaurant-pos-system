@@ -12,3 +12,4 @@ export * from "./natural-sort";
 export * from "./workstation-schemas";
 export * from "./promotion-schemas";
 export * from "./promotion-schedule";
+export * from "./reservation-schemas";

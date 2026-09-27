@@ -87,6 +87,14 @@ const STATUS_DOT: Record<Table["status"], string> = {
   NEEDS_CLEANING: "bg-ink/25",
 };
 
+// REZERVACIJE V1 — čisto informativan prikaz (specifikacija §14/§15), nikad
+// ne menja status/order ovog stola. "Sada" (≤1 min) umesto "0 min", da se
+// ne čini kao greška u trenutku kad rezervacija stigne.
+function reservationMinutesLabel(reservedAtIso: string): string {
+  const minutes = Math.round((new Date(reservedAtIso).getTime() - Date.now()) / 60000);
+  return minutes <= 1 ? "Rezervacija sada" : `Rezervacija za ${minutes} min`;
+}
+
 async function apiFetch(url: string, options?: RequestInit) {
   const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
   const body = await res.json().catch(() => ({}));
@@ -206,6 +214,12 @@ export function PosClient() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => router.push("/waiter/reservations")}
+            className="min-h-11 rounded-md border border-line px-3 py-2 text-xs font-semibold text-ink/70 transition-colors hover:bg-ink/[0.04]"
+          >
+            Rezervacije
+          </button>
+          <button
             onClick={() => router.push("/waiter/handover")}
             className="min-h-11 rounded-md border border-line px-3 py-2 text-xs font-semibold text-ink/70 transition-colors hover:bg-ink/[0.04]"
           >
@@ -267,6 +281,16 @@ export function PosClient() {
               className="fixed inset-0 z-40 bg-transparent"
             />
             <div className="absolute right-0 top-11 z-50 w-56 overflow-hidden rounded-md border border-line bg-white shadow-elevated">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  router.push("/waiter/reservations");
+                }}
+                className="block w-full px-4 py-3 text-left text-sm font-medium text-ink hover:bg-ink/[0.04]"
+              >
+                Rezervacije
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -342,6 +366,11 @@ export function PosClient() {
                       </span>
                     ) : (
                       <span className="mt-0.5 block text-[11px] opacity-50">{table.capacity} mesta</span>
+                    )}
+                    {table.upcomingReservation && (
+                      <span className="mt-1 block truncate text-[11px] font-semibold text-gold-dark">
+                        {reservationMinutesLabel(table.upcomingReservation.reservedAt)} · {table.upcomingReservation.guestName} · {table.upcomingReservation.partySize} os.
+                      </span>
                     )}
                   </span>
                 </button>

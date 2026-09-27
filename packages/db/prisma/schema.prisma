@@ -97,6 +97,7 @@ model Restaurant {
   ingredientStocks    IngredientStock[]
   inventoryCategories InventoryCategory[]
   promotions          Promotion[]
+  reservations        Reservation[]
 
   @@index([tenantId])
   @@index([status])
@@ -143,6 +144,7 @@ model Location {
   inventoryItems      InventoryItem[]
   ingredientStocks    IngredientStock[]
   promotions          Promotion[]
+  reservations        Reservation[]
 
   @@index([restaurantId])
   @@map("locations")
@@ -759,8 +761,9 @@ model RestaurantTable {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
 
-  floor  Floor   @relation(fields: [floorId], references: [id])
-  orders Order[]
+  floor        Floor         @relation(fields: [floorId], references: [id])
+  orders       Order[]
+  reservations Reservation[]
 
   @@index([floorId])
   @@index([status])
@@ -772,6 +775,72 @@ enum TableStatus {
   OCCUPIED
   AWAITING_BILL
   NEEDS_CLEANING
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// REZERVACIJE V1 — interna rezervacija stola, NE zaseban booking sistem.
+// Ponovo koristi POSTOJEĆI RestaurantTable (nema paralelnog "Room"/"Table"
+// modela) — `tableId` je OPCIONA slaba referenca (SetNull), jer rezervacija
+// mora moći da postoji i BEZ dodeljenog stola (dodaje se kasnije).
+//
+// Rezervacija NIKAD sama ne menja RestaurantTable.status niti kreira Order —
+// to ostaje isključivo posao postojećeg POS/table-service.ts toka (vidi
+// reservation-service.ts komentar). Rezervacija samo OPISUJE očekivane
+// goste; osoblje ručno otvara sto/porudžbinu kao i uvek.
+//
+// TRAJANJE: V1 nema poseban "restaurant settings" koncept za trajanje
+// rezervacije (izbegnuta nepotrebna komplikacija ove faze, po specifikaciji)
+// — `durationMinutes` je server-side podrazumevana vrednost
+// (RESERVATION_DEFAULT_DURATION_MINUTES u reservation-service.ts, 90 min),
+// upisana po redu radi buduće fleksibilnosti, ali NIJE izložena u V1 UI.
+// Koristi se ISKLJUČIVO za sukob (conflict) proveru — [reservedAt,
+// reservedAt+durationMinutes) je period koji rezervacija "drži" sto.
+model Reservation {
+  id           String  @id @default(uuid())
+  restaurantId String
+  locationId   String
+  tableId      String?
+
+  guestName String
+  phone     String
+  partySize Int
+
+  // Apsolutni UTC trenutak (izračunat iz lokalnog datuma/vremena I
+  // Restaurant.timezone — NIKAD iz vremenske zone browsera/telefona, vidi
+  // packages/shared/promotion-schedule.ts zonedInstant, isti obrazac).
+  reservedAt      DateTime
+  durationMinutes Int      @default(90)
+
+  note String?
+
+  status ReservationStatus @default(CONFIRMED)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdBy   String
+  updatedBy   String?
+  cancelledAt DateTime?
+  cancelledBy String?
+  seatedAt    DateTime?
+  completedAt DateTime?
+
+  restaurant Restaurant       @relation(fields: [restaurantId], references: [id])
+  location   Location         @relation(fields: [locationId], references: [id])
+  table      RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+
+  @@index([restaurantId, locationId])
+  @@index([tableId])
+  @@index([reservedAt])
+  @@index([status])
+  @@map("reservations")
+}
+
+enum ReservationStatus {
+  CONFIRMED
+  SEATED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
 }
 
 // ── SMENE ───────────────────────────────────────────────────────────────

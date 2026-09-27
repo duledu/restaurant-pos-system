@@ -28,12 +28,14 @@ const NEW_PERMISSIONS = [
   { code: "workstations.manage", description: "Uparivanje/opoziv TableCore Print Agent radnih stanica (Faza 2A)" },
   { code: "promotions.view", description: "Pregled promocija (Happy Hour i slično)" },
   { code: "promotions.manage", description: "Kreiranje/izmena/aktivacija/deaktivacija promocija" },
+  { code: "reservations.view", description: "Pregled rezervacija" },
+  { code: "reservations.manage", description: "Kreiranje/izmena/otkazivanje rezervacija, smeštanje gostiju" },
 ] as const;
 
 export const NEW_ROLE_GRANTS: Record<string, string[]> = {
-  OWNER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
-  ADMIN: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
-  MANAGER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage"],
+  OWNER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
+  ADMIN: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
+  MANAGER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
   // Inventory Phase 2 fix — INVENTORY_MANAGER je propušten u originalnom
   // Fazi 2A grantu (samo inventory.count je bio nameravan za tu ulogu, vidi
   // istoriju ovog fajla), sada dodato. workstations.manage pripada istoj
@@ -43,6 +45,11 @@ export const NEW_ROLE_GRANTS: Record<string, string[]> = {
   // stanice). promotions.* NAMERNO izostavljeno za INVENTORY_MANAGER —
   // cenovna/promotivna politika nije deo te uloge (isti razlog kao
   // menu.manage isključenje za WAITER/KITCHEN/BAR/INVENTORY_MANAGER u seed.ts).
+  // reservations.* SE RAZLIKUJE od promotions.* — konobar je taj koji prima
+  // telefonski poziv i pravi/menja rezervaciju tokom smene (specifikacija
+  // "dovoljno brzo da se radi dok se priča telefonom sa gostom"), zato WAITER
+  // ovde dobija oba reservations koda, za razliku od promotions.*.
+  WAITER: ["reservations.view", "reservations.manage"],
   INVENTORY_MANAGER: ["inventory.count", "workstations.manage"],
 };
 

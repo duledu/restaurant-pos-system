@@ -4,6 +4,8 @@ import {
   nextScheduleBoundary,
   pickWinningPromotion,
   zonedWallClock,
+  zonedDateTimeToInstant,
+  addDaysToDateString,
   type PromotionCandidate,
   type PromotionScheduleRule,
 } from "../../packages/shared/promotion-schedule";
@@ -260,5 +262,30 @@ describe("nextScheduleBoundary — deterministic scheduling for client-side refr
   it("returns null when the rule has no configured days at all (can never change state)", () => {
     const rule = happyHour({ daysOfWeek: [] });
     expect(nextScheduleBoundary(rule, belgradeInstant(10, 0), TZ)).toBeNull();
+  });
+});
+
+describe("zonedDateTimeToInstant — reused by Reservations V1 for reservedAt", () => {
+  it("turns a local date+time in the restaurant timezone into the correct UTC instant", () => {
+    const instant = zonedDateTimeToInstant("2026-01-05", 19 * 60 + 30, TZ); // 19:30 Belgrade, January (UTC+1)
+    expect(instant.getTime()).toBe(belgradeInstant(19, 30, 5).getTime());
+  });
+
+  it("round-trips through zonedWallClock", () => {
+    const instant = zonedDateTimeToInstant("2026-06-15", 12 * 60, TZ);
+    const wc = zonedWallClock(instant, TZ);
+    expect(wc).toMatchObject({ year: 2026, month: 6, day: 15, minutesSinceMidnight: 12 * 60 });
+  });
+});
+
+describe("addDaysToDateString — Reservations V1 date navigation (Juče/Danas/Sutra)", () => {
+  it("adds and subtracts days across a calendar date", () => {
+    expect(addDaysToDateString("2026-01-05", 1)).toBe("2026-01-06");
+    expect(addDaysToDateString("2026-01-05", -1)).toBe("2026-01-04");
+  });
+
+  it("rolls over month and year boundaries correctly", () => {
+    expect(addDaysToDateString("2026-01-31", 1)).toBe("2026-02-01");
+    expect(addDaysToDateString("2025-12-31", 1)).toBe("2026-01-01");
   });
 });

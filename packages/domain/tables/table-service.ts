@@ -2,6 +2,7 @@ import { prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { sortByLabelNatural } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
+import { getUpcomingReservationsForTables } from "../reservations/reservation-service";
 
 // ─── Waiter (POS) queries ─────────────────────────────────────────────────────
 
@@ -69,6 +70,13 @@ export async function listTables(ctx: AuthContext, locationId: string) {
     : [];
   const ownerName = new Map(owners.map((o) => [o.id, `${o.firstName} ${o.lastName}`]));
 
+  // REZERVACIJE V1 — jedan upit za SVE stolove na ovoj lokaciji (nikad
+  // po-stolu), jaše na POSTOJEĆEM listTables pozivu (već se pool-uje na 5s
+  // iz waiter-shell.tsx) umesto da uvodi novu petlju za osvežavanje —
+  // vidi getUpcomingReservationsForTables napomenu.
+  const allTableIds = floors.flatMap((floor) => floor.tables.map((table) => table.id));
+  const upcomingReservationByTableId = await getUpcomingReservationsForTables(ctx.restaurantId, locationId, allTableIds);
+
   return floors.map((floor) => ({
     ...floor,
     // Prisma orderBy: { label: "asc" } iznad je LEKSIKOGRAFSKO (string)
@@ -84,6 +92,9 @@ export async function listTables(ctx: AuthContext, locationId: string) {
       // fallback in that case, never a raw ID.
       activeOrderOwnerName: orders[0]?.openedBy ? (ownerName.get(orders[0].openedBy) ?? null) : null,
       readyItems: orders[0]?.items ?? [],
+      // REZERVACIJE V1 — informativno SAMO (spec §15): postojanje ove
+      // rezervacije NIKAD ne menja status/order/vlasništvo ovog stola.
+      upcomingReservation: upcomingReservationByTableId.get(table.id) ?? null,
     })),
   }));
 }

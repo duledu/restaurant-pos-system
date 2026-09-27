@@ -20,6 +20,11 @@ export interface Table {
   // FAZA 10: stavke SPREMNE za preuzimanje na aktivnoj porudžbini ovog
   // stola (prazan niz kad nema nijedne) — vidi table-service.ts listTables.
   readyItems: ReadyItem[];
+  // REZERVACIJE V1: rezervacija u narednih ~60 min za OVAJ sto, ili null.
+  // Čisto informativno (specifikacija §15) — nikad ne menja status/order
+  // ovog stola, vidi table-service.ts listTables/reservation-service.ts
+  // getUpcomingReservationsForTables.
+  upcomingReservation: { id: string; guestName: string; partySize: number; reservedAt: string } | null;
 }
 
 export interface FloorWithTables {

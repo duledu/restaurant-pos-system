@@ -8,6 +8,7 @@ export * as modifiers from "./menu/modifier-service";
 export * as recipes from "./menu/recipe-service";
 export * as availability from "./menu/availability-service";
 export * as promotions from "./promotions/promotion-service";
+export * as reservations from "./reservations/reservation-service";
 export * as shifts from "./shifts/shift-service";
 export * as tables from "./tables/table-service";
 export * as tableOwnership from "./tables/ownership-transfer-service";

@@ -86,6 +86,21 @@ function addDaysYMD(ymd: YMD, days: number): YMD {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
+function formatYMD(ymd: YMD): string {
+  return `${ymd.year}-${String(ymd.month).padStart(2, "0")}-${String(ymd.day).padStart(2, "0")}`;
+}
+
+/**
+ * "YYYY-MM-DD" + a day offset -> "YYYY-MM-DD" — pure calendar-date
+ * arithmetic (no timezone involved, a calendar day is a calendar day).
+ * Reused by Reservations V1 for "Juče/Danas/Sutra" navigation and for
+ * turning a single calendar date into a half-open UTC range via
+ * zonedDateTimeToInstant(date, 0, tz) .. zonedDateTimeToInstant(nextDate, 0, tz).
+ */
+export function addDaysToDateString(date: string, days: number): string {
+  return formatYMD(addDaysYMD(parseYMD(date), days));
+}
+
 /**
  * UTC instant corresponding to a specific wall-clock minute-of-day on a
  * given Y-M-D in `timeZone`. Same DST-safe "guess, reformat, correct"
@@ -117,6 +132,18 @@ function zonedInstant(ymd: YMD, minuteOfDay: number, timeZone: string): Date {
   );
   const offset = reinterpreted - guess;
   return new Date(guess - offset);
+}
+
+/**
+ * Public wrapper around `zonedInstant` for callers outside this module that
+ * need "this local date + local time, in this restaurant's timezone" turned
+ * into an absolute UTC instant — e.g. Reservations V1's `reservedAt`, which
+ * must never depend on the browser/phone's own timezone (same requirement
+ * this module already enforces for Happy Hour). `date` is "YYYY-MM-DD",
+ * `minuteOfDay` is 0-1439.
+ */
+export function zonedDateTimeToInstant(date: string, minuteOfDay: number, timeZone: string): Date {
+  return zonedInstant(parseYMD(date), minuteOfDay, timeZone);
 }
 
 /**
