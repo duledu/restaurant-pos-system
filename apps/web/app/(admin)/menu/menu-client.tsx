@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { RecipeButton, RecipeModal } from "../../../components/admin/RecipeModal";
+import { Button } from "../../../components/ui/Button";
 
 interface Category {
   id: string;
@@ -108,6 +109,9 @@ export function MenuManagementClient() {
   // actually persisted (see setTrackingMethod below) — never optimistically.
   const [autoOpenRecipeItem, setAutoOpenRecipeItem] = useState<MenuItem | null>(null);
   const [autoOpenDirectStockItem, setAutoOpenDirectStockItem] = useState<MenuItem | null>(null);
+  const trackingBusy = useRef(false);
+  const [trackingSaving, setTrackingSaving] = useState(false);
+  const [trackingConfirmation, setTrackingConfirmation] = useState<{ item: MenuItem; method: MenuItem["inventoryTrackingMethod"]; message: string; flags: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean } } | null>(null);
 
   useEffect(() => {
     fetch("/api/pos/me").then((r) => r.json()).then((j) => setRoles(j.roles ?? [])).catch(() => {});
@@ -292,12 +296,15 @@ export function MenuManagementClient() {
     method: MenuItem["inventoryTrackingMethod"],
     confirm_: { confirmSwitchAwayFromDirectStock?: boolean; confirmReactivateDirectStock?: boolean } = {}
   ) {
+    if (trackingBusy.current) return;
+    trackingBusy.current = true; setTrackingSaving(true); setError(null);
     try {
       await apiFetch(`/api/admin/menu/items/${item.id}/inventory-tracking-method`, {
         method: "POST",
         body: JSON.stringify({ method, ...confirm_ }),
       });
       await load(); // authoritative state first — modal only opens AFTER this succeeds
+      setTrackingConfirmation(null);
       // Guided flow (Phase 2.5 UX fix): the tracking-method change alone left
       // the owner with no obvious next step. Persist succeeds -> open the
       // exact next screen they need, using the SAME RecipeModal/
@@ -312,20 +319,16 @@ export function MenuManagementClient() {
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Greška";
-      // P1.6: dve odvojene bezbednosne provere (DirectStockStillPresentError
-      // pri napuštanju DIRECT_STOCK sa preostalom zalihom; StaleDirectStockQuantityError
-      // pri povratku na DIRECT_STOCK preko zastarelog zapisa) nisu obične
-      // greške — nude potvrdu i ponove zahtev sa odgovarajućim flagom, isti
-      // obrazac kao archiveItem/deleteItem dijalozi iznad (window.confirm,
-      // nema toast infrastrukture u ovom adminu).
-      if (message.includes("i dalje ima zalihu") && confirm(`${message}\n\nNastaviti?`)) {
-        return setTrackingMethod(item, method, { confirmSwitchAwayFromDirectStock: true });
+      if (message.includes("i dalje ima zalihu")) {
+        setTrackingConfirmation({ item, method, message, flags: { confirmSwitchAwayFromDirectStock: true } });
+        return;
       }
-      if (message.includes("zastareo") && confirm(`${message}\n\nNastaviti?`)) {
-        return setTrackingMethod(item, method, { confirmReactivateDirectStock: true });
+      if (message.includes("zastareo")) {
+        setTrackingConfirmation({ item, method, message, flags: { confirmReactivateDirectStock: true } });
+        return;
       }
       setError(message);
-    }
+    } finally { trackingBusy.current = false; setTrackingSaving(false); }
   }
 
   const priceEdit: PriceEditState = { editingPriceId, priceDraft, setEditingPriceId, setPriceDraft };
@@ -511,6 +514,16 @@ export function MenuManagementClient() {
           onChanged={load}
         />
       )}
+      {trackingConfirmation && <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onKeyDown={e => { if (e.key === "Escape" && !trackingSaving) setTrackingConfirmation(null); }}>
+        <div role="alertdialog" aria-modal="true" aria-labelledby="tracking-confirm-title" className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white p-5 shadow-elevated">
+          <h2 id="tracking-confirm-title" className="text-lg font-bold text-ink">Promena praćenja zaliha</h2>
+          <p className="my-4 whitespace-pre-line text-sm text-inkSoft">{trackingConfirmation.message}</p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="secondary" autoFocus disabled={trackingSaving} onClick={() => setTrackingConfirmation(null)}>Otkaži</Button>
+            <Button disabled={trackingSaving} onClick={() => setTrackingMethod(trackingConfirmation.item, trackingConfirmation.method, trackingConfirmation.flags)}>{trackingSaving ? "Čuvanje…" : "Potvrdi promenu"}</Button>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }

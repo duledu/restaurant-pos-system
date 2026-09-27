@@ -630,7 +630,9 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
           modifierDelta: modifierTotalByItem.get(item.id) ?? new Prisma.Decimal(0),
         };
       });
-    const pricedByItem = await resolveEffectivePrices({ restaurantId: ctx.restaurantId, locationId: order.locationId, lines: pricingLines, at: now });
+    // Reuse this transaction's connection; concurrent submits must not
+    // exhaust the pool by each waiting for a second connection.
+    const pricedByItem = await resolveEffectivePrices({ restaurantId: ctx.restaurantId, locationId: order.locationId, lines: pricingLines, at: now }, tx);
 
     for (const item of items) {
       if (!item.menuItemId) continue;
@@ -684,7 +686,7 @@ export async function submitOrder(ctx: AuthContext, orderId: string, input: Subm
     // ništa se ne šalje kuhinji/šanku), NIKAD tiho preskočiti tu stavku niti
     // delimično poslati porudžbinu.
     const menuItemIdsInOrder = [...new Set(stockRequirements.map((r) => r.menuItemId))];
-    const blockedByLocation = await getBlockedAvailability(ctx.restaurantId, order.locationId, menuItemIdsInOrder);
+    const blockedByLocation = await getBlockedAvailability(ctx.restaurantId, order.locationId, menuItemIdsInOrder, tx);
     if (blockedByLocation.size > 0) {
       const blockedNames = stockRequirements
         .filter((r) => blockedByLocation.has(r.menuItemId))

@@ -42,6 +42,7 @@ interface Location {
   id: string;
   name: string;
 }
+const UNIT_LABELS: Record<string, string> = { KILOGRAM: "kg", GRAM: "g", LITER: "l", MILLILITER: "ml", PIECE: "kom" };
 interface Ingredient {
   id: string;
   name: string;
@@ -344,7 +345,7 @@ function SessionDetailView({
                   <p className="min-w-0 flex-1 truncate font-medium text-ink">{l.name}</p>
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_STYLE[l.status]}`}>{STATUS_LABEL[l.status]}</span>
                 </div>
-                <p className="mt-0.5 text-xs text-ink/55">Sistemsko: {l.systemQtySnapshot} {l.unit}</p>
+                <p className="mt-0.5 text-xs text-ink/55">Sistemsko: {l.systemQtySnapshot} {UNIT_LABELS[l.unit] ?? l.unit}</p>
 
                 <div className="mt-2 flex items-center gap-2">
                   {readOnly ? (
@@ -362,7 +363,7 @@ function SessionDetailView({
                       className="min-h-11 w-28 rounded-md border border-line px-2.5 py-2 text-right text-base disabled:opacity-50"
                     />
                   )}
-                  <span className="text-sm text-ink/55">{l.unit}</span>
+                  <span className="text-sm text-ink/55">{UNIT_LABELS[l.unit] ?? l.unit}</span>
                   {diff !== null && (
                     <span className={`ml-auto tabular-nums text-sm ${diff < 0 ? "text-danger" : diff > 0 ? "text-warn" : "text-ink/55"}`}>
                       {diff > 0 ? `+${diff}` : diff}
@@ -417,7 +418,7 @@ function SessionDetailView({
                 <tr key={l.id} className="border-b border-line last:border-0">
                   <td className="px-3 py-2.5 font-medium text-ink">{l.name}</td>
                   <td className="px-3 py-2.5 text-right tabular-nums text-inkSoft">
-                    {l.systemQtySnapshot} {l.unit}
+                    {l.systemQtySnapshot} {UNIT_LABELS[l.unit] ?? l.unit}
                   </td>
                   <td className="px-3 py-2.5 text-right">
                     {readOnly ? (

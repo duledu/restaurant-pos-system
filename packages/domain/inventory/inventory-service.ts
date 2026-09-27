@@ -331,6 +331,7 @@ export async function initializeTracking(
   const invItem = await prisma.$transaction(async (tx) => {
     const existing = await tx.inventoryItem.findUnique({
       where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: input.menuItemId } },
+      select: { id: true },
     });
     // Reconcile to the ENTERED value even when a row already exists — the
     // admin explicitly typed this number in the "inicijalizacija" form, it
@@ -338,26 +339,21 @@ export async function initializeTracking(
     // number from a past DIRECT_STOCK period keep being treated as current
     // physical reality, exactly what the audit forbids). Same reconcile
     // pattern (before/after + auditable movement) as bulkSetOpeningStock.
-    const before = existing ? Number(existing.currentStock) : 0;
+    const locked = await tx.inventoryItem.upsert({
+      where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: input.menuItemId } },
+      create: { restaurantId: ctx.restaurantId, locationId: input.locationId, menuItemId: input.menuItemId, currentStock: 0, unit },
+      update: { currentStock: { increment: 0 } },
+    });
+    const before = locked.currentStock;
     const after = input.initialStock;
-    const delta = after - before;
+    const delta = new Prisma.Decimal(after).sub(before);
 
-    const item = existing
-      ? await tx.inventoryItem.update({
-          where: { id: existing.id },
-          data: delta !== 0 ? { unit, currentStock: after } : { unit },
-        })
-      : await tx.inventoryItem.create({
-          data: {
-        restaurantId: ctx.restaurantId,
-        locationId: input.locationId,
-        menuItemId: input.menuItemId,
-        currentStock: input.initialStock,
-        unit,
-          },
-        });
+    const item = await tx.inventoryItem.update({
+      where: { id: locked.id },
+      data: { unit, currentStock: after },
+    });
 
-    if (delta !== 0) {
+    if (!delta.isZero()) {
       await tx.inventoryMovement.create({
         data: {
           restaurantId: ctx.restaurantId,
@@ -496,7 +492,9 @@ export async function setInventoryTrackingMethod(
     // receiveStock). This is a deliberate, auditable WRITE-OFF-style
     // reconciliation, never a silent mutation.
     for (const stale of staleItems) {
-      const before = Number(stale.currentStock);
+      const locked = await tx.inventoryItem.update({ where: { id: stale.id }, data: { currentStock: { increment: 0 } } });
+      const before = locked.currentStock;
+      if (before.isZero()) continue;
       await tx.inventoryItem.update({ where: { id: stale.id }, data: { currentStock: 0 } });
       await tx.inventoryMovement.create({
         data: {
@@ -505,7 +503,7 @@ export async function setInventoryTrackingMethod(
           menuItemId,
           inventoryItemId: stale.id,
           type: "ADJUSTMENT",
-          quantityDelta: -before,
+          quantityDelta: before.neg(),
           quantityBefore: before,
           quantityAfter: 0,
           employeeId: ctx.employeeId,
@@ -712,8 +710,8 @@ export async function validateAndDecrementInventoryInTx(
     // whether the row was just created or already existed, and immune to
     // any concurrent modification between an earlier SELECT and this
     // upsert (there isn't one — this IS the atomic operation).
-    const afterStock = Number(invItem.currentStock);
-    const beforeStock = afterStock + qty;
+    const afterStock = invItem.currentStock;
+    const beforeStock = afterStock.add(qty);
 
     await tx.inventoryMovement.create({
       data: {
@@ -812,35 +810,24 @@ export async function bulkSetOpeningStock(
       const out: OpeningStockResult["results"] = [];
       for (const line of input.lines) {
         const menuItem = menuItemById.get(line.menuItemId)!;
-        const existing = await tx.inventoryItem.findUnique({
+        // Lock the authoritative balance, including concurrent first use.
+        const existing = await tx.inventoryItem.upsert({
           where: { locationId_menuItemId: { locationId: input.locationId, menuItemId: line.menuItemId } },
+          create: { restaurantId: ctx.restaurantId, locationId: input.locationId, menuItemId: line.menuItemId, currentStock: 0, unit: menuItem.unit ?? "kom" },
+          update: { currentStock: { increment: 0 } },
         });
 
-        const before = existing ? Number(existing.currentStock) : 0;
+        const before = existing.currentStock.toNumber();
         const after = line.quantity;
-        const delta = after - before;
+        const delta = new Prisma.Decimal(after).sub(existing.currentStock);
 
-        let inventoryItemId: string;
-        if (existing) {
-          inventoryItemId = existing.id;
-          if (delta !== 0) {
-            await tx.inventoryItem.update({ where: { id: existing.id }, data: { currentStock: after } });
-          }
-        } else {
-          const created = await tx.inventoryItem.create({
-            data: {
-              restaurantId: ctx.restaurantId,
-              locationId: input.locationId,
-              menuItemId: line.menuItemId,
-              currentStock: after,
-              unit: menuItem.unit ?? "kom",
-            },
-          });
-          inventoryItemId = created.id;
+        const inventoryItemId = existing.id;
+        if (!delta.isZero()) {
+          await tx.inventoryItem.update({ where: { id: existing.id }, data: { currentStock: after } });
         }
 
         let movementId: string | null = null;
-        if (delta !== 0) {
+        if (!delta.isZero()) {
           const mov = await tx.inventoryMovement.create({
             data: {
               restaurantId: ctx.restaurantId,
@@ -917,10 +904,10 @@ export async function bulkZeroOpeningStock(ctx: AuthContext, input: { locationId
     where: { id: { in: tracked.map((t) => t.menuItemId) } },
     select: { id: true, inventoryTrackingMethod: true },
   });
-  const recipeMenuItemIds = new Set(
-    methodByMenuItem.filter((m) => m.inventoryTrackingMethod === "RECIPE").map((m) => m.id)
+  const directMenuItemIds = new Set(
+    methodByMenuItem.filter((m) => m.inventoryTrackingMethod === "DIRECT_STOCK").map((m) => m.id)
   );
-  const directStockOnly = tracked.filter((t) => !recipeMenuItemIds.has(t.menuItemId));
+  const directStockOnly = tracked.filter((t) => directMenuItemIds.has(t.menuItemId));
   if (directStockOnly.length === 0) {
     return { itemsAffected: 0, itemsUnchanged: 0, results: [] };
   }
@@ -1012,8 +999,8 @@ async function _applyDelta(
       );
     }
 
-    const after = Number(updated.currentStock);
-    const before = after - delta;
+    const after = new Prisma.Decimal(updated.currentStock);
+    const before = after.sub(delta);
     const mov = await tx.inventoryMovement.create({
       data: {
         restaurantId: ctx.restaurantId,
@@ -1028,6 +1015,6 @@ async function _applyDelta(
         reason: meta.reason,
       },
     });
-    return { item: updated, movement: mov, before, after };
+    return { item: updated, movement: mov, before: before.toNumber(), after: after.toNumber() };
   });
 }

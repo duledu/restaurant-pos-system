@@ -2,16 +2,13 @@
  * P1: Normativi/sirovine — jedinice mere. Čista, DOM-free logika (testabilna
  * bez baze) — vidi tests/unit/unit-of-measure.test.ts.
  *
- * Namerna odluka za ovu fazu: Ingredient ima TAČNO JEDNU jedinicu (unit)
- * kojom se izražava i njeno stanje zaliha I svaka receptura koja je koristi
- * — nema po-recepturi override jedinice, pa nema potrebe za konverzijom
- * PRI UPISU (npr. "Mleveno meso" je uvek u kg, nikad mešano g/kg za istu
- * sirovinu). Ova tabela ipak postoji i pokriva pun KILOGRAM<->GRAM i
- * LITER<->MILLILITER konverzioni par — pripremljena za UI prikaz (npr.
- * prikaz sitnih količina u gramima umesto 0.003 kg) i za kasniju fazu ako
- * se pokaže potreba za konverzijom. PIECE se NAMERNO nikad ne konvertuje —
- * komad je diskretna jedinica bez mase/zapremine.
+ * Ingredient ima jednu kanoničku jedinicu (unit) za stanje, kretanja i
+ * sačuvane normative. Unos normativa može koristiti kompatibilnu jedinicu;
+ * server je konvertuje Decimal aritmetikom PRE upisa. kg/g i l/ml imaju
+ * faktor 1000. PIECE se ne konvertuje u masu ili zapreminu.
  */
+
+import { Prisma } from "@prisma/client";
 
 export type UnitOfMeasure = "KILOGRAM" | "GRAM" | "LITER" | "MILLILITER" | "PIECE";
 
@@ -59,7 +56,15 @@ export function unitLabelSr(unit: UnitOfMeasure): string {
  * PIECE dok druga nije (komad se ne konvertuje ni u šta).
  */
 export function convertUnit(quantity: number, from: UnitOfMeasure, to: UnitOfMeasure): number {
-  if (from === to) return quantity;
+  return convertUnitDecimal(quantity, from, to).toNumber();
+}
+
+/** Authoritative conversion retains Decimal through persistence. */
+export function convertUnitDecimal(quantity: Prisma.Decimal.Value, from: UnitOfMeasure, to: UnitOfMeasure): Prisma.Decimal {
+  const amount = new Prisma.Decimal(quantity);
+  if (!amount.isFinite()) throw new Error("Količina mora biti konačan broj");
+  if (!ALL_UNITS.includes(from) || !ALL_UNITS.includes(to)) throw new Error("Nepoznata jedinica mere");
+  if (from === to) return amount;
   const fromDim = unitDimension(from);
   const toDim = unitDimension(to);
   if (fromDim !== toDim) {
@@ -71,6 +76,5 @@ export function convertUnit(quantity: number, from: UnitOfMeasure, to: UnitOfMea
     // ikad doda druga COUNT jedinica.
     throw new Error("Diskretne (PIECE) jedinice se ne konvertuju");
   }
-  const inBase = quantity * TO_BASE_FACTOR[from];
-  return inBase / TO_BASE_FACTOR[to];
+  return amount.mul(TO_BASE_FACTOR[from]).div(TO_BASE_FACTOR[to]);
 }

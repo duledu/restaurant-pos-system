@@ -911,7 +911,7 @@ export function InventoryClient() {
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-line/80 bg-white p-3 shadow-sm">
         <input type="search" value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Pretraga artikala…" className={`max-w-sm ${inputClass}`} />
-        <div className="flex gap-1.5">
+        <div className="flex flex-wrap gap-1.5">
           <TabPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")} label="Sve" />
           <TabPill active={statusFilter === "low"} onClick={() => setStatusFilter("low")} label="Niska zaliha" count={lowStockCount} />
           <TabPill active={statusFilter === "out"} onClick={() => setStatusFilter("out")} label="Nema na stanju" count={outOfStockCount} />

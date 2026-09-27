@@ -73,7 +73,7 @@ async function newTable(fixture: Fixture) {
 async function orderAndPay(ctx: AuthContext, fixture: Fixture, menuItemId: string, quantity: number) {
   const table = await newTable(fixture);
   const order = await orders.openOrder(ctx, { tableId: table.id });
-  await orders.addItem(ctx, order.id, { menuItemId, quantity });
+  await orders.addItem(ctx, order.id, { menuItemId, quantity, modifierOptionIds: [] });
   const submitted = await orders.submitOrder(ctx, order.id, { idempotencyKey: randomUUID() });
   return billing.completePayment(ctx, submitted.id, { method: "CASH" });
 }
@@ -129,7 +129,7 @@ describe("Phase 2.5 acceptance — A. Vinjak 0.04 (ŠANK, RECIPE, single ingredi
     // on Postgres Decimal(12,3), proving no native-JS-float accumulation
     // crept in anywhere on the recipe-quantity -> multiplication -> ledger
     // path (a drifted result would show as e.g. "8.99999999999999...").
-    expect(stock.currentStock.toString()).toBe("9.000"); // 10 - 1.00, IngredientStock.currentStock is Decimal(12,3)
+    expect(stock.currentStock.equals(9)).toBe(true); // exact Decimal equality; toString omits trailing zeroes
     expect(Number(stock.currentStock)).toBe(9);
   });
 });
@@ -145,6 +145,9 @@ describe("Phase 2.5 acceptance — B. Coca-Cola (ŠANK, DIRECT_STOCK)", () => {
 
     const after = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: invItem.id } });
     expect(Number(after.currentStock)).toBe(47); // 50 - 3, fixed 1:1 ratio confirmed by audit
+    const sale = await prisma.inventoryMovement.findMany({ where: { inventoryItemId: invItem.id, type: "SALE" } });
+    expect(sale).toHaveLength(1);
+    expect(sale[0].quantityDelta.equals(-3)).toBe(true);
 
     // Inventura consistency: addLines snapshots systemQtySnapshot directly
     // from InventoryItem.currentStock — same field, no recomputation.
@@ -175,6 +178,11 @@ describe("Phase 2.5 acceptance — C. Punjena pljeskavica (KUHINJA, RECIPE, mult
     expect(Number(mesoStock.currentStock)).toBeCloseTo(10_000 - 600, 9);
     expect(Number(kackaljStock.currentStock)).toBeCloseTo(5_000 - 60, 9);
     expect(Number(prsutaStock.currentStock)).toBeCloseTo(5_000 - 60, 9);
+    const ledger = await prisma.ingredientMovement.findMany({ where: { type: "SALE", ingredientId: { in: [meso.id, kackavalj.id, prsuta.id] } } });
+    expect(ledger).toHaveLength(3);
+    for (const [ingredientId, quantity] of [[meso.id, -600], [kackavalj.id, -60], [prsuta.id, -60]] as const) {
+      expect(ledger.find(movement => movement.ingredientId === ingredientId)?.quantityDelta.equals(quantity)).toBe(true);
+    }
   });
 });
 

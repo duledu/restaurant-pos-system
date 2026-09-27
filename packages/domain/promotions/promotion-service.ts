@@ -399,14 +399,14 @@ export async function resolveEffectivePrices(params: {
   locationId: string;
   lines: Array<PricingLine & { key: string }>;
   at: Date;
-}): Promise<Map<string, EffectivePriceResult>> {
+}, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<Map<string, EffectivePriceResult>> {
   const result = new Map<string, EffectivePriceResult>();
   if (params.lines.length === 0) return result;
 
   const menuItemIds = [...new Set(params.lines.map((l) => l.menuItemId))];
   const categoryIds = [...new Set(params.lines.map((l) => l.categoryId).filter((id): id is string => id !== null))];
 
-  const rows = await prisma.promotion.findMany({
+  const rows = await db.promotion.findMany({
     where: {
       restaurantId: params.restaurantId,
       isActive: true,
@@ -426,7 +426,7 @@ export async function resolveEffectivePrices(params: {
     return result;
   }
 
-  const restaurant = await prisma.restaurant.findUniqueOrThrow({ where: { id: params.restaurantId }, select: { timezone: true } });
+  const restaurant = await db.restaurant.findUniqueOrThrow({ where: { id: params.restaurantId }, select: { timezone: true } });
   for (const line of params.lines) {
     result.set(line.key, evaluateLine(rows, line, params.at, restaurant.timezone));
   }

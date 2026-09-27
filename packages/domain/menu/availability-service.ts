@@ -14,7 +14,7 @@
  * negativna zaliha ostaje SAMO upozorenje (getInventoryStockStatus), nikad
  * ne prolazi kroz ovaj fajl niti utiče na njega.
  */
-import { prisma } from "@rcs/db";
+import { prisma, type Prisma } from "@rcs/db";
 import { requirePermission, requireLocationAccess, scopeToRestaurant, ForbiddenError, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import {
@@ -187,12 +187,13 @@ export interface BlockedAvailabilityInfo {
 export async function getBlockedAvailability(
   restaurantId: string,
   locationId: string,
-  menuItemIds: string[]
+  menuItemIds: string[],
+  db: Prisma.TransactionClient | typeof prisma = prisma
 ): Promise<Map<string, BlockedAvailabilityInfo>> {
   const result = new Map<string, BlockedAvailabilityInfo>();
   if (menuItemIds.length === 0) return result;
 
-  const overrides = await prisma.menuItemAvailability.findMany({
+  const overrides = await db.menuItemAvailability.findMany({
     where: { restaurantId, locationId, menuItemId: { in: menuItemIds } },
     select: { menuItemId: true, reasonCode: true },
   });

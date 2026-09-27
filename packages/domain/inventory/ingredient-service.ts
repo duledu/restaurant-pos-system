@@ -117,7 +117,10 @@ export async function updateIngredient(ctx: AuthContext, ingredientId: string, i
   }
   if (input.unit !== undefined) {
     if (!ALL_UNITS.includes(input.unit)) throw new Error("Nepoznata jedinica mere");
-    data.unit = input.unit;
+    // The existing editor chooses this at creation. Neither recipes nor
+    // historical movements carry their own unit snapshot, so relabelling
+    // the ingredient would reinterpret every quantity, including history.
+    if (input.unit !== ingredient.unit) throw new Error("Jedinica mere sirovine se ne menja nakon kreiranja. Za drugu jedinicu kreirajte novu sirovinu.");
   }
   if (input.category !== undefined) data.category = input.category?.trim() || null;
   if (input.sku !== undefined) data.sku = input.sku?.trim() || null;
@@ -481,34 +484,25 @@ export async function bulkSetIngredientOpeningStock(
       const out: IngredientOpeningStockResult["results"] = [];
       for (const line of input.lines) {
         const ingredient = ingredientById.get(line.ingredientId)!;
-        const existing = await tx.ingredientStock.findUnique({
+        // An atomic no-op upsert also locks a previously missing row. Read
+        // the balance AFTER queued sales/receipts, never before the lock.
+        const existing = await tx.ingredientStock.upsert({
           where: { locationId_ingredientId: { locationId: input.locationId, ingredientId: line.ingredientId } },
+          create: { restaurantId: ctx.restaurantId, locationId: input.locationId, ingredientId: line.ingredientId, currentStock: 0 },
+          update: { currentStock: { increment: 0 } },
         });
 
-        const before = existing ? Number(existing.currentStock) : 0;
+        const before = existing.currentStock.toNumber();
         const after = line.quantity;
-        const delta = after - before;
+        const delta = new Prisma.Decimal(after).sub(existing.currentStock);
 
-        let ingredientStockId: string;
-        if (existing) {
-          ingredientStockId = existing.id;
-          if (delta !== 0) {
-            await tx.ingredientStock.update({ where: { id: existing.id }, data: { currentStock: after } });
-          }
-        } else {
-          const created = await tx.ingredientStock.create({
-            data: {
-              restaurantId: ctx.restaurantId,
-              locationId: input.locationId,
-              ingredientId: line.ingredientId,
-              currentStock: after,
-            },
-          });
-          ingredientStockId = created.id;
+        const ingredientStockId = existing.id;
+        if (!delta.isZero()) {
+          await tx.ingredientStock.update({ where: { id: existing.id }, data: { currentStock: after } });
         }
 
         let movementId: string | null = null;
-        if (delta !== 0) {
+        if (!delta.isZero()) {
           const mov = await tx.ingredientMovement.create({
             data: {
               restaurantId: ctx.restaurantId,
@@ -610,8 +604,8 @@ async function applyDelta(
       );
     }
 
-    const after = Number(updated.currentStock);
-    const before = after - delta;
+    const after = new Prisma.Decimal(updated.currentStock);
+    const before = after.sub(delta);
     const movement = await tx.ingredientMovement.create({
       data: {
         restaurantId: ctx.restaurantId,
@@ -626,7 +620,7 @@ async function applyDelta(
         reason: meta.reason,
       },
     });
-    return { stock: updated, movement, before, after, locationId: updated.locationId };
+    return { stock: updated, movement, before: before.toNumber(), after: after.toNumber(), locationId: updated.locationId };
   });
 }
 

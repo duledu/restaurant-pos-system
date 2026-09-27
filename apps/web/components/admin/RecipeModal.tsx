@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "../ui/Button";
 
 // ── Normativ (recipe) — shared modal, used by both the Menu admin page's
 // per-item "Normativ" button AND the dedicated Admin → Normativi page (see
@@ -85,6 +86,13 @@ export function RecipeModal({
   const [quantity, setQuantity] = useState("");
   const [entryUnit, setEntryUnit] = useState("");
   const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const busy = useRef(false);
+  const [removing, setRemoving] = useState<{ id: string; name: string } | null>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+
+  function close() { if (!busy.current) onClose(); }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,7 +108,20 @@ export function RecipeModal({
     }
   }, [item.id]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load().catch(e => setErr(e instanceof Error ? e.message : "Učitavanje nije uspelo")); }, [load]);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialog.current?.focus();
+    return () => previous?.focus();
+  }, []);
+
+  async function mutate(action: () => Promise<unknown>) {
+    if (busy.current || readOnly) return;
+    busy.current = true; setSaving(true); setErr(""); setSaved(false);
+    try { await action(); await load(); onChanged?.(); setSaved(true); }
+    catch (e) { setErr(e instanceof Error ? e.message : "Čuvanje nije uspelo"); }
+    finally { busy.current = false; setSaving(false); }
+  }
 
   const selectedIngredient = ingredients.find((i) => i.id === ingredientId);
   const unitOptions = selectedIngredient ? (COMPATIBLE_UNITS[selectedIngredient.unit] ?? [selectedIngredient.unit]) : [];
@@ -117,21 +138,18 @@ export function RecipeModal({
   }
 
   async function addLine() {
+    if (busy.current) return;
     setErr("");
     const qty = Number(quantity);
     if (!ingredientId) { setErr("Izaberite sirovinu"); return; }
     if (!Number.isFinite(qty) || qty <= 0) { setErr("Unesite pozitivnu količinu"); return; }
-    try {
+    await mutate(async () => {
       await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe`, {
         method: "POST",
         body: JSON.stringify({ ingredientId, quantity: qty, unit: entryUnit || undefined }),
       });
       setIngredientId(""); setQuantity(""); setEntryUnit("");
-      await load();
-      onChanged?.();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Greška");
-    }
+    });
   }
 
   // Editing an existing line stays in the ingredient's canonical unit
@@ -142,25 +160,33 @@ export function RecipeModal({
   // value). Unit selection is a P1.3 addition for NEW lines only.
   async function updateLine(lineId: string, newQty: string) {
     const qty = Number(newQty);
-    if (!Number.isFinite(qty) || qty <= 0) return;
-    await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, {
+    if (!Number.isFinite(qty) || qty <= 0) { setErr("Unesite pozitivnu količinu"); return; }
+    await mutate(() => recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, {
       method: "PATCH",
       body: JSON.stringify({ quantity: qty }),
-    });
-    await load();
-    onChanged?.();
+    }));
   }
 
-  async function removeLine(lineId: string, ingredientName: string) {
-    if (!confirm(`Ukloniti "${ingredientName}" iz normativa?`)) return;
-    await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, { method: "DELETE" });
-    await load();
-    onChanged?.();
+  async function removeLine(lineId: string) {
+    await mutate(async () => {
+      await recipeApiFetch(`/api/admin/menu/items/${item.id}/recipe/${lineId}`, { method: "DELETE" });
+      setRemoving(null);
+    });
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4" onClick={close}>
       <div
+        ref={dialog} role="dialog" aria-modal="true" aria-label={`Normativ — ${item.name}`} tabIndex={-1}
+        onKeyDown={e => {
+          if (e.key === "Escape") { e.stopPropagation(); close(); }
+          if (e.key === "Tab") {
+            const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]') ?? []).filter(el => el.getClientRects().length > 0);
+            const first = controls[0], last = controls[controls.length - 1];
+            if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+          }
+        }}
         className="flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg bg-white shadow-elevated sm:max-w-lg sm:rounded-lg"
         onClick={(e) => e.stopPropagation()}
       >
@@ -170,9 +196,10 @@ export function RecipeModal({
               Normativ — {item.name}
               {readOnly && <span className="ml-2 align-middle text-xs font-normal text-ink/40">(samo za pregled)</span>}
             </h2>
-            <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+            <button onClick={close} disabled={saving} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
           </div>
           <p className="mt-0.5 text-xs text-ink/50">Koliko sirovine se troši po JEDNOJ prodatoj jedinici ovog artikla.</p>
+          <p className="mt-1 text-xs text-inkSoft">Svaka izmena se čuva pojedinačno, u jedinici zalihe sirovine.</p>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
@@ -189,7 +216,7 @@ export function RecipeModal({
                   <div className="flex items-center justify-between gap-2">
                     <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{line.ingredient.name}</p>
                     {!readOnly && (
-                      <button onClick={() => removeLine(line.id, line.ingredient.name)} className="shrink-0 text-xs text-danger/70 hover:text-danger">Ukloni</button>
+                      <Button variant="dangerGhost" disabled={saving} onClick={() => setRemoving({ id: line.id, name: line.ingredient.name })}>Ukloni</Button>
                     )}
                   </div>
                   <div className="mt-1.5 flex items-center gap-1.5">
@@ -198,11 +225,12 @@ export function RecipeModal({
                     ) : (
                       <input
                         type="number"
+                        aria-label={`Količina — ${line.ingredient.name}`} disabled={saving}
                         inputMode="decimal"
                         step="0.001"
                         defaultValue={line.quantity}
                         onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
-                        className="w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
+                        className="min-h-11 w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
                       />
                     )}
                     <span className="text-sm text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</span>
@@ -231,17 +259,18 @@ export function RecipeModal({
                       ) : (
                         <input
                           type="number"
+                          aria-label={`Količina — ${line.ingredient.name}`} disabled={saving}
                           step="0.001"
                           defaultValue={line.quantity}
                           onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
-                          className="w-20 rounded-sm border border-line px-1.5 py-1 text-sm"
+                          className="min-h-11 w-24 rounded-sm border border-line px-1.5 py-1 text-sm"
                         />
                       )}
                     </td>
                     <td className="py-1.5 pr-2 text-ink/60">{UNIT_LABELS_SR[line.ingredient.unit] ?? line.ingredient.unit}</td>
                     <td className="py-1.5 text-right">
                       {!readOnly && (
-                        <button onClick={() => removeLine(line.id, line.ingredient.name)} className="text-xs text-danger/70 hover:text-danger">Ukloni</button>
+                        <Button variant="dangerGhost" disabled={saving} onClick={() => setRemoving({ id: line.id, name: line.ingredient.name })}>Ukloni</Button>
                       )}
                     </td>
                   </tr>
@@ -253,6 +282,12 @@ export function RecipeModal({
         </div>
 
         <div className="shrink-0 border-t border-line px-5 py-4">
+        {removing && <div className="mb-3 rounded-md border border-line bg-cream-100 p-3" role="alertdialog" aria-label="Uklanjanje sastojka">
+          <p className="mb-2 text-sm text-ink">Ukloniti „{removing.name}” iz normativa?</p>
+          <div className="flex gap-2"><Button variant="danger" disabled={saving} onClick={() => removeLine(removing.id)}>Potvrdi uklanjanje</Button><Button variant="secondary" disabled={saving} onClick={() => setRemoving(null)}>Otkaži</Button></div>
+        </div>}
+        {err && <p role="alert" className="mb-2 text-sm text-danger">{err}</p>}
+        <p role="status" className="mb-2 text-xs text-inkSoft">{saving ? "Čuvanje…" : saved ? "Sačuvano" : ""}</p>
         {readOnly ? (
           <p className="rounded-md border border-line bg-cream-100 p-3 text-xs text-inkSoft">
             Nemate dozvolu za izmenu normativa (potrebna je OWNER/ADMIN/MANAGER uloga) — prikaz je samo za pregled.
@@ -261,7 +296,7 @@ export function RecipeModal({
           <div className="rounded-md border border-line bg-cream-100 p-3">
             <div className="flex flex-col gap-2">
               <select
-                className="w-full rounded-md border border-line px-2 py-2 text-sm"
+                aria-label="Sirovina" disabled={saving} className="min-h-11 w-full rounded-md border border-line px-2 py-2 text-sm"
                 value={ingredientId}
                 onChange={(e) => onSelectIngredient(e.target.value)}
               >
@@ -273,21 +308,22 @@ export function RecipeModal({
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   type="number"
+                  aria-label="Količina novog sastojka" disabled={saving}
                   inputMode="decimal"
                   step="0.001"
                   placeholder="Količina"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
-                  className="w-24 rounded-md border border-line px-2 py-2 text-sm"
+                  className="min-h-11 w-24 rounded-md border border-line px-2 py-2 text-sm"
                 />
                 {unitOptions.length > 1 ? (
-                  <select value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="rounded-md border border-line px-2 py-2 text-sm">
+                  <select aria-label="Jedinica mere" disabled={saving} value={entryUnit} onChange={(e) => setEntryUnit(e.target.value)} className="min-h-11 rounded-md border border-line px-2 py-2 text-sm">
                     {unitOptions.map((u) => <option key={u} value={u}>{UNIT_LABELS_SR[u] ?? u}</option>)}
                   </select>
                 ) : selectedIngredient ? (
                   <span className="flex items-center px-1 text-sm text-ink/60">{UNIT_LABELS_SR[selectedIngredient.unit] ?? selectedIngredient.unit}</span>
                 ) : null}
-                <button onClick={addLine} className="min-h-11 flex-1 rounded-md bg-gold px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-gold-dark sm:flex-none">
+                <button onClick={addLine} disabled={saving} className="min-h-11 flex-1 rounded-md bg-gold px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40 sm:flex-none">
                   + Dodaj sastojak
                 </button>
               </div>
@@ -297,7 +333,6 @@ export function RecipeModal({
                 = {preview.toFixed(3).replace(/\.?0+$/, "")} {UNIT_LABELS_SR[selectedIngredient.unit] ?? selectedIngredient.unit} (zaliha sirovine je u ovoj jedinici)
               </p>
             )}
-            {err && <p className="mt-1.5 text-xs text-danger">{err}</p>}
           </div>
         )}
         </div>

@@ -21,7 +21,16 @@
 import { prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { convertUnit, type UnitOfMeasure } from "../inventory/unit-of-measure";
+import { convertUnitDecimal, type UnitOfMeasure } from "../inventory/unit-of-measure";
+
+function canonicalRecipeQuantity(quantity: number, from: UnitOfMeasure, to: UnitOfMeasure) {
+  const canonical = convertUnitDecimal(quantity, from, to);
+  if (!canonical.isPositive()) throw new Error("Količina mora biti pozitivna");
+  if (canonical.decimalPlaces() > 3 || canonical.greaterThan("999999999.999")) {
+    throw new Error("Količina prelazi preciznost zalihe (najviše 3 decimale u jedinici sirovine). Za sitnije količine koristite sirovinu u g ili ml.");
+  }
+  return canonical;
+}
 
 async function loadOwnedMenuItem(ctx: AuthContext, menuItemId: string) {
   const menuItem = await prisma.menuItem.findFirst({
@@ -69,17 +78,14 @@ export async function addRecipeLine(
   if (!ingredient) throw new Error("Sirovina nije pronađena");
   if (input.quantity <= 0) throw new Error("Količina mora biti pozitivna");
 
-  const canonicalQuantity =
-    input.unit && input.unit !== ingredient.unit
-      ? convertUnit(input.quantity, input.unit, ingredient.unit)
-      : input.quantity;
+  const canonicalQuantity = canonicalRecipeQuantity(input.quantity, input.unit ?? ingredient.unit, ingredient.unit);
 
   const existing = await prisma.menuItemIngredient.findUnique({
     where: { menuItemId_ingredientId: { menuItemId, ingredientId: input.ingredientId } },
   });
   if (existing) throw new Error("Ova sirovina je već u recepturi — izmenite postojeću liniju umesto dodavanja nove");
 
-  const { line, transitioned } = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     const countBefore = await tx.menuItemIngredient.count({ where: { menuItemId } });
 
     const created = await tx.menuItemIngredient.create({
@@ -105,38 +111,36 @@ export async function addRecipeLine(
       didTransition = true;
     }
 
-    return { line: created, transitioned: didTransition };
-  });
-
-  await recordAuditEntry(ctx, {
-    entityType: "MenuItem",
-    entityId: menuItemId,
-    action: "recipe.line_added",
-    newValue: {
-      ingredientId: input.ingredientId,
-      ingredientName: ingredient.name,
-      quantity: canonicalQuantity,
-      unit: ingredient.unit,
-      enteredQuantity: input.quantity,
-      enteredUnit: input.unit ?? ingredient.unit,
-    },
-  });
-
-  if (transitioned) {
     await recordAuditEntry(ctx, {
       entityType: "MenuItem",
       entityId: menuItemId,
-      action: "inventory.model_switched_to_recipe",
-      previousValue: { inventoryTrackingMethod: menuItem.inventoryTrackingMethod },
+      action: "recipe.line_added",
       newValue: {
-        inventoryTrackingMethod: "RECIPE",
-        reason:
-          "Prva linija recepture kreirana — automatski prelazak na sirovinski normativ. Postojeći InventoryItem red (ako postoji) i istorija kretanja su OČUVANI, samo se više ne koriste za buduće prodaje.",
+        ingredientId: input.ingredientId,
+        ingredientName: ingredient.name,
+        quantity: canonicalQuantity.toNumber(),
+        unit: ingredient.unit,
+        enteredQuantity: input.quantity,
+        enteredUnit: input.unit ?? ingredient.unit,
       },
-    });
-  }
+    }, tx);
 
-  return line;
+    if (didTransition) {
+      await recordAuditEntry(ctx, {
+        entityType: "MenuItem",
+        entityId: menuItemId,
+        action: "inventory.model_switched_to_recipe",
+        previousValue: { inventoryTrackingMethod: menuItem.inventoryTrackingMethod },
+        newValue: {
+          inventoryTrackingMethod: "RECIPE",
+          reason:
+            "Prva linija recepture kreirana — automatski prelazak na sirovinski normativ. Postojeći InventoryItem red (ako postoji) i istorija kretanja su OČUVANI, samo se više ne koriste za buduće prodaje.",
+        },
+      }, tx);
+    }
+
+    return created;
+  });
 }
 
 export async function updateRecipeLine(
@@ -153,32 +157,31 @@ export async function updateRecipeLine(
   });
   if (!line) throw new Error("Linija recepture nije pronađena");
 
-  const canonicalQuantity =
-    input.unit && input.unit !== line.ingredient.unit
-      ? convertUnit(input.quantity, input.unit, line.ingredient.unit)
-      : input.quantity;
+  const canonicalQuantity = canonicalRecipeQuantity(input.quantity, input.unit ?? line.ingredient.unit, line.ingredient.unit);
 
-  const updated = await prisma.menuItemIngredient.update({
-    where: { id: recipeLineId },
-    data: { quantity: canonicalQuantity },
-    include: { ingredient: true },
+  return prisma.$transaction(async tx => {
+    const updated = await tx.menuItemIngredient.update({
+      where: { id: recipeLineId },
+      data: { quantity: canonicalQuantity },
+      include: { ingredient: true },
+    });
+
+    await recordAuditEntry(ctx, {
+      entityType: "MenuItem",
+      entityId: line.menuItem.id,
+      action: "recipe.line_updated",
+      previousValue: { ingredientId: line.ingredientId, quantity: line.quantity.toString() },
+      newValue: {
+        ingredientId: line.ingredientId,
+        ingredientName: line.ingredient.name,
+        quantity: canonicalQuantity.toNumber(),
+        enteredQuantity: input.quantity,
+        enteredUnit: input.unit ?? line.ingredient.unit,
+      },
+    }, tx);
+
+    return updated;
   });
-
-  await recordAuditEntry(ctx, {
-    entityType: "MenuItem",
-    entityId: line.menuItem.id,
-    action: "recipe.line_updated",
-    previousValue: { ingredientId: line.ingredientId, quantity: line.quantity.toString() },
-    newValue: {
-      ingredientId: line.ingredientId,
-      ingredientName: line.ingredient.name,
-      quantity: canonicalQuantity,
-      enteredQuantity: input.quantity,
-      enteredUnit: input.unit ?? line.ingredient.unit,
-    },
-  });
-
-  return updated;
 }
 
 /**
@@ -200,16 +203,18 @@ export async function removeRecipeLine(ctx: AuthContext, recipeLineId: string) {
   });
   if (!line) throw new Error("Linija recepture nije pronađena");
 
-  await prisma.menuItemIngredient.delete({ where: { id: recipeLineId } });
+  return prisma.$transaction(async tx => {
+    await tx.menuItemIngredient.delete({ where: { id: recipeLineId } });
 
-  await recordAuditEntry(ctx, {
-    entityType: "MenuItem",
-    entityId: line.menuItem.id,
-    action: "recipe.line_removed",
-    previousValue: { ingredientId: line.ingredientId, ingredientName: line.ingredient.name, quantity: line.quantity.toString() },
+    await recordAuditEntry(ctx, {
+      entityType: "MenuItem",
+      entityId: line.menuItem.id,
+      action: "recipe.line_removed",
+      previousValue: { ingredientId: line.ingredientId, ingredientName: line.ingredient.name, quantity: line.quantity.toString() },
+    }, tx);
+
+    return { removed: true };
   });
-
-  return { removed: true };
 }
 
 export interface RecipeOverviewItem {

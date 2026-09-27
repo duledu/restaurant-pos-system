@@ -39,8 +39,14 @@ async function loadSession(ctx: AuthContext, sessionId: string) {
   return session;
 }
 
-async function loadOpenSession(ctx: AuthContext, sessionId: string) {
-  const session = await loadSession(ctx, sessionId);
+async function lockOpenSession(ctx: AuthContext, sessionId: string, tx: TxClient) {
+  const rows = await tx.$queryRaw<Array<{ id: string; locationId: string; status: string }>>`
+    SELECT id, "locationId", status FROM inventory_count_sessions
+    WHERE id = ${sessionId} AND "restaurantId" = ${ctx.restaurantId} FOR UPDATE
+  `;
+  const session = rows[0];
+  if (!session) throw new Error("Sesija inventure nije pronađena");
+  requireLocationAccess(ctx, session.locationId);
   if (session.status !== "OPEN") throw new Error("Sesija je već potvrđena — redovi se više ne mogu menjati");
   return session;
 }
@@ -56,22 +62,30 @@ export async function startOrResumeSession(ctx: AuthContext, input: StartInvento
   requirePermission(ctx, INVENTORY_COUNT);
   requireLocationAccess(ctx, input.locationId);
 
-  const existing = await prisma.inventoryCountSession.findFirst({
-    where: { ...scopeToRestaurant(ctx), locationId: input.locationId, status: "OPEN" },
+  const sessionId = await prisma.$transaction(async tx => {
+    // There may be no session row yet. Serialize creation on its location.
+    const locations = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM locations
+      WHERE id = ${input.locationId} AND "restaurantId" = ${ctx.restaurantId} FOR UPDATE
+    `;
+    if (!locations.length) throw new Error("Lokacija nije pronađena");
+    const existing = await tx.inventoryCountSession.findFirst({
+      where: { ...scopeToRestaurant(ctx), locationId: input.locationId, status: "OPEN" },
+    });
+    if (existing) return existing.id;
+    const created = await tx.inventoryCountSession.create({
+      data: { restaurantId: ctx.restaurantId, locationId: input.locationId, startedBy: ctx.employeeId },
+    });
+    await recordAuditEntry(ctx, {
+      entityType: "InventoryCountSession",
+      entityId: created.id,
+      action: "inventory_count.started",
+      newValue: { locationId: input.locationId },
+      locationId: input.locationId,
+    }, tx);
+    return created.id;
   });
-  if (existing) return getSession(ctx, existing.id);
-
-  const created = await prisma.inventoryCountSession.create({
-    data: { restaurantId: ctx.restaurantId, locationId: input.locationId, startedBy: ctx.employeeId },
-  });
-  await recordAuditEntry(ctx, {
-    entityType: "InventoryCountSession",
-    entityId: created.id,
-    action: "inventory_count.started",
-    newValue: { locationId: input.locationId },
-    locationId: input.locationId,
-  });
-  return getSession(ctx, created.id);
+  return getSession(ctx, sessionId);
 }
 
 export async function listSessions(ctx: AuthContext, filters: { locationId?: string } = {}) {
@@ -169,9 +183,8 @@ export async function getSession(ctx: AuthContext, sessionId: string) {
 
 export async function addLines(ctx: AuthContext, sessionId: string, input: AddInventoryCountLinesInput) {
   requirePermission(ctx, INVENTORY_COUNT);
-  const session = await loadOpenSession(ctx, sessionId);
-
   return prisma.$transaction(async (tx) => {
+    const session = await lockOpenSession(ctx, sessionId, tx);
     const createdIds: string[] = [];
     for (const target of input.targets) {
       if (target.targetType === "INGREDIENT") {
@@ -233,48 +246,50 @@ export async function addLines(ctx: AuthContext, sessionId: string, input: AddIn
 export async function enterPhysicalQuantity(ctx: AuthContext, sessionId: string, lineId: string, physicalQty: number) {
   requirePermission(ctx, INVENTORY_COUNT);
   if (physicalQty < 0) throw new Error("Fizička količina ne može biti negativna");
-  await loadOpenSession(ctx, sessionId);
+  return prisma.$transaction(async tx => {
+    await lockOpenSession(ctx, sessionId, tx);
+    const line = await tx.inventoryCountLine.findFirst({ where: { id: lineId, sessionId } });
+    if (!line) throw new Error("Red nije pronađen u ovoj sesiji");
 
-  const line = await prisma.inventoryCountLine.findFirst({ where: { id: lineId, sessionId } });
-  if (!line) throw new Error("Red nije pronađen u ovoj sesiji");
+    // Status ovde je SAMO za trenutni UI prikaz tokom brojanja (poređenje sa
+    // snapshot-om uzetim pri dodavanju reda) — NIJE konačna reč o korekciji.
+    // STALE detekcija (nasuprot ŽIVOJ vrednosti) dešava se isključivo pri
+    // confirmSession, vidi napomenu na vrhu fajla.
+    const snapshot = Number(line.systemQtySnapshot);
+    const status = physicalQty === snapshot ? "MATCH" : physicalQty > snapshot ? "SURPLUS" : "SHORTAGE";
 
-  // Status ovde je SAMO za trenutni UI prikaz tokom brojanja (poređenje sa
-  // snapshot-om uzetim pri dodavanju reda) — NIJE konačna reč o korekciji.
-  // STALE detekcija (nasuprot ŽIVOJ vrednosti) dešava se isključivo pri
-  // confirmSession, vidi napomenu na vrhu fajla.
-  const snapshot = Number(line.systemQtySnapshot);
-  const status = physicalQty === snapshot ? "MATCH" : physicalQty > snapshot ? "SURPLUS" : "SHORTAGE";
-
-  return prisma.inventoryCountLine.update({
-    where: { id: lineId },
-    data: { physicalQty, status, countedBy: ctx.employeeId, countedAt: new Date() },
+    return tx.inventoryCountLine.update({
+      where: { id: lineId },
+      data: { physicalQty, status, countedBy: ctx.employeeId, countedAt: new Date() },
+    });
   });
 }
 
 /** "Prebroj ponovo" — re-bazira snapshot na TRENUTNU živu vrednost i vraća red na NOT_COUNTED. */
 export async function recountLine(ctx: AuthContext, sessionId: string, lineId: string) {
   requirePermission(ctx, INVENTORY_COUNT);
-  const session = await loadOpenSession(ctx, sessionId);
+  return prisma.$transaction(async tx => {
+    const session = await lockOpenSession(ctx, sessionId, tx);
+    const line = await tx.inventoryCountLine.findFirst({ where: { id: lineId, sessionId } });
+    if (!line) throw new Error("Red nije pronađen u ovoj sesiji");
 
-  const line = await prisma.inventoryCountLine.findFirst({ where: { id: lineId, sessionId } });
-  if (!line) throw new Error("Red nije pronađen u ovoj sesiji");
+    let liveValue = new Prisma.Decimal(0);
+    if (line.targetType === "MENU_ITEM") {
+      const stock = await tx.inventoryItem.findUnique({
+        where: { locationId_menuItemId: { locationId: session.locationId, menuItemId: line.menuItemId! } },
+      });
+      liveValue = stock?.currentStock ?? new Prisma.Decimal(0);
+    } else {
+      const stock = await tx.ingredientStock.findUnique({
+        where: { locationId_ingredientId: { locationId: session.locationId, ingredientId: line.ingredientId! } },
+      });
+      liveValue = stock?.currentStock ?? new Prisma.Decimal(0);
+    }
 
-  let liveValue = new Prisma.Decimal(0);
-  if (line.targetType === "MENU_ITEM") {
-    const stock = await prisma.inventoryItem.findUnique({
-      where: { locationId_menuItemId: { locationId: session.locationId, menuItemId: line.menuItemId! } },
+    return tx.inventoryCountLine.update({
+      where: { id: lineId },
+      data: { systemQtySnapshot: liveValue, physicalQty: null, status: "NOT_COUNTED", countedBy: null, countedAt: null },
     });
-    liveValue = stock?.currentStock ?? new Prisma.Decimal(0);
-  } else {
-    const stock = await prisma.ingredientStock.findUnique({
-      where: { locationId_ingredientId: { locationId: session.locationId, ingredientId: line.ingredientId! } },
-    });
-    liveValue = stock?.currentStock ?? new Prisma.Decimal(0);
-  }
-
-  return prisma.inventoryCountLine.update({
-    where: { id: lineId },
-    data: { systemQtySnapshot: liveValue, physicalQty: null, status: "NOT_COUNTED", countedBy: null, countedAt: null },
   });
 }
 
@@ -363,19 +378,20 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
     throw new ForbiddenError("Samo Vlasnik ili Administrator može preći preko upozorenja o promenjenom stanju");
   }
 
-  const allLines = await prisma.inventoryCountLine.findMany({ where: { sessionId } });
-  const countedLines = allLines.filter((l) => l.physicalQty !== null);
-
-  const menuItemIds = countedLines.filter((l) => l.targetType === "MENU_ITEM").map((l) => l.menuItemId!);
-  const [menuItems] = await Promise.all([
-    menuItemIds.length > 0 ? prisma.menuItem.findMany({ where: { id: { in: menuItemIds } }, select: { id: true, unit: true, name: true } }) : Promise.resolve([]),
-  ]);
-  const menuItemById = new Map(menuItems.map((m) => [m.id, m]));
-
-  let staleLineId: string | null = null;
+  let allLines: Awaited<ReturnType<typeof prisma.inventoryCountLine.findMany>> = [];
+  const menuItemById = new Map<string, { id: string; unit: string | null; name: string }>();
 
   try {
     await prisma.$transaction(async (tx) => {
+      // Serialize line edits with confirmation, then read the fresh count.
+      await lockOpenSession(ctx, sessionId, tx);
+      allLines = await tx.inventoryCountLine.findMany({ where: { sessionId } });
+      const freshCountedLines = allLines.filter(l => l.physicalQty !== null);
+      const menuItemIds = freshCountedLines.flatMap(l => l.menuItemId ? [l.menuItemId] : []);
+      if (menuItemIds.length) {
+        const menuItems = await tx.menuItem.findMany({ where: { id: { in: menuItemIds } }, select: { id: true, unit: true, name: true } });
+        for (const item of menuItems) menuItemById.set(item.id, item);
+      }
       // Guard protiv dvostruke konkurentne potvrde iste sesije — ISTI
       // "updateMany WHERE trenutno stanje = očekivano" obrazac kao svuda
       // drugde u projektu (billing/void/transfer).
@@ -385,7 +401,7 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
       });
       if (guard.count !== 1) throw new Error("Sesija je već potvrđena — dupla potvrda nije dozvoljena");
 
-      for (const line of countedLines) {
+      for (const line of freshCountedLines) {
         const isOverride = overrideSet.has(line.id);
         const physicalQty = Number(line.physicalQty);
         let expectedBaseline = Number(line.systemQtySnapshot);
@@ -426,13 +442,12 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
               });
 
         if (!result.applied) {
-          staleLineId = line.id;
           throw new StaleLineError(line.id);
         }
 
-        const delta = physicalQty - expectedBaseline;
+        const delta = new Prisma.Decimal(physicalQty).sub(expectedBaseline);
         let correctionMovementId: string | null = null;
-        if (delta !== 0) {
+        if (!delta.isZero()) {
           if (line.targetType === "MENU_ITEM") {
             const mov = await tx.inventoryMovement.create({
               data: {
@@ -472,9 +487,16 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
           }
         }
 
-        const newStatus = delta === 0 ? "MATCH" : delta < 0 ? "SHORTAGE" : "SURPLUS";
+        const newStatus = delta.isZero() ? "MATCH" : delta.isNegative() ? "SHORTAGE" : "SURPLUS";
         await tx.inventoryCountLine.update({ where: { id: line.id }, data: { status: newStatus, correctionMovementId } });
       }
+      await recordAuditEntry(ctx, {
+        entityType: "InventoryCountSession",
+        entityId: sessionId,
+        action: "inventory_count.confirmed",
+        newValue: { linesCounted: freshCountedLines.length, locationId: session.locationId, overrideCount: overrideSet.size },
+        locationId: session.locationId,
+      }, tx);
     }, TX_OPTIONS);
   } catch (err) {
     if (err instanceof StaleLineError) {
@@ -492,14 +514,6 @@ export async function confirmSession(ctx: AuthContext, sessionId: string, input:
     }
     throw err;
   }
-
-  await recordAuditEntry(ctx, {
-    entityType: "InventoryCountSession",
-    entityId: sessionId,
-    action: "inventory_count.confirmed",
-    newValue: { linesCounted: countedLines.length, locationId: session.locationId, overrideCount: overrideSet.size },
-    locationId: session.locationId,
-  });
 
   return getSession(ctx, sessionId);
 }

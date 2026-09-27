@@ -36,6 +36,10 @@ export const PERMISSIONS = [
   { code: "employees.manage", description: "Kreiranje/izmena zaposlenih, rola i dozvola" },
   { code: "menu.view", description: "Pregled menija (kategorije i artikli)" },
   { code: "menu.manage", description: "Izmena cena, kreiranje/brisanje/arhiviranje artikala i kategorija" },
+  { code: "inventory.view", description: "Pregled stanja zaliha" },
+  { code: "inventory.manage", description: "Upravljanje zalihama i normativima" },
+  { code: "inventory.count", description: "Fizičko prebrojavanje zaliha" },
+  { code: "inventory.opening_stock", description: "Grupno postavljanje početnog stanja" },
   { code: "promotions.view", description: "Pregled promocija" },
   { code: "promotions.manage", description: "Kreiranje/izmena/aktivacija/deaktivacija promocija" },
   { code: "shifts.manage", description: "Otvaranje i zatvaranje smene" },
@@ -58,8 +62,15 @@ export const ROLE_PERMISSIONS: Record<(typeof SYSTEM_ROLES)[number], string[]> =
   WAITER: ["menu.view", "shifts.manage", "orders.print"],
   KITCHEN: ["menu.view", "production.view", "production.manage"],
   BAR: ["menu.view", "production.view", "production.manage"],
-  INVENTORY_MANAGER: ["menu.view"],
+  INVENTORY_MANAGER: ["menu.view", "inventory.view", "inventory.count"],
 };
+
+// Same policy as the existing Inventory migrations and permission backfill.
+// Migrations precede these new Role rows on a fresh database.
+for (const role of ["OWNER", "ADMIN", "MANAGER"] as const) {
+  ROLE_PERMISSIONS[role].push("inventory.view", "inventory.manage", "inventory.count");
+}
+for (const role of ["OWNER", "ADMIN"] as const) ROLE_PERMISSIONS[role].push("inventory.opening_stock");
 
 async function main() {
   if (process.env.NODE_ENV === "production") {
