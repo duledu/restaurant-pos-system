@@ -14,6 +14,11 @@ build/
 # Test coverage
 coverage/
 
+# Local Playwright MCP session artifacts (screenshots, console logs) —
+# never meant to be committed, may capture whatever was on screen (login
+# pages, etc.) during ad-hoc browser QA.
+.playwright-mcp/
+
 # Environment fajlovi — NIKAD ne commitovati stvarne tajne
 .env
 .env.local
