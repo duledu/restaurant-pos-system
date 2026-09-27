@@ -114,6 +114,13 @@ describe("Validation (Zod schema)", () => {
     expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: FUTURE_DATE, time: "6pm", partySize: 2 })).toThrow();
   });
 
+  it("rejects a calendar-impossible date (e.g. Feb 30) instead of silently normalizing it forward", () => {
+    expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: "2099-02-30", time: "18:00", partySize: 2 })).toThrow();
+    expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: "2099-13-01", time: "18:00", partySize: 2 })).toThrow();
+    // A real leap-year Feb 29 must still be accepted.
+    expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: "2028-02-29", time: "18:00", partySize: 2 })).not.toThrow();
+  });
+
   it("rejects an invalid guest count (zero or negative)", () => {
     expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: FUTURE_DATE, time: "18:00", partySize: 0 })).toThrow();
     expect(() => createReservationSchema.parse({ locationId: randomUUID(), guestName: "X", phone: "060", date: FUTURE_DATE, time: "18:00", partySize: -1 })).toThrow();
