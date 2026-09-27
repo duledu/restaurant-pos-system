@@ -9,6 +9,7 @@ export * as recipes from "./menu/recipe-service";
 export * as availability from "./menu/availability-service";
 export * as promotions from "./promotions/promotion-service";
 export * as reservations from "./reservations/reservation-service";
+export * as qrMenu from "./qrmenu/qr-menu-service";
 export * as shifts from "./shifts/shift-service";
 export * as tables from "./tables/table-service";
 export * as tableOwnership from "./tables/ownership-transfer-service";

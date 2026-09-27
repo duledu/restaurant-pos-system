@@ -71,6 +71,15 @@ model Restaurant {
   updatedAt DateTime         @updatedAt
   createdBy String?
 
+  // BRANDED QR MENU V1 — public identifier for the guest-facing menu route
+  // (/m/{slug}). Nullable/optional: existing restaurants have none until an
+  // Admin sets one (see qr-menu-service.ts updateRestaurantSlug) — the
+  // public route 404s cleanly until then, never guesses one. Mirrors
+  // Tenant.slug's exact convention (@unique, globally — this route has no
+  // other restaurant context to scope by, unlike MenuItem/MenuCategory's
+  // per-restaurant-scoped slugs).
+  slug String? @unique
+
   // PRINTING V2 FINAL — restaurant-level choice between the two supported
   // operational printing models (see PrintingMode below). Defaults to
   // CENTRAL_ROUTING to exactly preserve every existing restaurant's current
@@ -98,6 +107,7 @@ model Restaurant {
   inventoryCategories InventoryCategory[]
   promotions          Promotion[]
   reservations        Reservation[]
+  qrMenuSettings      QrMenuSettings?
 
   @@index([tenantId])
   @@index([status])
@@ -760,6 +770,16 @@ model RestaurantTable {
   isActive  Boolean     @default(true)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
+
+  // BRANDED QR MENU V1 — opaque public token for table-aware QR
+  // (/m/{slug}?t={token}), NEVER the raw internal table id (never expose an
+  // enumerable/predictable identifier on a public URL). Nullable: generated
+  // lazily on first "Prikaži QR" in Admin (qr-menu-service.ts
+  // getOrCreateTableQrToken), not backfilled — most tables may never need
+  // one. A random UUID is deliberately sufficient here (spec: "do not
+  // over-engineer cryptography") — same randomness source already trusted
+  // everywhere else in this schema (uuid() primary keys).
+  publicQrToken String? @unique
 
   floor        Floor         @relation(fields: [floorId], references: [id])
   orders       Order[]
@@ -1566,6 +1586,71 @@ model RestaurantSettings {
   restaurant Restaurant @relation(fields: [restaurantId], references: [id])
 
   @@map("restaurant_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BRANDED QR MENU V1 — per-restaurant branding/theme for the public guest
+// menu (/m/{slug}). Deliberately a SEPARATE table from RestaurantSettings
+// above (that one is receipt/printing-focused) rather than folding these
+// fields in — but `RestaurantSettings.logoUrl` is intentionally REUSED
+// as-is for the QR menu's logo too (single source of truth, one upload for
+// both — see qr-menu-service.ts), not duplicated here.
+//
+// Same lazy-row convention as RestaurantSettings (settings-service.ts
+// getRestaurantSettings): no row = sensible defaults applied at the
+// application layer, created on first save — never a backfill migration.
+// Controlled presets, not a page builder (spec section 6) — `accentColor`
+// is the only free-form value, and even that gets a derived-safe on-accent
+// text color rather than trusting an arbitrary contrast combination (see
+// packages/shared/qr-menu-theme.ts).
+model QrMenuSettings {
+  restaurantId String @id
+
+  tagline          String?
+  coverImageUrl    String?
+  themePreset      QrThemePreset      @default(WARM)
+  accentColor      String? // hex, e.g. "#B8860B" — null = theme preset's own default accent
+  typographyPreset QrTypographyPreset @default(MODERN)
+  cardStyle        QrCardStyle        @default(BALANCED)
+  imageShape       QrImageShape       @default(ROUNDED)
+  // Kill switch — public route 404s while false, without deleting any
+  // configuration. Defaults true so migrating this table never takes an
+  // already-live menu offline.
+  isPublished      Boolean            @default(true)
+
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@map("qr_menu_settings")
+}
+
+enum QrThemePreset {
+  LIGHT
+  DARK
+  WARM
+  ELEGANT
+}
+
+enum QrTypographyPreset {
+  ELEGANT
+  MODERN
+  CLASSIC
+  CASUAL
+}
+
+enum QrCardStyle {
+  IMAGE_DOMINANT
+  BALANCED
+  COMPACT
+}
+
+enum QrImageShape {
+  ROUNDED
+  SOFT
+  SQUARE
 }
 
 model PrinterConfig {

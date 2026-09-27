@@ -30,12 +30,14 @@ const NEW_PERMISSIONS = [
   { code: "promotions.manage", description: "Kreiranje/izmena/aktivacija/deaktivacija promocija" },
   { code: "reservations.view", description: "Pregled rezervacija" },
   { code: "reservations.manage", description: "Kreiranje/izmena/otkazivanje rezervacija, smeštanje gostiju" },
+  { code: "qr_menu.view", description: "Pregled podešavanja QR menija" },
+  { code: "qr_menu.manage", description: "Izmena brendiranja/izgleda QR menija, adrese menija, QR kodova stolova" },
 ] as const;
 
 export const NEW_ROLE_GRANTS: Record<string, string[]> = {
-  OWNER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
-  ADMIN: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
-  MANAGER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage"],
+  OWNER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage", "qr_menu.view", "qr_menu.manage"],
+  ADMIN: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage", "qr_menu.view", "qr_menu.manage"],
+  MANAGER: ["inventory.count", "workstations.manage", "promotions.view", "promotions.manage", "reservations.view", "reservations.manage", "qr_menu.view", "qr_menu.manage"],
   // Inventory Phase 2 fix — INVENTORY_MANAGER je propušten u originalnom
   // Fazi 2A grantu (samo inventory.count je bio nameravan za tu ulogu, vidi
   // istoriju ovog fajla), sada dodato. workstations.manage pripada istoj

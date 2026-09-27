@@ -56,6 +56,7 @@ const NAV_SECTIONS: NavSection[] = [
       { href: "/menu", label: "Meni", icon: <MenuIcon /> },
       { href: "/menu/modifiers", label: "Dodaci", icon: <MenuIcon /> },
       { href: "/promotions", label: "Promocije", icon: <ClockIcon /> },
+      { href: "/qr-menu", label: "QR Meni", icon: <RecipeIcon /> },
       { href: "/inventory", label: "Zalihe", icon: <BoxIcon /> },
       { href: "/ingredients", label: "Sirovine", icon: <BoxIcon /> },
       { href: "/normativi", label: "Normativi", icon: <RecipeIcon /> },

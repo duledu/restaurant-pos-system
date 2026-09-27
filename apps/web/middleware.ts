@@ -18,6 +18,15 @@ import { verifySessionToken, sessionCookieOptions } from "@rcs/auth/session";
  * a javne rute se moraju eksplicitno navesti ispod.
  */
 const PUBLIC_PAGE_PATHS = new Set(["/login"]);
+
+// BRANDED QR MENU V1 — /m/{slug} (and its query-string table variant,
+// /m/{slug}?t={token}) is the guest-facing public menu: no login, no PIN,
+// no active shift (spec section 9). Prefix (not an exact path) because the
+// slug is a dynamic segment — same reasoning as PUBLIC_API_PREFIXES below.
+// This route touches NO session/employee data; its own server-side handler
+// (qr-menu-service.ts getPublicMenu) is what actually resolves and scopes
+// the restaurant, never this Edge-runtime check.
+const PUBLIC_PAGE_PREFIXES = ["/m/"];
 const PUBLIC_API_PATHS = new Set([
   "/api/auth/login",
   "/api/auth/pin-login",
@@ -42,6 +51,7 @@ const PUBLIC_API_PREFIXES = ["/api/agent/"];
 function isPublicPath(pathname: string): boolean {
   return (
     PUBLIC_PAGE_PATHS.has(pathname) ||
+    PUBLIC_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix)) ||
     PUBLIC_API_PATHS.has(pathname) ||
     PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))
   );
