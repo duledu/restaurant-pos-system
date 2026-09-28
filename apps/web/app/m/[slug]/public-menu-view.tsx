@@ -13,13 +13,16 @@ import { resolveQrMenuTheme, type QrThemePreset, type QrTypographyPreset, type Q
 // components/markup render every restaurant differently.
 //
 // REDESIGN NOTE (golden mobile experience, replaces the previous product-
-// card grid): a menu item is a TYPOGRAPHIC ROW, never a bordered/shadowed
-// card — see MenuRow below. Photography creates RHYTHM rather than filling
-// a thumbnail slot in every row: the first item in a category that has a
-// photo becomes that category's full-width SpotlightBlock; any further
-// photographed items become smaller horizontal MomentBlocks; everything
-// else (including every item at all, for a restaurant with zero photos)
-// renders as a plain MenuRow. See classifyItemPhotos.
+// card grid): a menu item is an editorial ROW, never a bordered/shadowed
+// card — see MenuItemRow below. "No product cards" never meant "no product
+// photos": every item WITH an image gets a small thumbnail integrated
+// directly into its row (image + name + description + price); every item
+// WITHOUT one renders as a text-first row with no fake placeholder. Large
+// photography is reserved for an occasional editorial break rather than a
+// per-row treatment — see pickCategorySpotlight: a category earns ONE
+// full-width SpotlightBlock only when it has at least two photographed
+// items, so a single stray photo never balloons into an arbitrary-looking
+// hero unrelated to the rest of the category. Never reorders items.
 //
 // LAYOUT vs THEME (spec: "layoutPreset is not themePreset"): this file IS
 // today's only layout. `theme.cardStyle` (a pre-existing, still-stored
@@ -27,8 +30,9 @@ import { resolveQrMenuTheme, type QrThemePreset, type QrTypographyPreset, type Q
 // here — it has no meaning in a card-less composition — but it is left
 // completely untouched in the schema/Admin UI so a FUTURE non-editorial
 // layout preset can still read it. `theme.imageShape` DOES still apply, to
-// the corner treatment of Spotlight/Moment photography. No backend/schema
-// change was made for this redesign.
+// the corner treatment of both row thumbnails and spotlight photography
+// (via two separate, size-appropriate radius maps — see below). No
+// backend/schema change was made for this redesign.
 const playfair = Playfair_Display({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-elegant-heading" });
 const inter = Inter({ subsets: ["latin", "latin-ext"], variable: "--font-elegant-body" });
 const outfit = Outfit({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-modern-heading" });
@@ -79,23 +83,20 @@ const IMAGE_RADIUS_CLASS: Record<QrImageShape, string> = {
   SQUARE: "rounded-none",
 };
 
-type PhotoTreatment = "spotlight" | "moment" | "none";
+// Thumbnails get their own (smaller-scale) radius mapping — ROUNDED reads
+// best as a true circle at 64px (the classic premium-menu food-thumbnail
+// treatment), where a rounded-2xl corner at that size would look merely
+// "chunky" rather than intentional.
+const THUMBNAIL_RADIUS_CLASS: Record<QrImageShape, string> = {
+  ROUNDED: "rounded-full",
+  SOFT: "rounded-2xl",
+  SQUARE: "rounded-none",
+};
 
-/** Pure — first photographed item in a category leads as the full-width Spotlight; any further photographed items become smaller Moment pairings; everything else is a plain typographic row. Never reorders items. */
-function classifyItemPhotos(items: PublicMenuItem[]): Map<string, PhotoTreatment> {
-  const result = new Map<string, PhotoTreatment>();
-  let seenPhoto = false;
-  for (const item of items) {
-    if (!item.imageUrl) {
-      result.set(item.id, "none");
-    } else if (!seenPhoto) {
-      result.set(item.id, "spotlight");
-      seenPhoto = true;
-    } else {
-      result.set(item.id, "moment");
-    }
-  }
-  return result;
+/** Pure — a category earns one large editorial SpotlightBlock only when it has 2+ photographed items (so a single stray photo never becomes an arbitrary, disproportionate hero); that spotlight is always the FIRST photographed item, in original order. Never reorders items. */
+function pickCategorySpotlight(items: PublicMenuItem[]): string | null {
+  const imaged = items.filter((i) => i.imageUrl);
+  return imaged.length >= 2 ? imaged[0].id : null;
 }
 
 function Price({ item }: { item: PublicMenuItem }) {
@@ -115,27 +116,46 @@ function UnavailableLabel() {
   );
 }
 
-/** The default composition — a name/price baseline with an optional description beneath, separated from the next row by a hairline. This IS the product: typography, not a container. */
-function MenuRow({ item, onOpen, showRule }: { item: PublicMenuItem; onOpen: () => void; showRule: boolean }) {
+/**
+ * The default composition — IMAGE + DISH INFO + PRICE. A small (64px)
+ * thumbnail sits left of the text column when the item has a photo; when it
+ * doesn't, the text simply occupies the full row width rather than leaving
+ * a reserved blank gap (no letter-placeholder, no fake image). Name/price
+ * share a baseline that stays stable regardless of name length (flex +
+ * shrink-0 price, never absolute positioning); description clamps to 2
+ * lines so mixed image/text rows in the same category read as one
+ * consistent, dense list rather than jumping in height. Separated from the
+ * next row by a hairline, never a card/border/shadow container.
+ */
+function MenuItemRow({ item, imageShape, onOpen, showRule }: { item: PublicMenuItem; imageShape: QrImageShape; onOpen: () => void; showRule: boolean }) {
+  const thumbRadius = THUMBNAIL_RADIUS_CLASS[imageShape];
   return (
     <button
       type="button"
       onClick={onOpen}
-      className={`block w-full py-3.5 text-left transition-opacity motion-reduce:transition-none ${!item.isAvailable ? "opacity-60" : "active:opacity-70"} ${showRule ? "border-b" : ""}`}
+      className={`flex w-full items-center gap-3.5 py-3 text-left transition-opacity motion-reduce:transition-none ${!item.isAvailable ? "opacity-60" : "active:opacity-70"} ${showRule ? "border-b" : ""}`}
       style={{ borderColor: "var(--menu-border)" }}
     >
-      <span className="flex items-baseline justify-between gap-2">
-        <span className="text-[16px] font-medium leading-snug" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-          {item.name}
-        </span>
-        <Price item={item} />
-      </span>
-      {item.description && (
-        <span className="mt-1 block max-w-[62ch] text-[13.5px] leading-snug" style={{ color: "var(--menu-muted)" }}>
-          {item.description}
+      {item.imageUrl && (
+        <span className={`relative h-16 w-16 shrink-0 overflow-hidden ${thumbRadius}`}>
+          {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary admin-pasted external URL; server-side next/image fetching would be an SSRF surface on this unauthenticated route */}
+          <img src={item.imageUrl} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" />
         </span>
       )}
-      {!item.isAvailable && <span className="mt-1 block"><UnavailableLabel /></span>}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline justify-between gap-2">
+          <span className="text-[16px] font-medium leading-snug" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
+            {item.name}
+          </span>
+          <Price item={item} />
+        </span>
+        {item.description && (
+          <span className="mt-1 block line-clamp-2 max-w-[60ch] text-[13.5px] leading-snug" style={{ color: "var(--menu-muted)" }}>
+            {item.description}
+          </span>
+        )}
+        {!item.isAvailable && <span className="mt-1 block"><UnavailableLabel /></span>}
+      </span>
     </button>
   );
 }
@@ -166,38 +186,6 @@ function SpotlightBlock({ item, imageShape, onOpen }: { item: PublicMenuItem; im
           {item.description}
         </span>
       )}
-    </button>
-  );
-}
-
-/** A secondary visual moment — smaller, paired with its text rather than dominating it. Still no border/shadow/card container. */
-function MomentBlock({ item, imageShape, onOpen, showRule }: { item: PublicMenuItem; imageShape: QrImageShape; onOpen: () => void; showRule: boolean }) {
-  const radius = IMAGE_RADIUS_CLASS[imageShape];
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={`flex w-full gap-3.5 py-3.5 text-left transition-opacity motion-reduce:transition-none ${!item.isAvailable ? "opacity-60" : "active:opacity-70"} ${showRule ? "border-b" : ""}`}
-      style={{ borderColor: "var(--menu-border)" }}
-    >
-      <span className={`relative h-20 w-20 shrink-0 overflow-hidden ${radius}`}>
-        {/* eslint-disable-next-line @next/next/no-img-element -- see SpotlightBlock's identical note */}
-        <img src={item.imageUrl!} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline justify-between gap-2">
-          <span className="text-[16px] font-medium leading-snug" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-            {item.name}
-          </span>
-          <Price item={item} />
-        </span>
-        {item.description && (
-          <span className="mt-1 block line-clamp-2 text-[13.5px] leading-snug" style={{ color: "var(--menu-muted)" }}>
-            {item.description}
-          </span>
-        )}
-        {!item.isAvailable && <span className="mt-1 block"><UnavailableLabel /></span>}
-      </span>
     </button>
   );
 }
@@ -412,7 +400,7 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
           </p>
         )}
         {filteredCategories.map((category, categoryIndex) => {
-          const treatments = classifyItemPhotos(category.items);
+          const spotlightId = pickCategorySpotlight(category.items);
           return (
             <section key={category.id} id={`cat-${category.id}`} className={`scroll-mt-16 ${categoryIndex > 0 ? "mt-10" : ""}`}>
               <div className="mb-4 flex items-center gap-3">
@@ -423,15 +411,11 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
               </div>
               <div>
                 {category.items.map((item, itemIndex) => {
-                  const treatment = treatments.get(item.id);
                   const isLast = itemIndex === category.items.length - 1;
-                  if (treatment === "spotlight") {
+                  if (item.id === spotlightId) {
                     return <SpotlightBlock key={item.id} item={item} imageShape={theme.imageShape} onOpen={() => setOpenItem(item)} />;
                   }
-                  if (treatment === "moment") {
-                    return <MomentBlock key={item.id} item={item} imageShape={theme.imageShape} onOpen={() => setOpenItem(item)} showRule={!isLast} />;
-                  }
-                  return <MenuRow key={item.id} item={item} onOpen={() => setOpenItem(item)} showRule={!isLast} />;
+                  return <MenuItemRow key={item.id} item={item} imageShape={theme.imageShape} onOpen={() => setOpenItem(item)} showRule={!isLast} />;
                 })}
               </div>
             </section>
