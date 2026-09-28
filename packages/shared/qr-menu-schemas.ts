@@ -5,9 +5,27 @@ const hexColorSchema = z
   .trim()
   .regex(/^#[0-9a-fA-F]{6}$/, "Boja mora biti u obliku #RRGGBB");
 
+// This is rendered as an <img src> on the PUBLIC, unauthenticated menu —
+// unlike the pre-existing (unvalidated) MenuItem.imageUrl/
+// RestaurantSettings.logoUrl convention elsewhere in the app, a new
+// public-facing field gets a real check: must parse as an absolute URL
+// with an http(s) scheme, rejecting javascript:/data:/vbscript:/anything
+// else outright rather than storing whatever text was pasted.
+const publicImageUrlSchema = z
+  .string()
+  .trim()
+  .max(500)
+  .refine((value) => {
+    try {
+      return ["http:", "https:"].includes(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }, "Mora biti ispravan http(s) link");
+
 export const updateQrMenuSettingsSchema = z.object({
   tagline: z.string().trim().max(200).nullable().optional(),
-  coverImageUrl: z.string().trim().max(500).nullable().optional(),
+  coverImageUrl: publicImageUrlSchema.nullable().optional(),
   themePreset: z.enum(["LIGHT", "DARK", "WARM", "ELEGANT"]),
   accentColor: hexColorSchema.nullable().optional(),
   typographyPreset: z.enum(["ELEGANT", "MODERN", "CLASSIC", "CASUAL"]),

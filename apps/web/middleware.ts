@@ -21,12 +21,16 @@ const PUBLIC_PAGE_PATHS = new Set(["/login"]);
 
 // BRANDED QR MENU V1 — /m/{slug} (and its query-string table variant,
 // /m/{slug}?t={token}) is the guest-facing public menu: no login, no PIN,
-// no active shift (spec section 9). Prefix (not an exact path) because the
-// slug is a dynamic segment — same reasoning as PUBLIC_API_PREFIXES below.
-// This route touches NO session/employee data; its own server-side handler
-// (qr-menu-service.ts getPublicMenu) is what actually resolves and scopes
-// the restaurant, never this Edge-runtime check.
-const PUBLIC_PAGE_PREFIXES = ["/m/"];
+// no active shift (spec section 9). A REGEX, not a prefix — the slug is a
+// dynamic segment, but deliberately scoped to EXACTLY "/m/<one segment>"
+// (never a plain startsWith("/m/") prefix) so this exemption can never
+// silently widen to cover some future, unrelated, authenticated route
+// nested under /m/** that a later change might add — a narrower public
+// surface is strictly safer than a broad one. This route touches NO
+// session/employee data; its own server-side handler (qr-menu-service.ts
+// getPublicMenu) is what actually resolves and scopes the restaurant,
+// never this Edge-runtime check.
+const PUBLIC_PAGE_PATTERNS = [/^\/m\/[^/]+\/?$/];
 const PUBLIC_API_PATHS = new Set([
   "/api/auth/login",
   "/api/auth/pin-login",
@@ -51,7 +55,7 @@ const PUBLIC_API_PREFIXES = ["/api/agent/"];
 function isPublicPath(pathname: string): boolean {
   return (
     PUBLIC_PAGE_PATHS.has(pathname) ||
-    PUBLIC_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix)) ||
+    PUBLIC_PAGE_PATTERNS.some((pattern) => pattern.test(pathname)) ||
     PUBLIC_API_PATHS.has(pathname) ||
     PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))
   );

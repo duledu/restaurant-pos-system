@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Image from "next/image";
 import { Playfair_Display, Inter, Outfit, Work_Sans, Cormorant_Garamond, Libre_Baskerville, Fredoka, Nunito } from "next/font/google";
 import { resolveQrMenuTheme, type QrThemePreset, type QrTypographyPreset, type QrCardStyle, type QrImageShape } from "@rcs/shared";
 
@@ -95,7 +94,11 @@ function ProductCard({ item, cardStyle, imageShape, onOpen }: { item: PublicMenu
     >
       <div className={`relative overflow-hidden ${imageWrapperSize} ${isCompact ? "h-20" : imageAspect} ${shapeClass}`}>
         {item.imageUrl ? (
-          <Image src={item.imageUrl} alt="" fill sizes="(max-width: 640px) 50vw, 300px" className="object-cover" />
+          // Arbitrary admin-pasted external URL: next/image would make the
+          // SERVER fetch it on every public page load (SSRF surface on an
+          // unauthenticated route) — browser-fetched plain img instead.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.imageUrl} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" />
         ) : (
           <NoImageTile name={item.name} shapeClass="" />
         )}
@@ -133,7 +136,8 @@ function ProductDetailModal({ item, imageShape, onClose }: { item: PublicMenuIte
       >
         <div className={`relative aspect-[4/3] w-full shrink-0 ${shapeClass === "rounded-sm" ? "" : "rounded-t-2xl sm:rounded-t-2xl"} overflow-hidden`}>
           {item.imageUrl ? (
-            <Image src={item.imageUrl} alt="" fill sizes="480px" className="object-cover" />
+            // eslint-disable-next-line @next/next/no-img-element -- see ProductCard's identical note
+            <img src={item.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
           ) : (
             <NoImageTile name={item.name} shapeClass="" />
           )}
@@ -203,7 +207,8 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
       <header className="relative">
         {restaurant.coverImageUrl && (
           <div className="relative h-32 w-full overflow-hidden sm:h-44">
-            <Image src={restaurant.coverImageUrl} alt="" fill sizes="100vw" className="object-cover" priority />
+            {/* eslint-disable-next-line @next/next/no-img-element -- see ProductCard's identical note; eager (above the fold), never lazy */}
+            <img src={restaurant.coverImageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
             <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent" />
           </div>
         )}
@@ -211,7 +216,8 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
           <div className="flex items-end gap-3">
             {restaurant.logoUrl ? (
               <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full ring-4" style={{ background: "var(--menu-surface)", ["--tw-ring-color" as string]: "var(--menu-background)" }}>
-                <Image src={restaurant.logoUrl} alt={restaurant.name} fill sizes="64px" className="object-cover" />
+                {/* eslint-disable-next-line @next/next/no-img-element -- see ProductCard's identical note */}
+                <img src={restaurant.logoUrl} alt={restaurant.name} className="absolute inset-0 h-full w-full object-cover" />
               </div>
             ) : (
               <div
@@ -282,7 +288,7 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
       <main className="px-4 pb-16 pt-4 sm:px-6">
         {filteredCategories.length === 0 && (
           <p className="py-12 text-center text-sm" style={{ color: "var(--menu-muted)" }}>
-            Nema rezultata za "{search}".
+            Nema rezultata za &quot;{search}&quot;.
           </p>
         )}
         {filteredCategories.map((category) => (
