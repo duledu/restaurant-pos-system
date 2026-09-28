@@ -30,11 +30,13 @@ interface PreviewItem {
   imageUrl: string | null;
   isActive: boolean;
   isAvailable: boolean;
+  preparationStation: "KITCHEN" | "BAR" | "KITCHEN_AND_BAR" | "NONE";
   categoryId: string | null;
 }
 interface PreviewCategory {
   id: string;
   name: string;
+  type: "FOOD" | "DRINK";
   isActive: boolean;
 }
 interface TableForQr {
@@ -201,9 +203,10 @@ export function QrMenuClient() {
         .map((c) => ({
           id: c.id,
           name: c.name,
+          type: c.type,
           items: items
             .filter((i) => i.categoryId === c.id && i.isActive)
-            .map((i) => ({ id: i.id, name: i.name, description: i.description, price: i.price, imageUrl: i.imageUrl, isAvailable: i.isAvailable })),
+            .map((i) => ({ id: i.id, name: i.name, description: i.description, price: i.price, imageUrl: i.imageUrl, isAvailable: i.isAvailable, preparationStation: i.preparationStation })),
         }))
         .filter((c) => c.items.length > 0),
     };

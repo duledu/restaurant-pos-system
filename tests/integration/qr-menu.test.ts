@@ -41,7 +41,7 @@ async function createFixture(): Promise<Fixture> {
 
   const category = await prisma.menuCategory.create({ data: { restaurantId: restaurant.id, name: "Roštilj", slug: `rostilj-${randomUUID()}`, type: "FOOD", isActive: true } });
   const activeItem = await prisma.menuItem.create({
-    data: { restaurantId: restaurant.id, categoryId: category.id, name: "Pljeskavica", slug: `pljeskavica-${randomUUID()}`, description: "Domaća, 250g", price: "650.00", taxRate: "20", isActive: true, isAvailable: true, imageUrl: "https://example.com/pljeskavica.jpg" },
+    data: { restaurantId: restaurant.id, categoryId: category.id, name: "Pljeskavica", slug: `pljeskavica-${randomUUID()}`, description: "Domaća, 250g", price: "650.00", taxRate: "20", isActive: true, isAvailable: true, imageUrl: "https://example.com/pljeskavica.jpg", preparationStation: "KITCHEN" },
   });
   const unavailableItem = await prisma.menuItem.create({
     data: { restaurantId: restaurant.id, categoryId: category.id, name: "Ćevapi", slug: `cevapi-${randomUUID()}`, price: "600.00", taxRate: "20", isActive: true, isAvailable: false },
@@ -81,7 +81,8 @@ describe("getPublicMenu — single source of truth (spec section 1)", () => {
     expect(menu).not.toBeNull();
     const items = menu!.categories.flatMap((c) => c.items);
     const pljeskavica = items.find((i) => i.id === fixture.activeItemId);
-    expect(pljeskavica).toMatchObject({ name: "Pljeskavica", description: "Domaća, 250g", price: "650", imageUrl: "https://example.com/pljeskavica.jpg", isAvailable: true });
+    expect(pljeskavica).toMatchObject({ name: "Pljeskavica", description: "Domaća, 250g", price: "650", imageUrl: "https://example.com/pljeskavica.jpg", isAvailable: true, preparationStation: "KITCHEN" });
+    expect(menu!.categories[0].type).toBe("FOOD");
   });
 
   it("slug lookup is case-insensitive (normalized to lowercase)", async () => {
@@ -125,6 +126,7 @@ describe("getPublicMenu — safe public data projection (spec section 22/24), ne
     const serialized = JSON.stringify(menu);
     expect(serialized).not.toContain(fixture.restaurantId); // no raw restaurant id anywhere in the payload
     expect(serialized.toLowerCase()).not.toMatch(/purchaseprice|cost|employee|inventory|audit|permission|recipe/);
+    expect(Object.keys(menu!.categories[0].items[0]).sort()).toEqual(["description", "id", "imageUrl", "isAvailable", "name", "preparationStation", "price"]);
   });
 
   it("a SUSPENDED restaurant is never publicly reachable, indistinguishable from a nonexistent slug", async () => {

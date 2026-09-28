@@ -89,3 +89,19 @@ describe("resolveQrMenuTheme — image shape controls border radius", () => {
     expect(new Set(radii).size).toBe(3);
   });
 });
+
+describe("public menu text contrast", () => {
+  it("keeps normal and secondary text readable in every restaurant theme", () => {
+    const luminance = (hex: string) => {
+      const channels = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+      return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+    };
+    for (const themePreset of ["LIGHT", "DARK", "WARM", "ELEGANT"] as const) {
+      const tokens = resolveQrMenuTheme(input({ themePreset }));
+      for (const key of ["--menu-text", "--menu-muted"] as const) {
+        const a = luminance(tokens[key]), b = luminance(tokens["--menu-background"]);
+        expect((Math.max(a, b) + .05) / (Math.min(a, b) + .05), `${themePreset} ${key}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+});

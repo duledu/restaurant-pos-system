@@ -47,9 +47,9 @@ interface Palette {
 
 const PALETTES: Record<QrThemePreset, Palette> = {
   LIGHT: { background: "#FFFFFF", surface: "#F7F7F8", text: "#18181B", muted: "#71717A", border: "#E4E4E7", defaultAccent: "#111827" },
-  DARK: { background: "#0B0B0C", surface: "#1B1B1E", text: "#F4F4F5", muted: "#A1A1AA", border: "#2C2C31", defaultAccent: "#F5A524" },
-  WARM: { background: "#FBF6EE", surface: "#FFFFFF", text: "#2B2118", muted: "#8A7A64", border: "#E9DCC3", defaultAccent: "#B8860B" },
-  ELEGANT: { background: "#F7F3EE", surface: "#FFFFFF", text: "#1F1B16", muted: "#7A6F5E", border: "#E3D9C8", defaultAccent: "#8B6D3F" },
+  DARK: { background: "#181714", surface: "#22211D", text: "#F4EEE3", muted: "#B3AC9E", border: "#39362F", defaultAccent: "#C7A779" },
+  WARM: { background: "#FBF6EE", surface: "#FFFFFF", text: "#2B2118", muted: "#756653", border: "#E9DCC3", defaultAccent: "#B8860B" },
+  ELEGANT: { background: "#F7F3EE", surface: "#FFFFFF", text: "#1F1B16", muted: "#786C5A", border: "#E3D9C8", defaultAccent: "#8B6D3F" },
 };
 
 const RADIUS_BY_IMAGE_SHAPE: Record<QrImageShape, string> = {

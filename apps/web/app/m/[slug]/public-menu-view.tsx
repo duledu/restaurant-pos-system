@@ -1,433 +1,226 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Playfair_Display, Inter, Outfit, Work_Sans, Cormorant_Garamond, Libre_Baskerville, Fredoka, Nunito } from "next/font/google";
-import { resolveQrMenuTheme, type QrThemePreset, type QrTypographyPreset, type QrCardStyle, type QrImageShape } from "@rcs/shared";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Playfair_Display, Inter, Outfit, Cormorant_Garamond, Fredoka } from "next/font/google";
+import { resolveQrMenuTheme, type QrTypographyPreset } from "@rcs/shared";
+import type { PublicMenuItem, PublicMenuPayload } from "@rcs/domain/qrmenu/qr-menu-service";
+import { editorialItemId, filterPublicMenu, publicImageSource, type MenuMode } from "../../../lib/public-menu";
+import styles from "./public-menu.module.css";
 
-// ── BRANDED QR MENU — EDITORIAL GOLDEN LAYOUT ────────────────────────────
-//
-// Deliberately its OWN visual language, not a reskin of TableCore's
-// internal Admin/Waiter UI — this file never imports TableCore's internal
-// component library. Theming stays 100% data-driven (CSS custom properties
-// resolved from QrMenuSettings via resolveQrMenuTheme) so the SAME
-// components/markup render every restaurant differently.
-//
-// REDESIGN NOTE (golden mobile experience, replaces the previous product-
-// card grid): a menu item is an editorial ROW, never a bordered/shadowed
-// card — see MenuItemRow below. "No product cards" never meant "no product
-// photos": every item WITH an image gets a small thumbnail integrated
-// directly into its row (image + name + description + price); every item
-// WITHOUT one renders as a text-first row with no fake placeholder. Large
-// photography is reserved for an occasional editorial break rather than a
-// per-row treatment — see pickCategorySpotlight: a category earns ONE
-// full-width SpotlightBlock only when it has at least two photographed
-// items, so a single stray photo never balloons into an arbitrary-looking
-// hero unrelated to the rest of the category. Never reorders items.
-//
-// LAYOUT vs THEME (spec: "layoutPreset is not themePreset"): this file IS
-// today's only layout. `theme.cardStyle` (a pre-existing, still-stored
-// QrMenuSettings field from the card-grid era) is intentionally NOT read
-// here — it has no meaning in a card-less composition — but it is left
-// completely untouched in the schema/Admin UI so a FUTURE non-editorial
-// layout preset can still read it. `theme.imageShape` DOES still apply, to
-// the corner treatment of both row thumbnails and spotlight photography
-// (via two separate, size-appropriate radius maps — see below). No
-// backend/schema change was made for this redesign.
-const playfair = Playfair_Display({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-elegant-heading" });
-const inter = Inter({ subsets: ["latin", "latin-ext"], variable: "--font-elegant-body" });
-const outfit = Outfit({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-modern-heading" });
-const workSans = Work_Sans({ subsets: ["latin", "latin-ext"], variable: "--font-modern-body" });
-const cormorant = Cormorant_Garamond({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-classic-heading" });
-const libreBaskerville = Libre_Baskerville({ subsets: ["latin"], weight: ["400", "700"], variable: "--font-classic-body" });
-const fredoka = Fredoka({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-casual-heading" });
-const nunito = Nunito({ subsets: ["latin", "latin-ext"], variable: "--font-casual-body" });
+export type { PublicMenuPayload } from "@rcs/domain/qrmenu/qr-menu-service";
 
-const FONT_VARIABLES = [playfair, inter, outfit, workSans, cormorant, libreBaskerville, fredoka, nunito].map((f) => f.variable).join(" ");
-
-const TYPOGRAPHY_FONT_VARS: Record<QrTypographyPreset, { heading: string; body: string }> = {
-  ELEGANT: { heading: "var(--font-elegant-heading)", body: "var(--font-elegant-body)" },
-  MODERN: { heading: "var(--font-modern-heading)", body: "var(--font-modern-body)" },
-  CLASSIC: { heading: "var(--font-classic-heading)", body: "var(--font-classic-body)" },
-  CASUAL: { heading: "var(--font-casual-heading)", body: "var(--font-casual-body)" },
+// One rendering engine for guests and the narrow Admin preview. The stored
+// typography and image-shape presets remain authoritative; cardStyle is legacy.
+const playfair = Playfair_Display({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-menu-elegant", display: "swap", preload: false });
+const inter = Inter({ subsets: ["latin", "latin-ext"], variable: "--font-menu-body", display: "swap" });
+const outfit = Outfit({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-menu-modern", display: "swap", preload: false });
+const cormorant = Cormorant_Garamond({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-menu-classic", display: "swap", preload: false });
+const fredoka = Fredoka({ subsets: ["latin", "latin-ext"], weight: ["500", "600", "700"], variable: "--font-menu-casual", display: "swap", preload: false });
+const FONT_VARIABLES = [playfair, inter, outfit, cormorant, fredoka].map(font => font.variable).join(" ");
+const DISPLAY: Record<QrTypographyPreset, string> = {
+  ELEGANT: "var(--font-menu-elegant), Georgia, serif",
+  MODERN: "var(--font-menu-modern), sans-serif",
+  CLASSIC: "var(--font-menu-classic), Georgia, serif",
+  CASUAL: "var(--font-menu-casual), sans-serif",
 };
+const PRICE_FORMAT = new Intl.NumberFormat("sr-RS", { maximumFractionDigits: 2 });
+const MODES = [{ id: "KITCHEN", label: "Kuhinja", icon: "kitchen" }, { id: "BAR", label: "Šank", icon: "bar" }] as const;
 
-export interface PublicMenuItem {
-  id: string;
-  name: string;
-  description: string | null;
-  price: string;
-  imageUrl: string | null;
-  isAvailable: boolean;
-}
-export interface PublicMenuCategory {
-  id: string;
-  name: string;
-  items: PublicMenuItem[];
-}
-export interface PublicMenuPayload {
-  restaurant: { name: string; tagline: string | null; logoUrl: string | null; coverImageUrl: string | null };
-  theme: { themePreset: QrThemePreset; accentColor: string | null; typographyPreset: QrTypographyPreset; cardStyle: QrCardStyle; imageShape: QrImageShape };
-  table: { label: string } | null;
-  categories: PublicMenuCategory[];
+function Icon({ name }: { name: "search" | "close" | "kitchen" | "bar" | "arrow" }) {
+  return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    {name === "search" && <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4.5 4.5" /></>}
+    {name === "close" && <path d="m6 6 12 12M6 18 18 6" />}
+    {name === "kitchen" && <><path d="M4 3v5a3 3 0 0 0 6 0V3M7 3v18M19 21V3c-4 3-5 7-5 11h5" /></>}
+    {name === "bar" && <><path d="M5 3h14l-1 6a6 6 0 0 1-12 0L5 3ZM12 15v6M8 21h8M6 7h12" /></>}
+    {name === "arrow" && <path d="M5 12h14m-5-5 5 5-5 5" />}
+  </svg>;
 }
 
-function formatPrice(price: string): string {
-  const n = Number(price);
-  if (!Number.isFinite(n)) return price;
-  return new Intl.NumberFormat("sr-RS", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n);
-}
-
-const IMAGE_RADIUS_CLASS: Record<QrImageShape, string> = {
-  ROUNDED: "rounded-2xl",
-  SOFT: "rounded-md",
-  SQUARE: "rounded-none",
-};
-
-// Thumbnails get their own (smaller-scale) radius mapping — ROUNDED reads
-// best as a true circle at 64px (the classic premium-menu food-thumbnail
-// treatment), where a rounded-2xl corner at that size would look merely
-// "chunky" rather than intentional.
-const THUMBNAIL_RADIUS_CLASS: Record<QrImageShape, string> = {
-  ROUNDED: "rounded-full",
-  SOFT: "rounded-2xl",
-  SQUARE: "rounded-none",
-};
-
-/** Pure — a category earns one large editorial SpotlightBlock only when it has 2+ photographed items (so a single stray photo never becomes an arbitrary, disproportionate hero); that spotlight is always the FIRST photographed item, in original order. Never reorders items. */
-function pickCategorySpotlight(items: PublicMenuItem[]): string | null {
-  const imaged = items.filter((i) => i.imageUrl);
-  return imaged.length >= 2 ? imaged[0].id : null;
+function Photo({ src, className, eager = false, onError }: { src: string | null; className: string; eager?: boolean; onError?: () => void }) {
+  const [failedSource, setFailedSource] = useState<string>();
+  const source = publicImageSource(src);
+  if (!source || failedSource === source) return null;
+  // Deliberately browser-fetched. No remote Next Image optimizer / SSRF surface.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={source} alt="" width={800} height={600} loading={eager ? "eager" : "lazy"} decoding="async" {...{ fetchpriority: eager ? "high" : "auto" }} className={className} onError={() => { setFailedSource(source); onError?.(); }} />;
 }
 
 function Price({ item }: { item: PublicMenuItem }) {
-  return (
-    <span className="shrink-0 whitespace-nowrap pl-3 text-[15px] tabular-nums" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-      {formatPrice(item.price)}
-      <span className="ml-0.5 text-[10px] font-normal" style={{ color: "var(--menu-muted)" }}>RSD</span>
+  const amount = Number(item.price);
+  return <span className={styles.price}>{Number.isFinite(amount) ? PRICE_FORMAT.format(amount) : item.price}<span>RSD</span></span>;
+}
+
+function Availability() {
+  return <span className={styles.availability}>Trenutno nije dostupno</span>;
+}
+
+function MenuRow({ item, editorial, onOpen }: { item: PublicMenuItem; editorial: boolean; onOpen: () => void }) {
+  const [failed, setFailed] = useState<string | null>(null);
+  const featured = editorial && publicImageSource(item.imageUrl) && failed !== item.imageUrl;
+  return <button type="button" className={`${styles.row} ${featured ? styles.editorial : ""}`} data-available={item.isAvailable} onClick={onOpen} aria-haspopup="dialog">
+    <Photo key={item.imageUrl} src={item.imageUrl} className={styles.thumbnail} onError={() => setFailed(item.imageUrl)} />
+    <span className={styles.dish}>
+      <span className={styles.dishName}>{item.name}</span>
+      {item.description && <span className={styles.description}>{item.description}</span>}
+      {!item.isAvailable && <Availability />}
+      {featured && <span className={styles.detailHint}>Detalji <Icon name="arrow" /></span>}
     </span>
-  );
+    <Price item={item} />
+  </button>;
 }
 
-function UnavailableLabel() {
-  return (
-    <span className="text-[11px] font-medium italic" style={{ color: "var(--menu-muted)" }}>
-      Trenutno nije dostupno
-    </span>
-  );
-}
-
-/**
- * The default composition — IMAGE + DISH INFO + PRICE. A small (64px)
- * thumbnail sits left of the text column when the item has a photo; when it
- * doesn't, the text simply occupies the full row width rather than leaving
- * a reserved blank gap (no letter-placeholder, no fake image). Name/price
- * share a baseline that stays stable regardless of name length (flex +
- * shrink-0 price, never absolute positioning); description clamps to 2
- * lines so mixed image/text rows in the same category read as one
- * consistent, dense list rather than jumping in height. Separated from the
- * next row by a hairline, never a card/border/shadow container.
- */
-function MenuItemRow({ item, imageShape, onOpen, showRule }: { item: PublicMenuItem; imageShape: QrImageShape; onOpen: () => void; showRule: boolean }) {
-  const thumbRadius = THUMBNAIL_RADIUS_CLASS[imageShape];
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={`flex w-full items-center gap-3.5 py-3 text-left transition-opacity motion-reduce:transition-none ${!item.isAvailable ? "opacity-60" : "active:opacity-70"} ${showRule ? "border-b" : ""}`}
-      style={{ borderColor: "var(--menu-border)" }}
-    >
-      {item.imageUrl && (
-        <span className={`relative h-16 w-16 shrink-0 overflow-hidden ${thumbRadius}`}>
-          {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary admin-pasted external URL; server-side next/image fetching would be an SSRF surface on this unauthenticated route */}
-          <img src={item.imageUrl} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" />
-        </span>
-      )}
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline justify-between gap-2">
-          <span className="text-[16px] font-medium leading-snug" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-            {item.name}
-          </span>
-          <Price item={item} />
-        </span>
-        {item.description && (
-          <span className="mt-1 block line-clamp-2 max-w-[60ch] text-[13.5px] leading-snug" style={{ color: "var(--menu-muted)" }}>
-            {item.description}
-          </span>
-        )}
-        {!item.isAvailable && <span className="mt-1 block"><UnavailableLabel /></span>}
-      </span>
-    </button>
-  );
-}
-
-/** The category's one big visual moment — full-bleed-feeling photography with name/price overlaid, description below in normal flow (never overlaid on the photo — legibility over drama). */
-function SpotlightBlock({ item, imageShape, onOpen }: { item: PublicMenuItem; imageShape: QrImageShape; onOpen: () => void }) {
-  const radius = IMAGE_RADIUS_CLASS[imageShape];
-  return (
-    <button type="button" onClick={onOpen} className="mb-5 block w-full text-left">
-      <span className={`relative block aspect-[16/10] w-full overflow-hidden ${radius}`}>
-        {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary admin-pasted external URL; server-side next/image fetching would be an SSRF surface on this unauthenticated route */}
-        <img src={item.imageUrl!} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        <span className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/5 to-transparent" />
-        <span className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-4">
-          <span className="text-[19px] font-semibold leading-tight text-white" style={{ fontFamily: "var(--menu-font-heading)" }}>
-            {item.name}
-          </span>
-          <span className="shrink-0 whitespace-nowrap pl-3 text-[16px] tabular-nums text-white" style={{ fontFamily: "var(--menu-font-heading)" }}>
-            {formatPrice(item.price)} <span className="text-[10px] font-normal opacity-80">RSD</span>
-          </span>
-        </span>
-        {!item.isAvailable && (
-          <span className="absolute right-3 top-3 rounded-sm bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">Nedostupno</span>
-        )}
-      </span>
-      {item.description && (
-        <span className="mt-2 block max-w-[62ch] text-[13.5px] leading-snug" style={{ color: "var(--menu-muted)" }}>
-          {item.description}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function ProductDetail({ item, imageShape, onClose }: { item: PublicMenuItem; imageShape: QrImageShape; onClose: () => void }) {
-  const radius = IMAGE_RADIUS_CLASS[imageShape];
-  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      onClose();
-    }
-  }
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose} onKeyDown={onKeyDown} role="dialog" aria-modal="true" tabIndex={-1}>
-      <div
-        className={`flex max-h-[85vh] w-full flex-col overflow-hidden sm:max-w-md ${item.imageUrl ? "" : "pt-1"} rounded-t-3xl sm:rounded-3xl`}
-        style={{ background: "var(--menu-surface)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <span className="mx-auto mb-1 mt-2.5 h-1 w-10 shrink-0 rounded-full sm:hidden" style={{ background: "var(--menu-border)" }} aria-hidden="true" />
-        {item.imageUrl && (
-          <div className={`relative aspect-[4/3] w-full shrink-0 overflow-hidden ${radius === "rounded-none" ? "" : "rounded-t-2xl"}`}>
-            {/* eslint-disable-next-line @next/next/no-img-element -- see SpotlightBlock's identical note */}
-            <img src={item.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-          </div>
-        )}
-        <button
-          onClick={onClose}
-          aria-label="Zatvori"
-          autoFocus
-          className={`absolute right-3 flex h-11 w-11 items-center justify-center rounded-full backdrop-blur ${item.imageUrl ? "top-3 bg-black/40 text-white" : "top-2"}`}
-          style={item.imageUrl ? undefined : { color: "var(--menu-muted)" }}
-        >
-          ✕
-        </button>
-        <div className="flex-1 overflow-y-auto px-6 pb-8 pt-5">
-          <h2 className="text-[22px] font-semibold leading-snug" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-            {item.name}
-          </h2>
-          {!item.isAvailable && <span className="mt-1.5 block"><UnavailableLabel /></span>}
-          {item.description && (
-            <p className="mt-3 text-[15px] leading-relaxed" style={{ color: "var(--menu-muted)" }}>
-              {item.description}
-            </p>
-          )}
-          <p className="mt-5 text-[20px] tabular-nums" style={{ color: "var(--menu-text)", fontFamily: "var(--menu-font-heading)" }}>
-            {formatPrice(item.price)} <span className="text-[12px] font-normal" style={{ color: "var(--menu-muted)" }}>RSD</span>
-          </p>
-        </div>
+function ProductDetail({ item, onClose }: { item: PublicMenuItem; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const headingId = useId();
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const opener = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    dialog?.showModal();
+    document.body.style.overflow = "hidden";
+    return () => { dialog?.close(); document.body.style.overflow = previousOverflow; opener?.focus({ preventScroll: true }); };
+  }, []);
+  return <dialog ref={dialogRef} className={styles.detail} aria-labelledby={headingId} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <article className={styles.detailInner}>
+      <button type="button" className={styles.closeDetail} aria-label="Zatvori detalje" onClick={onClose}><Icon name="close" /></button>
+      <Photo src={item.imageUrl} className={styles.detailPhoto} eager />
+      <div className={styles.detailBody}>
+        <p className={styles.eyebrow}>Iz našeg menija</p>
+        <h2 id={headingId}>{item.name}</h2>
+        {item.description && <p className={styles.detailDescription}>{item.description}</p>}
+        {!item.isAvailable && <Availability />}
+        <Price item={item} />
       </div>
-    </div>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" width="18" height="18">
-      <circle cx="8.5" cy="8.5" r="6" stroke="currentColor" strokeWidth="1.6" />
-      <path d="M13 13L17.5 17.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
+    </article>
+  </dialog>;
 }
 
 export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
   const { restaurant, theme, table, categories } = menu;
+  const instanceId = useId().replace(/:/g, "");
   const tokens = useMemo(() => resolveQrMenuTheme(theme), [theme]);
-  const fonts = TYPOGRAPHY_FONT_VARS[theme.typographyPreset];
-
-  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(categories[0]?.id ?? null);
+  const [mode, setMode] = useState<MenuMode>(() => filterPublicMenu(categories, "KITCHEN").length ? "KITCHEN" : "BAR");
+  const [activeCategory, setActiveCategory] = useState<string>();
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [openItem, setOpenItem] = useState<PublicMenuItem | null>(null);
+  const [failedCover, setFailedCover] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const navRef = useRef<HTMLDivElement>(null);
+  const categoryNavRef = useRef<HTMLElement>(null);
+  const categoryJumpRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
+  const filtered = useMemo(() => filterPublicMenu(categories, mode, search), [categories, mode, search]);
+  const selectedId = filtered.some(category => category.id === activeCategory) ? activeCategory : filtered[0]?.id;
+  const cover = publicImageSource(restaurant.coverImageUrl) && failedCover !== restaurant.coverImageUrl;
+
+  useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
+
+  // Track reading position in either the public document or Admin's scroll frame.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    let parent = root.parentElement;
+    while (parent && !/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) parent = parent.parentElement;
+    const scrollRoot: HTMLElement | Window = parent ?? window;
+    let frame = 0;
+    const update = () => {
+      // At the document end an anchor cannot always reach the sticky edge.
+      // Honor that explicit category selection for the resulting scroll event.
+      if (categoryJumpRef.current) {
+        setActiveCategory(categoryJumpRef.current);
+        categoryJumpRef.current = null;
+        return;
+      }
+      const edge = (navRef.current?.getBoundingClientRect().bottom ?? 0) + 24;
+      const sections = Array.from(root.querySelectorAll<HTMLElement>("[data-menu-category]"));
+      const current = sections.filter(section => section.getBoundingClientRect().top <= edge).at(-1) ?? sections[0];
+      if (current) setActiveCategory(current.dataset.menuCategory);
+    };
+    const onScroll = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(update); };
+    const resize = new ResizeObserver(() => {
+      root.style.setProperty("--menu-nav-height", `${navRef.current?.offsetHeight ?? 116}px`);
+      onScroll();
+    });
+    if (navRef.current) resize.observe(navRef.current);
+    scrollRoot.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => { scrollRoot.removeEventListener("scroll", onScroll); cancelAnimationFrame(frame); resize.disconnect(); };
+  }, [filtered]);
 
   useEffect(() => {
-    if (searchOpen) searchInputRef.current?.focus();
-  }, [searchOpen]);
+    const nav = categoryNavRef.current;
+    const active = nav?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!nav || !active) return;
+    const bounds = nav.getBoundingClientRect();
+    const tab = active.getBoundingClientRect();
+    if (tab.left < bounds.left || tab.right > bounds.right) nav.scrollLeft += tab.left - bounds.left - 16;
+  }, [selectedId]);
 
-  const searchTrimmed = search.trim().toLowerCase();
-  const filteredCategories = useMemo(() => {
-    if (!searchTrimmed) return categories;
-    return categories
-      .map((c) => ({ ...c, items: c.items.filter((i) => i.name.toLowerCase().includes(searchTrimmed) || i.description?.toLowerCase().includes(searchTrimmed)) }))
-      .filter((c) => c.items.length > 0);
-  }, [categories, searchTrimmed]);
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearch("");
+    requestAnimationFrame(() => searchButtonRef.current?.focus());
+  }
 
-  return (
-    <div
-      className={`${FONT_VARIABLES} min-h-screen overflow-x-hidden`}
-      style={
-        {
-          ...tokens,
-          "--menu-font-heading": fonts.heading,
-          "--menu-font-body": fonts.body,
-          background: "var(--menu-background)",
-          color: "var(--menu-text)",
-          fontFamily: "var(--menu-font-body)",
-        } as React.CSSProperties
-      }
-    >
-      {/* ── Identity — compact, typography-forward; a cover photo (when set) is a short atmospheric strip with identity overlaid, never a dominant hero (guests came to browse food) ── */}
-      <header className="relative">
-        {restaurant.coverImageUrl ? (
-          <div className="relative flex h-40 w-full flex-col justify-end overflow-hidden px-5 pb-4 sm:h-48 sm:px-8">
-            {/* eslint-disable-next-line @next/next/no-img-element -- see SpotlightBlock's identical note; eager (above the fold), never lazy */}
-            <img src={restaurant.coverImageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-black/10" />
-            <div className="relative">
-              <h1 className="text-[26px] font-semibold leading-none text-white sm:text-[30px]" style={{ fontFamily: "var(--menu-font-heading)" }}>
-                {restaurant.name}
-              </h1>
-              {restaurant.tagline && <p className="mt-1.5 text-[13px] text-white/85">{restaurant.tagline}</p>}
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-3 px-5 pb-3 pt-6 sm:px-8">
-            {restaurant.logoUrl ? (
-              <span className="relative h-11 w-11 shrink-0 overflow-hidden rounded-full">
-                {/* eslint-disable-next-line @next/next/no-img-element -- see SpotlightBlock's identical note */}
-                <img src={restaurant.logoUrl} alt={restaurant.name} className="absolute inset-0 h-full w-full object-cover" />
-              </span>
-            ) : (
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-base font-semibold" style={{ background: "var(--menu-primary)", color: "var(--menu-on-primary)" }}>
-                {restaurant.name.charAt(0).toUpperCase()}
-              </span>
-            )}
-            <div className="min-w-0">
-              <h1 className="truncate text-[22px] font-semibold leading-tight" style={{ fontFamily: "var(--menu-font-heading)" }}>
-                {restaurant.name}
-              </h1>
-              {restaurant.tagline && <p className="truncate text-[12.5px]" style={{ color: "var(--menu-muted)" }}>{restaurant.tagline}</p>}
-            </div>
-          </div>
-        )}
-        {table && (
-          <div className="px-5 pt-3 sm:px-8">
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: "var(--menu-primary)" }}>
-              Sto {table.label}
-            </span>
-          </div>
-        )}
-      </header>
+  return <div ref={rootRef} className={`${styles.menu} ${FONT_VARIABLES}`} data-theme={theme.themePreset} style={{ ...tokens, "--menu-font-heading": DISPLAY[theme.typographyPreset], "--menu-font-body": "var(--font-menu-body), Arial, sans-serif" } as CSSProperties}>
+    <a className={styles.skipLink} href={`#${instanceId}-content`}>Pređi na meni</a>
+    <header className={`${styles.hero} ${cover ? styles.photographic : styles.branded}`}>
+      <Photo src={restaurant.coverImageUrl} className={styles.cover} eager onError={() => setFailedCover(restaurant.coverImageUrl)} />
+      <div className={styles.heroContent}>
+        <div className={styles.heroTop}>
+          <span className={styles.eyebrow}>Dobro došli</span>
+          {table && <span className={styles.table}>Sto {table.label}</span>}
+        </div>
+        <div className={styles.identity}>
+          <Photo src={restaurant.logoUrl} className={styles.logo} eager />
+          <div><h1>{restaurant.name}</h1>{restaurant.tagline && <p className={styles.tagline}>{restaurant.tagline}</p>}</div>
+        </div>
+        <div className={styles.heroFoot}><span>Naš meni</span><span aria-hidden="true">↓</span></div>
+      </div>
+    </header>
 
-      {/* ── Sticky utility bar — slim underline category tabs + a search affordance that expands only when needed, never dominating the identity area ── */}
-      <div className="sticky top-0 z-30 backdrop-blur" style={{ background: "color-mix(in srgb, var(--menu-background) 92%, transparent)", borderBottom: "1px solid var(--menu-border)" }}>
-        <div className="mx-auto flex max-w-2xl items-center gap-1 px-2 sm:px-6">
-          {!searchOpen && categories.length > 1 && (
-            // Right-edge fade (mask-image, not an opacity trick) signals
-            // "more categories to scroll" instead of an abrupt mid-word
-            // clip against the search icon — pure CSS, no extra markup.
-            <nav
-              className="flex min-w-0 flex-1 gap-5 overflow-x-auto px-3 py-3 [mask-image:linear-gradient(to_right,black_calc(100%-28px),transparent)]"
-              style={{ scrollbarWidth: "none" }}
-            >
-              {categories.map((c) => {
-                const active = c.id === activeCategoryId && !searchTrimmed;
-                return (
-                  <a
-                    key={c.id}
-                    href={`#cat-${c.id}`}
-                    onClick={() => setActiveCategoryId(c.id)}
-                    className="shrink-0 whitespace-nowrap border-b-2 pb-1 pt-0.5 text-[13px] font-semibold uppercase tracking-wide transition-colors motion-reduce:transition-none"
-                    style={active ? { borderColor: "var(--menu-primary)", color: "var(--menu-text)" } : { borderColor: "transparent", color: "var(--menu-muted)" }}
-                  >
-                    {c.name}
-                  </a>
-                );
-              })}
+    <div ref={navRef} className={styles.navigation}>
+      <div className={styles.navCanvas}>
+        <div className={styles.modes} role="group" aria-label="Vrsta menija">
+          {MODES.map(tab => <button key={tab.id} type="button" aria-pressed={mode === tab.id} aria-controls={`${instanceId}-content`} onClick={() => { setMode(tab.id); setActiveCategory(undefined); }}>
+            <Icon name={tab.icon} /><span>{tab.label}</span><span className={styles.modeNumber}>{tab.id === "KITCHEN" ? "01" : "02"}</span>
+          </button>)}
+        </div>
+        <div className={styles.categoryBar}>
+          {searchOpen ? <div className={styles.search}>
+            <Icon name="search" />
+            <input ref={searchInputRef} type="search" aria-label={`Pretraži ${mode === "KITCHEN" ? "kuhinju" : "šank"}`} placeholder="Pronađite u meniju…" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === "Escape") closeSearch(); }} />
+            <button type="button" className={styles.iconButton} aria-label="Zatvori pretragu" onClick={closeSearch}><Icon name="close" /></button>
+          </div> : <>
+            <nav ref={categoryNavRef} className={styles.categories} aria-label="Kategorije menija">
+              {filtered.map(category => <a key={category.id} href={`#${instanceId}-${category.id}`} aria-current={selectedId === category.id ? "true" : undefined} onClick={() => { categoryJumpRef.current = category.id; setActiveCategory(category.id); }}>{category.name}</a>)}
             </nav>
-          )}
-          {searchOpen ? (
-            <div className="flex flex-1 items-center gap-2 py-2.5">
-              <span style={{ color: "var(--menu-muted)" }}>
-                <SearchIcon />
-              </span>
-              <input
-                ref={searchInputRef}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Pretraga menija…"
-                aria-label="Pretraga menija"
-                className="min-w-0 flex-1 bg-transparent text-[15px] outline-none"
-                style={{ color: "var(--menu-text)" }}
-              />
-              <button
-                onClick={() => { setSearchOpen(false); setSearch(""); }}
-                aria-label="Zatvori pretragu"
-                className="flex h-11 w-11 shrink-0 items-center justify-center"
-                style={{ color: "var(--menu-muted)" }}
-              >
-                ✕
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setSearchOpen(true)}
-              aria-label="Pretraga menija"
-              className="flex h-11 w-11 shrink-0 items-center justify-center"
-              style={{ color: "var(--menu-muted)" }}
-            >
-              <SearchIcon />
-            </button>
-          )}
+            <button ref={searchButtonRef} type="button" className={styles.iconButton} aria-label="Pretraga menija" aria-expanded={false} onClick={() => setSearchOpen(true)}><Icon name="search" /></button>
+          </>}
         </div>
       </div>
-
-      {/* ── The menu itself — an editorial canvas, not a product grid ── */}
-      <main className="mx-auto max-w-2xl px-5 pb-16 pt-6 sm:px-8">
-        {filteredCategories.length === 0 && (
-          <p className="py-16 text-center text-sm" style={{ color: "var(--menu-muted)" }}>
-            Nema rezultata za &quot;{search}&quot;.
-          </p>
-        )}
-        {filteredCategories.map((category, categoryIndex) => {
-          const spotlightId = pickCategorySpotlight(category.items);
-          return (
-            <section key={category.id} id={`cat-${category.id}`} className={`scroll-mt-16 ${categoryIndex > 0 ? "mt-10" : ""}`}>
-              <div className="mb-4 flex items-center gap-3">
-                <h2 className="text-[24px] font-semibold leading-none" style={{ fontFamily: "var(--menu-font-heading)" }}>
-                  {category.name}
-                </h2>
-                <span className="h-px flex-1" style={{ background: "var(--menu-border)" }} aria-hidden="true" />
-              </div>
-              <div>
-                {category.items.map((item, itemIndex) => {
-                  const isLast = itemIndex === category.items.length - 1;
-                  if (item.id === spotlightId) {
-                    return <SpotlightBlock key={item.id} item={item} imageShape={theme.imageShape} onOpen={() => setOpenItem(item)} />;
-                  }
-                  return <MenuItemRow key={item.id} item={item} imageShape={theme.imageShape} onOpen={() => setOpenItem(item)} showRule={!isLast} />;
-                })}
-              </div>
-            </section>
-          );
-        })}
-      </main>
-
-      <footer className="px-5 pb-10 pt-4 text-center text-[11px] sm:px-8" style={{ color: "var(--menu-muted)" }}>
-        {restaurant.name}
-      </footer>
-
-      {openItem && <ProductDetail item={openItem} imageShape={theme.imageShape} onClose={() => setOpenItem(null)} />}
     </div>
-  );
+
+    <main id={`${instanceId}-content`} className={styles.content} tabIndex={-1}>
+      {search.trim() && <p role="status" className={styles.searchStatus}>Rezultati: {filtered.reduce((total, category) => total + category.items.length, 0)}</p>}
+      {!filtered.length && <div className={styles.empty}><h2>{search.trim() ? "Nema rezultata" : "Meni uskoro"}</h2><p>{search.trim() ? `Pokušajte sa drugim nazivom ili otvorite ${mode === "KITCHEN" ? "Šank" : "Kuhinju"}.` : "Ponuda trenutno nije dostupna."}</p>{search.trim() && <button type="button" onClick={() => setSearch("")}>Obriši pretragu</button>}</div>}
+      {filtered.map((category, index) => {
+        const editorialId = search.trim() ? null : editorialItemId(category, index);
+        return <section key={category.id} id={`${instanceId}-${category.id}`} data-menu-category={category.id} className={`${styles.section} ${editorialId ? styles.withEditorial : ""}`}>
+          <div className={styles.sectionHeading}>
+            <span className={styles.sectionNumber} aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+            <h2>{category.name}</h2>
+            <span className={styles.categoryCount}>{category.items.length} <span>u ponudi</span></span>
+          </div>
+          <div className={styles.dishes}>
+            {category.items.map(item => <MenuRow key={item.id} item={item} editorial={item.id === editorialId} onOpen={() => setOpenItem(item)} />)}
+          </div>
+        </section>;
+      })}
+    </main>
+    <footer className={styles.footer}><span className={styles.footerMark} aria-hidden="true" /><p>{restaurant.name}</p><span>Hvala što ste naši gosti.</span></footer>
+    {openItem && <ProductDetail item={openItem} onClose={() => setOpenItem(null)} />}
+  </div>;
 }

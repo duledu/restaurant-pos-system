@@ -161,10 +161,12 @@ export interface PublicMenuItem {
   price: string;
   imageUrl: string | null;
   isAvailable: boolean;
+  preparationStation: "KITCHEN" | "BAR" | "KITCHEN_AND_BAR" | "NONE";
 }
 export interface PublicMenuCategory {
   id: string;
   name: string;
+  type: "FOOD" | "DRINK";
   items: PublicMenuItem[];
 }
 export interface PublicMenuPayload {
@@ -200,10 +202,11 @@ export async function getPublicMenu(slug: string, tableToken?: string | null): P
       select: {
         id: true,
         name: true,
+        type: true,
         items: {
           where: { restaurantId: restaurant.id, isActive: true },
           orderBy: { sortOrder: "asc" },
-          select: { id: true, name: true, description: true, price: true, imageUrl: true, isAvailable: true },
+          select: { id: true, name: true, description: true, price: true, imageUrl: true, isAvailable: true, preparationStation: true },
         },
       },
     }),
@@ -234,7 +237,8 @@ export async function getPublicMenu(slug: string, tableToken?: string | null): P
       .map((c) => ({
         id: c.id,
         name: c.name,
-        items: c.items.map((i) => ({ id: i.id, name: i.name, description: i.description, price: i.price.toString(), imageUrl: i.imageUrl, isAvailable: i.isAvailable })),
+        type: c.type,
+        items: c.items.map((i) => ({ id: i.id, name: i.name, description: i.description, price: i.price.toString(), imageUrl: i.imageUrl, isAvailable: i.isAvailable, preparationStation: i.preparationStation })),
       })),
   };
 }
