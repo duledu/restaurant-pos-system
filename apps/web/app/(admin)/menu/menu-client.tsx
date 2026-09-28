@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { RecipeButton, RecipeModal } from "../../../components/admin/RecipeModal";
 import { Button } from "../../../components/ui/Button";
+import { ImageUploader } from "../../../components/ui/ImageUploader";
 
 interface Category {
   id: string;
@@ -18,6 +19,7 @@ interface MenuItem {
   name: string;
   slug: string;
   price: string;
+  imageUrl: string | null;
   quantity: string | null;
   unit: string | null;
   preparationStation: "KITCHEN" | "BAR" | "KITCHEN_AND_BAR" | "NONE";
@@ -845,6 +847,61 @@ function DirectStockButton({ item, readOnly, onChanged }: { item: { id: string; 
   );
 }
 
+// ── IMAGE MANAGEMENT V1 — Photo ─────────────────────────────────────────────────
+
+function ItemPhotoModal({ item, onClose, onChanged }: { item: { id: string; name: string; imageUrl: string | null }; onClose: () => void; onChanged: () => void }) {
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+  }
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4"
+      onClick={onClose}
+      onKeyDown={onKeyDown}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+    >
+      <div className="w-full rounded-t-lg bg-white p-5 shadow-elevated sm:max-w-md sm:rounded-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <h2 className="text-lg font-bold text-ink">Fotografija — {item.name}</h2>
+          <button onClick={onClose} autoFocus className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        </div>
+        <ImageUploader
+          label="Fotografija artikla"
+          shape="square"
+          value={item.imageUrl}
+          uploadUrl={`/api/admin/uploads/menu-item/${item.id}`}
+          onUploaded={onChanged}
+          onRemoved={onChanged}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ItemPhotoButton({ item, onChanged }: { item: { id: string; name: string; imageUrl: string | null }; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className={`rounded-full px-2.5 py-1 font-medium transition-colors ${item.imageUrl ? "bg-gold-soft text-gold-dark hover:bg-gold/20" : "bg-cream-200 text-ink/55 hover:bg-cream-300"}`}
+        title={item.imageUrl ? "Zameni/ukloni fotografiju" : "Dodaj fotografiju"}
+      >
+        Foto
+      </button>
+      {open && (
+        <ItemPhotoModal
+          item={item}
+          onClose={() => setOpen(false)}
+          onChanged={onChanged}
+        />
+      )}
+    </>
+  );
+}
+
 // ── ItemRow ───────────────────────────────────────────────────────────────────
 
 function ItemRow({
@@ -1027,6 +1084,7 @@ function ItemRow({
           never adjacent to a routine click). */}
       <td className="px-4 py-2.5">
         <div className="flex items-center gap-2.5 text-xs">
+          <ItemPhotoButton item={item} onChanged={refresh} />
           <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} emphasis={item.inventoryTrackingMethod === "RECIPE"} />
           {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
             <DirectStockButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />

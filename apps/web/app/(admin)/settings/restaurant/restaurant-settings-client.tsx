@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card } from "../../../../components/ui/Card";
 import { Skeleton } from "../../../../components/ui/Skeleton";
+import { ImageUploader } from "../../../../components/ui/ImageUploader";
 import { useInstallPrompt } from "../../../../components/system/InstallAppButton";
 
 interface RestaurantSettings {
@@ -104,6 +105,17 @@ export function RestaurantSettingsClient() {
                 className="w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
               />
               <p className="mt-1 text-xs text-inkSoft">Prikazuje se na vrhu kupčevog računa.</p>
+            </div>
+            <div>
+              <ImageUploader
+                label="Logo restorana"
+                shape="circle"
+                value={values.logoUrl}
+                uploadUrl="/api/admin/uploads/logo"
+                onUploaded={(url) => setValues({ ...values, logoUrl: url })}
+                onRemoved={() => setValues({ ...values, logoUrl: null })}
+              />
+              <p className="mt-1 text-xs text-inkSoft">Isti logo se prikazuje i na QR meniju gostiju.</p>
             </div>
             {FIELDS.map((f) => (
               <div key={f.key}>

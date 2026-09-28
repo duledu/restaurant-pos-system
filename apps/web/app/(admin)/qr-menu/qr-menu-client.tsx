@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
 import { PublicMenuView, type PublicMenuPayload } from "../../m/[slug]/public-menu-view";
+import { ImageUploader } from "../../../components/ui/ImageUploader";
 
 type ThemePreset = "LIGHT" | "DARK" | "WARM" | "ELEGANT";
 type TypographyPreset = "ELEGANT" | "MODERN" | "CLASSIC" | "CASUAL";
@@ -233,24 +234,36 @@ export function QrMenuClient() {
           <p className="mb-4 text-xs text-ink/45">Samo mala slova, brojevi i crtice. Ovo je javna adresa gostiju.</p>
 
           <label className="mb-1 block text-sm font-medium text-ink">Slogan (opciono)</label>
-          <input value={settings.tagline ?? ""} onChange={(e) => update("tagline", e.target.value || null)} placeholder="Ukusi koje pamtite" className="mb-2 min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
-          <p className="text-xs text-ink/45">
-            Logo se menja u{" "}
-            <a href="/settings/restaurant" className="text-gold-dark hover:underline">
-              Podešavanja restorana
-            </a>
-            .
-          </p>
+          <input value={settings.tagline ?? ""} onChange={(e) => update("tagline", e.target.value || null)} placeholder="Ukusi koje pamtite" className="min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm" />
         </section>
 
+        {/* IMAGE MANAGEMENT V1 — real upload, not a URL field; the same
+            RestaurantSettings.logoUrl the public menu already reads (single
+            source of truth, no QR-only duplicate) is now directly editable
+            here so the owner doesn't need to find /settings/restaurant. */}
         <section className="rounded-lg border border-line/70 bg-white p-5">
-          <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-ink/50">Naslovna slika</h2>
-          <input
-            value={settings.coverImageUrl ?? ""}
-            onChange={(e) => update("coverImageUrl", e.target.value || null)}
-            placeholder="https://…"
-            className="min-h-11 w-full rounded-md border border-line px-3 py-2 text-sm"
-          />
+          <h2 className="mb-4 text-sm font-bold uppercase tracking-wide text-ink/50">Brendiranje</h2>
+          <div className="mb-5">
+            <ImageUploader
+              label="Logo restorana"
+              shape="circle"
+              value={settings.logoUrl}
+              uploadUrl="/api/admin/uploads/logo"
+              onUploaded={(url) => update("logoUrl", url)}
+              onRemoved={() => update("logoUrl", null)}
+            />
+          </div>
+          <div>
+            <ImageUploader
+              label="Naslovna fotografija"
+              shape="wide"
+              value={settings.coverImageUrl}
+              uploadUrl="/api/admin/uploads/qr-hero"
+              onUploaded={(url) => update("coverImageUrl", url)}
+              onRemoved={() => update("coverImageUrl", null)}
+            />
+            <p className="mt-2 text-xs text-ink/45">Kada je postavljena, ova fotografija dominira vrhom javnog menija. Bez nje se prikazuje dekorativni obrazac.</p>
+          </div>
         </section>
 
         <section className="rounded-lg border border-line/70 bg-white p-5">
