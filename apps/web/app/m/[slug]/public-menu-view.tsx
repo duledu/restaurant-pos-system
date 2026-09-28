@@ -127,8 +127,14 @@ function ProductCard({ item, cardStyle, imageShape, onOpen }: { item: PublicMenu
 
 function ProductDetailModal({ item, imageShape, onClose }: { item: PublicMenuItem; imageShape: QrImageShape; onClose: () => void }) {
   const shapeClass = IMAGE_SHAPE_CLASS[imageShape];
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+    }
+  }
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose} role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose} onKeyDown={onKeyDown} role="dialog" aria-modal="true" tabIndex={-1}>
       <div
         className="flex max-h-[88vh] w-full flex-col overflow-hidden sm:max-w-md sm:rounded-2xl"
         style={{ background: "var(--menu-surface)" }}
@@ -144,6 +150,7 @@ function ProductDetailModal({ item, imageShape, onClose }: { item: PublicMenuIte
           <button
             onClick={onClose}
             aria-label="Zatvori"
+            autoFocus
             className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur"
           >
             ✕

@@ -326,7 +326,14 @@ export function QrMenuClient() {
       </div>
 
       {qrPreview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={() => setQrPreview(null)} role="dialog" aria-modal="true">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4"
+          onClick={() => setQrPreview(null)}
+          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setQrPreview(null); } }}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+        >
           <div className="w-full max-w-xs rounded-lg bg-white p-5 text-center shadow-elevated" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-3 font-bold text-ink">{qrPreview.label}</h3>
             {/* eslint-disable-next-line @next/next/no-img-element -- locally-generated data: URL, next/image doesn't apply */}
@@ -335,7 +342,7 @@ export function QrMenuClient() {
             <a href={qrPreview.dataUrl} download={`qr-${qrPreview.label.replace(/\s+/g, "-").toLowerCase()}.png`} className="mb-2 block min-h-11 rounded-md bg-gold px-4 py-2.5 text-sm font-bold leading-[2.5] text-white hover:bg-gold-dark">
               Preuzmi
             </a>
-            <button onClick={() => setQrPreview(null)} className="min-h-11 w-full rounded-md border border-line px-4 py-2 text-sm font-medium text-ink hover:bg-cream-100">
+            <button onClick={() => setQrPreview(null)} autoFocus className="min-h-11 w-full rounded-md border border-line px-4 py-2 text-sm font-medium text-ink hover:bg-cream-100">
               Zatvori
             </button>
           </div>
