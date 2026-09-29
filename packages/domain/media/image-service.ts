@@ -5,13 +5,12 @@
  * No new database fields — existing fields are reused, existing SSRF-safe
  * plain-<img> public rendering is untouched.
  *
- * STORAGE: Vercel Blob (`@vercel/blob`), chosen because this app deploys on
- * Vercel and no other object-storage infrastructure existed in the repo
- * (confirmed via audit before implementing). Objects are public-read
- * (guest menu is unauthenticated) and keyed under `restaurants/{restaurantId}/...`
- * so tenant ownership is legible from the key itself; Vercel Blob's
- * `addRandomSuffix` (default true) makes every key collision-proof without
- * this module having to invent its own uniqueness scheme.
+ * STORAGE: Cloudflare R2 (packages/domain/media/storage/r2-media-storage.ts),
+ * the canonical TableCore media store — ONE bucket (tablecore-production-media)
+ * shared by PREPROD and Production, served publicly under R2_PUBLIC_BASE_URL
+ * (media.tablecore.net). Migrated from Vercel Blob (see git history) —
+ * that migration only ever touched this file's storage calls; every
+ * ownership/permission/validation rule below is unchanged.
  *
  * SECURITY: this module NEVER fetches a remote URL on the caller's behalf —
  * the only inputs are raw bytes the browser already uploaded (multipart
@@ -22,12 +21,16 @@
  * accepted (it can embed script). Every write resolves its target's
  * ownership from `ctx.restaurantId` (server-derived from the session) —
  * a caller can never point at another tenant's row by supplying an id.
+ * Deletion only ever targets a URL that was issued under our OWN configured
+ * R2_PUBLIC_BASE_URL (see keyFromOwnedUrl) — a legacy Vercel Blob URL from
+ * before this migration, or any external URL, is silently left alone.
  */
+import { randomUUID } from "crypto";
 import sharp from "sharp";
-import { put, del } from "@vercel/blob";
 import { prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
+import { R2MediaStorage, type MediaStorage } from "./storage/r2-media-storage";
 
 const MENU_MANAGE = "menu.manage";
 const QR_MENU_MANAGE = "qr_menu.manage";
@@ -62,20 +65,40 @@ interface RoleProcessing {
   resize: { width: number; height: number };
   format: "webp" | "png";
   extension: "webp" | "png";
+  /** Object-key folder, matching the canonical R2 layout (Step 3). */
+  keyFolder: (restaurantId: string, targetId?: string) => string;
 }
 
 // Different roles need different treatment (spec: menu item = thumbnail/
 // detail scale, hero = larger landscape asset, logo = smaller identity
 // asset with transparency preserved). WebP everywhere except the logo,
 // which stays PNG so a transparent source (the common case for a brand
-// mark) never gets flattened onto a background color.
+// mark) never gets flattened onto a background color. MENU_ITEM_IMAGE is
+// 512×512 (corrected down from an earlier 1000×1000 — a thumbnail/detail
+// image never needs to be larger than this).
 const ROLE_PROCESSING: Record<ImageAssetRole, RoleProcessing> = {
-  MENU_ITEM_IMAGE: { resize: { width: 1000, height: 1000 }, format: "webp", extension: "webp" },
-  QR_HERO_IMAGE: { resize: { width: 1920, height: 1080 }, format: "webp", extension: "webp" },
-  RESTAURANT_LOGO: { resize: { width: 512, height: 512 }, format: "png", extension: "png" },
+  MENU_ITEM_IMAGE: {
+    resize: { width: 512, height: 512 },
+    format: "webp",
+    extension: "webp",
+    keyFolder: (restaurantId, itemId) => `restaurants/${restaurantId}/menu-items/${itemId}`,
+  },
+  QR_HERO_IMAGE: {
+    resize: { width: 1920, height: 1080 },
+    format: "webp",
+    extension: "webp",
+    keyFolder: (restaurantId) => `restaurants/${restaurantId}/branding/hero`,
+  },
+  RESTAURANT_LOGO: {
+    resize: { width: 512, height: 512 },
+    format: "png",
+    extension: "png",
+    keyFolder: (restaurantId) => `restaurants/${restaurantId}/branding/logo`,
+  },
 };
 
-async function processImage(buffer: Buffer, role: ImageAssetRole): Promise<Buffer> {
+/** Exported for direct unit testing (pure image transform, no DB/network) — the same per-role resize/format/EXIF pipeline every upload runs. */
+export async function processImage(buffer: Buffer, role: ImageAssetRole): Promise<Buffer> {
   const { resize, format } = ROLE_PROCESSING[role];
   let pipeline = sharp(buffer, { failOn: "error" }).rotate(); // .rotate() with no args = auto-orient from EXIF, then strip it
   pipeline = pipeline.resize(resize.width, resize.height, { fit: "inside", withoutEnlargement: true });
@@ -106,27 +129,52 @@ export function validateRawUpload(upload: RawUpload): void {
   }
 }
 
-/** Uploads + processes, but does NOT touch the database or delete anything old — the three role-specific functions below own that (each has a different target table/ownership check). */
-async function uploadProcessed(upload: RawUpload, role: ImageAssetRole, keyPrefix: string): Promise<string> {
-  validateRawUpload(upload);
-  const processed = await processImage(upload.buffer, role);
-  const { extension, format } = ROLE_PROCESSING[role];
-  const blob = await put(`${keyPrefix}.${extension}`, processed, {
-    access: "public",
-    contentType: format === "webp" ? "image/webp" : "image/png",
-    addRandomSuffix: true,
-  });
-  return blob.url;
+// A single storage instance per process — R2MediaStorage's own constructor
+// reads env lazily (getR2Config throws a clean error on first real use, not
+// at module import), and its S3 client is itself cached internally.
+let sharedStorage: MediaStorage | undefined;
+function storage(): MediaStorage {
+  if (!sharedStorage) sharedStorage = new R2MediaStorage();
+  return sharedStorage;
 }
 
-/** Best-effort delete of a previously-stored blob — failure here must never break the restaurant's menu (spec Phase 7). Only ever called with a URL this module itself produced. */
-async function deleteBlobBestEffort(url: string | null): Promise<void> {
-  if (!url?.includes(".public.blob.vercel-storage.com/")) return; // never attempt to delete a URL we didn't issue (e.g. a legacy admin-pasted URL)
+/** Uploads + processes, but does NOT touch the database or delete anything old — the three role-specific functions below own that (each has a different target table/ownership check). Every replacement gets a brand-new UUID key — never overwrites an existing object (spec Step 3: avoids stale-CDN/browser-cache problems). */
+async function uploadProcessed(upload: RawUpload, role: ImageAssetRole, restaurantId: string, targetId?: string): Promise<string> {
+  validateRawUpload(upload);
+  const processed = await processImage(upload.buffer, role);
+  const { extension, format, keyFolder } = ROLE_PROCESSING[role];
+  const key = `${keyFolder(restaurantId, targetId)}/${randomUUID()}.${extension}`;
+  return storage().put(key, processed, format === "webp" ? "image/webp" : "image/png");
+}
+
+/** Best-effort delete of a previously-stored object — failure here must never break the restaurant's menu (spec Phase 7). MediaStorage.delete() itself no-ops for any URL it didn't issue (a legacy Vercel Blob URL, an external URL). */
+async function deleteMediaBestEffort(url: string | null): Promise<void> {
+  if (!url) return;
   try {
-    await del(url);
+    await storage().delete(url);
   } catch (err) {
-    console.error("[image-service] best-effort blob delete failed", { url, err });
+    console.error("[image-service] best-effort media delete failed", { err });
   }
+}
+
+/** Shared upload lifecycle for all three roles (spec Step 5): upload the new object, persist it, and only THEN best-effort-delete the old one. If DB persistence itself fails, the newly-uploaded object is cleaned up (best-effort) and the old, still-correct URL is left untouched — a failed save never destroys a working image. */
+async function uploadAndPersist(
+  upload: RawUpload,
+  role: ImageAssetRole,
+  restaurantId: string,
+  targetId: string | undefined,
+  previousUrl: string | null,
+  persist: (newUrl: string) => Promise<void>
+): Promise<string> {
+  const newUrl = await uploadProcessed(upload, role, restaurantId, targetId);
+  try {
+    await persist(newUrl);
+  } catch (err) {
+    await deleteMediaBestEffort(newUrl); // roll back the orphaned new object — the old URL is still the correct, persisted one
+    throw err;
+  }
+  await deleteMediaBestEffort(previousUrl);
+  return newUrl;
 }
 
 // ── MENU_ITEM_IMAGE ─────────────────────────────────────────────────────
@@ -140,9 +188,9 @@ async function getOwnedMenuItem(ctx: AuthContext, itemId: string) {
 export async function uploadMenuItemImage(ctx: AuthContext, itemId: string, upload: RawUpload): Promise<string> {
   requirePermission(ctx, MENU_MANAGE);
   const item = await getOwnedMenuItem(ctx, itemId);
-  const url = await uploadProcessed(upload, "MENU_ITEM_IMAGE", `restaurants/${ctx.restaurantId}/menu-items/${itemId}/photo`);
-  await prisma.menuItem.update({ where: { id: itemId }, data: { imageUrl: url } });
-  await deleteBlobBestEffort(item.imageUrl); // only after the new URL is safely persisted (safe-replace ordering)
+  const url = await uploadAndPersist(upload, "MENU_ITEM_IMAGE", ctx.restaurantId, itemId, item.imageUrl, async (newUrl) => {
+    await prisma.menuItem.update({ where: { id: itemId }, data: { imageUrl: newUrl } });
+  });
   await recordAuditEntry(ctx, { entityType: "MenuItem", entityId: itemId, action: "menu_item.image_uploaded", previousValue: { imageUrl: item.imageUrl }, newValue: { imageUrl: url } });
   return url;
 }
@@ -152,7 +200,7 @@ export async function removeMenuItemImage(ctx: AuthContext, itemId: string): Pro
   const item = await getOwnedMenuItem(ctx, itemId);
   if (!item.imageUrl) return;
   await prisma.menuItem.update({ where: { id: itemId }, data: { imageUrl: null } });
-  await deleteBlobBestEffort(item.imageUrl);
+  await deleteMediaBestEffort(item.imageUrl);
   await recordAuditEntry(ctx, { entityType: "MenuItem", entityId: itemId, action: "menu_item.image_removed", previousValue: { imageUrl: item.imageUrl }, newValue: { imageUrl: null } });
 }
 
@@ -161,13 +209,13 @@ export async function removeMenuItemImage(ctx: AuthContext, itemId: string): Pro
 export async function uploadQrHeroImage(ctx: AuthContext, upload: RawUpload): Promise<string> {
   requirePermission(ctx, QR_MENU_MANAGE);
   const previous = await prisma.qrMenuSettings.findUnique({ where: { restaurantId: ctx.restaurantId }, select: { coverImageUrl: true } });
-  const url = await uploadProcessed(upload, "QR_HERO_IMAGE", `restaurants/${ctx.restaurantId}/qr/hero`);
-  await prisma.qrMenuSettings.upsert({
-    where: { restaurantId: ctx.restaurantId },
-    create: { restaurantId: ctx.restaurantId, coverImageUrl: url, updatedBy: ctx.employeeId },
-    update: { coverImageUrl: url, updatedBy: ctx.employeeId },
+  const url = await uploadAndPersist(upload, "QR_HERO_IMAGE", ctx.restaurantId, undefined, previous?.coverImageUrl ?? null, async (newUrl) => {
+    await prisma.qrMenuSettings.upsert({
+      where: { restaurantId: ctx.restaurantId },
+      create: { restaurantId: ctx.restaurantId, coverImageUrl: newUrl, updatedBy: ctx.employeeId },
+      update: { coverImageUrl: newUrl, updatedBy: ctx.employeeId },
+    });
   });
-  await deleteBlobBestEffort(previous?.coverImageUrl ?? null);
   await recordAuditEntry(ctx, { entityType: "QrMenuSettings", entityId: ctx.restaurantId, action: "qr_menu.hero_uploaded", previousValue: { coverImageUrl: previous?.coverImageUrl ?? null }, newValue: { coverImageUrl: url }, category: "qr_menu" });
   return url;
 }
@@ -177,7 +225,7 @@ export async function removeQrHeroImage(ctx: AuthContext): Promise<void> {
   const previous = await prisma.qrMenuSettings.findUnique({ where: { restaurantId: ctx.restaurantId }, select: { coverImageUrl: true } });
   if (!previous?.coverImageUrl) return;
   await prisma.qrMenuSettings.update({ where: { restaurantId: ctx.restaurantId }, data: { coverImageUrl: null, updatedBy: ctx.employeeId } });
-  await deleteBlobBestEffort(previous.coverImageUrl);
+  await deleteMediaBestEffort(previous.coverImageUrl);
   await recordAuditEntry(ctx, { entityType: "QrMenuSettings", entityId: ctx.restaurantId, action: "qr_menu.hero_removed", previousValue: { coverImageUrl: previous.coverImageUrl }, newValue: { coverImageUrl: null }, category: "qr_menu" });
 }
 
@@ -191,13 +239,13 @@ export async function removeQrHeroImage(ctx: AuthContext): Promise<void> {
 export async function uploadRestaurantLogo(ctx: AuthContext, upload: RawUpload): Promise<string> {
   requirePermission(ctx, QR_MENU_MANAGE);
   const previous = await prisma.restaurantSettings.findUnique({ where: { restaurantId: ctx.restaurantId }, select: { logoUrl: true } });
-  const url = await uploadProcessed(upload, "RESTAURANT_LOGO", `restaurants/${ctx.restaurantId}/qr/logo`);
-  await prisma.restaurantSettings.upsert({
-    where: { restaurantId: ctx.restaurantId },
-    create: { restaurantId: ctx.restaurantId, logoUrl: url },
-    update: { logoUrl: url },
+  const url = await uploadAndPersist(upload, "RESTAURANT_LOGO", ctx.restaurantId, undefined, previous?.logoUrl ?? null, async (newUrl) => {
+    await prisma.restaurantSettings.upsert({
+      where: { restaurantId: ctx.restaurantId },
+      create: { restaurantId: ctx.restaurantId, logoUrl: newUrl },
+      update: { logoUrl: newUrl },
+    });
   });
-  await deleteBlobBestEffort(previous?.logoUrl ?? null);
   await recordAuditEntry(ctx, { entityType: "RestaurantSettings", entityId: ctx.restaurantId, action: "restaurant.logo_uploaded", previousValue: { logoUrl: previous?.logoUrl ?? null }, newValue: { logoUrl: url }, category: "qr_menu" });
   return url;
 }
@@ -207,6 +255,6 @@ export async function removeRestaurantLogo(ctx: AuthContext): Promise<void> {
   const previous = await prisma.restaurantSettings.findUnique({ where: { restaurantId: ctx.restaurantId }, select: { logoUrl: true } });
   if (!previous?.logoUrl) return;
   await prisma.restaurantSettings.update({ where: { restaurantId: ctx.restaurantId }, data: { logoUrl: null } });
-  await deleteBlobBestEffort(previous.logoUrl);
+  await deleteMediaBestEffort(previous.logoUrl);
   await recordAuditEntry(ctx, { entityType: "RestaurantSettings", entityId: ctx.restaurantId, action: "restaurant.logo_removed", previousValue: { logoUrl: previous.logoUrl }, newValue: { logoUrl: null }, category: "qr_menu" });
 }

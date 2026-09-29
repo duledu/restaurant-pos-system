@@ -1,10 +1,11 @@
 /**
  * IMAGE MANAGEMENT V1 — tenant isolation, permission enforcement, and
  * upload/replace/remove round-trips for the shared image pipeline
- * (packages/domain/media/image-service.ts). `@vercel/blob` is mocked (no
- * real network call, no real token needed) — everything else (ownership
- * check, permission gate, DB write, best-effort old-object cleanup) runs
- * for real against the disposable test database.
+ * (packages/domain/media/image-service.ts). R2MediaStorage is mocked (no
+ * real network call, no real R2 credentials needed) — everything else
+ * (ownership check, permission gate, DB write, best-effort old-object
+ * cleanup, DB-failure rollback of the newly-uploaded object) runs for real
+ * against the disposable test database.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "crypto";
@@ -14,11 +15,15 @@ import { ForbiddenError, type AuthContext } from "@rcs/auth";
 import { media } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
-const putMock = vi.fn(async (pathname: string) => ({ url: `https://blob.test.public.blob.vercel-storage.com/${pathname}-mockid` }));
-const delMock = vi.fn(async () => undefined);
-vi.mock("@vercel/blob", () => ({
-  put: (...args: unknown[]) => putMock(...(args as [string])),
-  del: (...args: unknown[]) => delMock(...args),
+const TEST_PUBLIC_BASE = "https://media.test.tablecore.net";
+const putMock = vi.fn(async (key: string) => `${TEST_PUBLIC_BASE}/${key}`);
+const deleteMock = vi.fn(async () => undefined);
+vi.mock("@rcs/domain/media/storage/r2-media-storage", () => ({
+  R2MediaStorage: vi.fn().mockImplementation(() => ({
+    put: (...args: unknown[]) => putMock(...(args as [string])),
+    delete: (...args: unknown[]) => deleteMock(...args),
+    publicUrl: (key: string) => `${TEST_PUBLIC_BASE}/${key}`,
+  })),
 }));
 
 function context(restaurantId: string, employeeId: string, permissions: string[]): AuthContext {
@@ -51,7 +56,7 @@ async function realPngUpload() {
 beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
   putMock.mockClear();
-  delMock.mockClear();
+  deleteMock.mockClear();
 });
 
 describe("uploadMenuItemImage — tenant isolation, permissions, persistence", () => {
@@ -73,7 +78,7 @@ describe("uploadMenuItemImage — tenant isolation, permissions, persistence", (
     const fixture = await createFixture();
     const ctx = context(fixture.restaurantId, "e1", ["menu.manage"]);
     const url = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
-    expect(url).toContain(".public.blob.vercel-storage.com/");
+    expect(url).toContain("media.test.tablecore.net/");
     const item = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.itemId } });
     expect(item.imageUrl).toBe(url);
   });
@@ -84,7 +89,7 @@ describe("uploadMenuItemImage — tenant isolation, permissions, persistence", (
     const firstUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
     const secondUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
     expect(secondUrl).not.toBe(firstUrl);
-    expect(delMock).toHaveBeenCalledWith(firstUrl);
+    expect(deleteMock).toHaveBeenCalledWith(firstUrl);
     const item = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.itemId } });
     expect(item.imageUrl).toBe(secondUrl);
   });
@@ -96,6 +101,50 @@ describe("uploadMenuItemImage — tenant isolation, permissions, persistence", (
     await expect(media.uploadMenuItemImage(ctx, fixture.itemId, garbage)).rejects.toThrow(/format/i);
     expect(putMock).not.toHaveBeenCalled();
   });
+
+  it("never attempts to delete a pre-existing legacy/external URL that isn't ours to own (e.g. a Vercel Blob URL from before the R2 migration)", async () => {
+    const fixture = await createFixture();
+    await prisma.menuItem.update({ where: { id: fixture.itemId }, data: { imageUrl: "https://legacy123.public.blob.vercel-storage.com/old-photo.webp" } });
+    const ctx = context(fixture.restaurantId, "e1", ["menu.manage"]);
+    await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
+    // deleteMock is our OWN R2MediaStorage.delete — it receives every previous-URL argument
+    // regardless of ownership (the real R2MediaStorage.delete is what no-ops internally via
+    // keyFromOwnedUrl, covered separately in tests/unit/r2-media-storage.test.ts); here we
+    // confirm the legacy URL is still passed through unmodified, never rewritten/derived into
+    // some other delete target.
+    expect(deleteMock).toHaveBeenCalledWith("https://legacy123.public.blob.vercel-storage.com/old-photo.webp");
+  });
+
+  it("gets a brand-new object key on every replacement — never overwrites the previous key", async () => {
+    const fixture = await createFixture();
+    const ctx = context(fixture.restaurantId, "e1", ["menu.manage"]);
+    const firstUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
+    const secondUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
+    const thirdUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
+    expect(new Set([firstUrl, secondUrl, thirdUrl]).size).toBe(3);
+  });
+
+  it("rolls back (best-effort deletes) the newly-uploaded object if DB persistence fails, and leaves the old URL untouched in the DB", async () => {
+    const fixture = await createFixture();
+    const ctx = context(fixture.restaurantId, "e1", ["menu.manage"]);
+    const originalUrl = await media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload());
+    putMock.mockClear();
+    deleteMock.mockClear();
+
+    // Ownership lookup (findFirst) must still succeed; only the persisting
+    // update() call fails, simulating a genuine DB write failure mid-upload.
+    const updateSpy = vi.spyOn(prisma.menuItem, "update").mockRejectedValueOnce(new Error("simulated DB failure"));
+    await expect(media.uploadMenuItemImage(ctx, fixture.itemId, await realPngUpload())).rejects.toThrow("simulated DB failure");
+    updateSpy.mockRestore();
+
+    expect(putMock).toHaveBeenCalledTimes(1); // the new object WAS uploaded
+    expect(deleteMock).toHaveBeenCalledTimes(1); // ...then rolled back, since persistence failed
+    const uploadedKey = putMock.mock.calls[0][0] as string;
+    expect(deleteMock).toHaveBeenCalledWith(`${TEST_PUBLIC_BASE}/${uploadedKey}`);
+
+    const item = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.itemId } });
+    expect(item.imageUrl).toBe(originalUrl); // untouched — the failed upload never overwrote the working image
+  });
 });
 
 describe("removeMenuItemImage", () => {
@@ -106,14 +155,14 @@ describe("removeMenuItemImage", () => {
     await media.removeMenuItemImage(ctx, fixture.itemId);
     const item = await prisma.menuItem.findUniqueOrThrow({ where: { id: fixture.itemId } });
     expect(item.imageUrl).toBeNull();
-    expect(delMock).toHaveBeenCalledWith(url);
+    expect(deleteMock).toHaveBeenCalledWith(url);
   });
 
   it("is a safe no-op when the item never had an image", async () => {
     const fixture = await createFixture();
     const ctx = context(fixture.restaurantId, "e1", ["menu.manage"]);
     await expect(media.removeMenuItemImage(ctx, fixture.itemId)).resolves.toBeUndefined();
-    expect(delMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 });
 
@@ -139,7 +188,7 @@ describe("uploadQrHeroImage / removeQrHeroImage — QrMenuSettings.coverImageUrl
     await media.removeQrHeroImage(ctx);
     const settings = await prisma.qrMenuSettings.findUniqueOrThrow({ where: { restaurantId: fixture.restaurantId } });
     expect(settings.coverImageUrl).toBeNull();
-    expect(delMock).toHaveBeenCalledWith(url);
+    expect(deleteMock).toHaveBeenCalledWith(url);
   });
 });
 
