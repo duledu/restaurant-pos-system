@@ -46,22 +46,48 @@ function readDraft(slug: string): GuestDraftItem[] {
 }
 
 export function useGuestOrderDraft(slug: string) {
-  const [items, setItems] = useState<GuestDraftItem[]>(() => readDraft(slug));
+  // Starts empty on EVERY render pass, server or client — never reads
+  // localStorage in the initializer. The server can never see localStorage
+  // at all (always []), so a client first-render that read a real,
+  // non-empty draft here would permanently diverge from the server HTML —
+  // a genuine hydration mismatch (proven via browser console: "Text
+  // content did not match... + Kreiraj porudžbinu / + Dodaj još stavki"),
+  // which forces React to discard and re-render the ENTIRE root client-side
+  // instead of just this component. The effect below (already existing,
+  // runs after every mount) hydrates the real draft one tick later — a
+  // normal post-mount state update, not a hydration error.
+  const [items, setItems] = useState<GuestDraftItem[]>([]);
+  // Real state, NOT a ref — a ref mutated inside the hydrate effect below
+  // would already read as true by the time the persist effect's OWN stale
+  // (pre-hydration) closure runs in the same mount flush, defeating the
+  // guard. State correctly keeps `false` tied to the pre-hydration render
+  // and only flips for the render that actually has the real items.
+  const [hydrated, setHydrated] = useState(false);
 
   // Refresh from storage if `slug` itself changes at runtime (shouldn't
   // normally happen within one page view, but keeps the hook correct if it
-  // ever does) — never merges across slugs.
-  useEffect(() => setItems(readDraft(slug)), [slug]);
+  // ever does) — never merges across slugs. Also serves as the initial
+  // client-only hydration from localStorage (see comment above).
+  useEffect(() => { setItems(readDraft(slug)); setHydrated(true); }, [slug]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    // Guest QR physical QA regression — without this guard, THIS effect and
+    // the hydrate effect above both run on the same initial-mount flush,
+    // in declaration order. On that first pass `items` is still `[]` (the
+    // hydrate effect's setItems(readDraft(slug)) only SCHEDULES the real
+    // value, it doesn't apply synchronously), so this effect saw an empty
+    // cart and called removeItem — permanently wiping a real, non-empty
+    // draft from storage before the hydrate effect's own value ever
+    // reached the DOM. Skipping until hydration has actually landed (a
+    // render where `hydrated` itself is true) closes that window.
+    if (typeof window === "undefined" || !hydrated) return;
     try {
       if (items.length === 0) window.localStorage.removeItem(storageKey(slug));
       else window.localStorage.setItem(storageKey(slug), JSON.stringify(items));
     } catch {
       // localStorage unavailable (private mode, quota) — draft stays in-memory only for this session.
     }
-  }, [slug, items]);
+  }, [slug, items, hydrated]);
 
   const addItem = useCallback((menuItem: { id: string; name: string; price: string; preparationStation: GuestDraftItem["preparationStation"] }) => {
     setItems((prev) => {
