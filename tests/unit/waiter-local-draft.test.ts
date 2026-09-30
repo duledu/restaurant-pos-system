@@ -155,6 +155,32 @@ describe("instant local draft with delayed network", () => {
     expect(finalItem.modifiers).toEqual(withModifiers.modifiers);
   });
 
+  // P0 GUEST QR IMPORT (physical QA "4->3" regression) — importScannedItems
+  // (order-client.tsx) adds one local line per scanned menu item, then MUST
+  // await draft.flush(false) before the waiter is ever told the import
+  // succeeded (see comment on importScannedItems). This proves the
+  // primitive it relies on: a multi-line import where one line's create
+  // never confirms must never be reported as fully persisted, and a
+  // sibling line that DID succeed must never be discarded just because
+  // another line in the same import batch failed.
+  it("guest import: one failed line among several rejects flush() without discarding the successful lines", async () => {
+    vi.stubGlobal("fetch", vi.fn((_url, options) => {
+      if (options.method !== "POST") return Promise.resolve(response({ item: item() }));
+      const body = JSON.parse(options.body);
+      return body.menuItemId === "cola" ? Promise.reject(new TypeError("offline")) : Promise.resolve(response({ item: item(`real-${body.menuItemId}`, body.menuItemId) }));
+    }));
+    const draft = session();
+    draft.add(menu("omlet"), []);
+    draft.add(menu("ordever"), []);
+    draft.add(menu("cola"), []);
+    expect(draft.pending).toBe(true); // import must not be able to report success yet
+    await expect(draft.flush(false)).rejects.toThrow(); // matches importScannedItems's confirmed = false
+    const names = draft.getSnapshot().order!.items.map(i => i.name);
+    expect(names).toEqual(["omlet", "ordever", "cola"]); // the two real successes are never rolled back...
+    expect(draft.getSnapshot().order!.items.find(i => i.name === "cola")!.localStatus).toBe("failed"); // ...only the failed line is flagged
+    expect(draft.retryable).toBe(true);
+  });
+
   it("failure reconciliation of a confirmed line preserves queued temporary lines", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     const draft = session(); draft.setOrder(previous => ({ ...previous!, items: [item("water", "water", 2)] }));

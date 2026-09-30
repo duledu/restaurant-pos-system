@@ -11,6 +11,15 @@ function money(value: number | string) {
   return Number.isFinite(n) ? PRICE_FORMAT.format(n) : String(value);
 }
 
+// Disambiguates unique menu lines ("artikala") from total quantity ("kom.")
+// — physical QA showed a total-quantity count ("4 stavke") next to a
+// unique-line count ("3 stavki") and it read as lost data. Only shows both
+// numbers when they actually differ (i.e. any line has quantity > 1).
+export function countLabel(lines: number, units: number): string {
+  const artikli = lines === 1 ? "artikal" : "artikla";
+  return lines === units ? `${lines} ${artikli}` : `${lines} ${artikli} · ${units} kom.`;
+}
+
 export interface GuestOrderingLayerProps {
   slug: string;
   restaurantName: string;
@@ -33,6 +42,7 @@ interface FinalizeResult {
   expiresAt: string;
   itemCount: number;
   totalPrice: string;
+  items: unknown[];
 }
 
 async function finalize(slug: string, items: GuestDraftItem[]): Promise<FinalizeResult> {
@@ -141,7 +151,7 @@ function ReviewSheet({
         {draft.items.length > 0 && (
           <div className={styles.sheetFooter}>
             <div className={styles.sheetTotal}>
-              <span>{draft.itemCount} {draft.itemCount === 1 ? "artikal" : "artikla"}</span>
+              <span>{countLabel(draft.items.length, draft.itemCount)}</span>
               <span>{money(draft.totalPrice)} RSD</span>
             </div>
             <button type="button" className={styles.primaryButton} disabled={busy} onClick={submit}>
@@ -182,7 +192,7 @@ function FinalizeResultSheet({ result, restaurantName, onClose, onEdit }: { resu
             {dataUrl && <img src={dataUrl} alt="QR kod porudžbine" width={240} height={240} />}
           </div>
           <div className={styles.resultSummary}>
-            <span>{result.itemCount} {result.itemCount === 1 ? "artikal" : "artikla"}</span>
+            <span>{countLabel(result.items.length, result.itemCount)}</span>
             <span>{money(result.totalPrice)} RSD</span>
           </div>
           <p className={styles.resultExpiry}>Važi još {minutesLeft} min.</p>
@@ -219,14 +229,26 @@ export function GuestOrderingLayer({ slug, restaurantName, orderingMode, setOrde
   return (
     <>
       {draft.itemCount > 0 && !reviewOpen && (
-        <button type="button" className={styles.stickySummary} onClick={() => setReviewOpen(true)}>
-          <span>Porudžbina · {draft.itemCount} {draft.itemCount === 1 ? "artikal" : "artikla"} · {money(draft.totalPrice)} RSD</span>
-          <span aria-hidden="true">→</span>
-        </button>
+        <>
+          {/* Mode toggle — previously ordering mode had NO way back to
+              normal browsing once a draft existed (only the empty-cart case
+              below had one), and no way back INTO ordering mode afterward
+              either. orderingMode only controls the per-row "+ Dodaj"
+              affordances (see public-menu-view.tsx); the draft/summary bar
+              stays reachable either way, so the draft is never lost by
+              toggling this. */}
+          <button type="button" className={styles.exitLink} onClick={() => setOrderingMode(!orderingMode)}>
+            {orderingMode ? "← Nazad na meni" : "+ Dodaj još stavki"}
+          </button>
+          <button type="button" className={styles.stickySummary} onClick={() => setReviewOpen(true)}>
+            <span>Porudžbina · {countLabel(draft.items.length, draft.itemCount)} · {money(draft.totalPrice)} RSD</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </>
       )}
       {draft.itemCount === 0 && orderingMode && (
         <button type="button" className={styles.cta} onClick={() => setOrderingMode(false)}>
-          Otkaži porudžbinu
+          ← Nazad na meni
         </button>
       )}
       {reviewOpen && (

@@ -93,6 +93,13 @@ function CameraView({ onDecoded, onError }: { onDecoded: (token: string) => void
             const result = jsQR(imageData.data, imageData.width, imageData.height);
             if (result?.data && !decodedRef.current) {
               decodedRef.current = true; // guard: never trigger a second decode for the same session
+              // Stop the camera the INSTANT a QR is detected — don't rely on
+              // the parent's later state change + this effect's unmount
+              // cleanup to get around to it. The video element still
+              // unmounts right after (state moves off "camera"), but the
+              // physical camera light/stream must go dark right here.
+              cancelAnimationFrame(raf);
+              stream?.getTracks().forEach((t) => t.stop());
               onDecoded(result.data);
               return;
             }
@@ -125,10 +132,10 @@ function CameraView({ onDecoded, onError }: { onDecoded: (token: string) => void
   );
 }
 
-export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onImport: (items: ScannedGuestOrderItem[]) => { importedCount: number; failedCount: number } }) {
+export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onImport: (items: ScannedGuestOrderItem[]) => Promise<{ importedLines: number; importedCount: number; failedCount: number; confirmed: boolean }> }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<ScanState>({ phase: "camera" });
-  const [importResult, setImportResult] = useState<{ importedCount: number; failedCount: number } | null>(null);
+  const [importResult, setImportResult] = useState<{ importedLines: number; importedCount: number; failedCount: number; confirmed: boolean } | null>(null);
 
   function close() {
     setOpen(false);
@@ -148,10 +155,10 @@ export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onIm
 
   async function confirmImport() {
     if (state.phase !== "reviewing") return;
-    setState({ phase: "claiming" });
+    setState({ phase: "claiming" }); // stays shown while onImport awaits actual persistence, not just the local add
     try {
       const snapshot = await postJson<GuestOrderSnapshot>("/api/pos/guest-handoffs/claim", { token: state.token, tableId });
-      const result = onImport(snapshot.items);
+      const result = await onImport(snapshot.items);
       setImportResult(result);
     } catch (err) {
       setState({ phase: "claim-error", message: (err as Error).message });
@@ -173,7 +180,11 @@ export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onIm
       </button>
       {open && (
         <div role="dialog" aria-modal="true" tabIndex={-1} onKeyDown={onKeyDown} className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-4">
-          <div className="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-lg bg-white shadow-elevated">
+          {/* svh (not vh) — same fix as guest-order.module.css .sheet: plain
+              vh overestimates the visible height on a real mobile browser
+              whose address bar hasn't collapsed yet, which clips/oversizes
+              the modal exactly as reported from a physical Android device. */}
+          <div className="flex max-h-[92svh] w-full max-w-md flex-col overflow-hidden rounded-lg bg-white shadow-elevated">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
               <h2 className="text-base font-bold text-ink">
                 {importResult ? "Dodato na sto" : state.phase === "reviewing" ? "Porudžbina gosta" : "Skeniranje QR koda"}
@@ -183,9 +194,21 @@ export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onIm
             <div className="flex-1 overflow-y-auto p-4">
               {importResult ? (
                 <div className="py-6 text-center">
-                  <p className="text-sm text-ink">
-                    {importResult.importedCount} {importResult.importedCount === 1 ? "stavka je dodata" : "stavki je dodato"} na sto.
-                  </p>
+                  {importResult.confirmed ? (
+                    <p className="text-sm text-ink">
+                      {/* Disambiguates unique menu items from total quantity —
+                          "4 stavke" previously conflated the two and looked
+                          like data loss when e.g. Omlet x2 + 2 others (3
+                          lines, 4 units) rendered as 3 order lines. */}
+                      {importResult.importedLines === importResult.importedCount
+                        ? <>{importResult.importedLines} {importResult.importedLines === 1 ? "stavka je dodata" : "stavki je dodato"} na sto.</>
+                        : <>{importResult.importedLines} {importResult.importedLines === 1 ? "artikal" : "artikla"} dodato na sto — ukupno {importResult.importedCount} kom.</>}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-danger">
+                      Potvrda čuvanja nije stigla za sve stavke. Proverite porudžbinu na stolu — ako nešto nedostaje, koristite „Pokušaj ponovo“ pored porudžbine.
+                    </p>
+                  )}
                   {importResult.failedCount > 0 && (
                     <p className="mt-2 text-sm text-danger">{importResult.failedCount} stavki nije moglo biti dodato — više nisu dostupne. Proverite meni.</p>
                   )}
@@ -229,7 +252,7 @@ export function GuestOrderScanner({ tableId, onImport }: { tableId: string; onIm
               )}
             </div>
             {state.phase === "reviewing" && !importResult && (
-              <div className="flex gap-2 border-t border-line p-4">
+              <div className="flex gap-2 border-t border-line p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
                 <button onClick={close} className="min-h-11 flex-1 rounded-md border border-line text-sm font-medium text-ink hover:bg-cream-100">OTKAŽI</button>
                 <button onClick={confirmImport} className="min-h-11 flex-1 rounded-md bg-gold text-sm font-bold text-white hover:bg-gold-dark">DODAJ NA STO</button>
               </div>

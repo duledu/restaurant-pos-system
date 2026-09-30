@@ -695,8 +695,19 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * blocked at this location) simply fails that line — never partially
    * adds it, never throws, never touches KDS/print/inventory (those only
    * ever happen via the existing, separate, explicit Send Order action).
+   *
+   * The loop above only creates LOCAL optimistic draft rows — each one's
+   * real persistence is a separate POST queued on mutations' strictly
+   * sequential FIFO (waiter-cart-mutations.ts enqueue), not awaited here.
+   * Reporting success before that queue drains let a reload/navigation
+   * silently lose whichever line hadn't been sent yet (the in-memory
+   * queue is wiped on reload; a fresh GET only reflects what actually
+   * reached Postgres). Await the SAME draft.flush() handleSubmit already
+   * awaits before /submit, so "confirmed" here means actually persisted,
+   * not just locally attempted.
    */
-  function importScannedItems(items: ScannedGuestOrderItem[]): { importedCount: number; failedCount: number } {
+  async function importScannedItems(items: ScannedGuestOrderItem[]): Promise<{ importedLines: number; importedCount: number; failedCount: number; confirmed: boolean }> {
+    let importedLines = 0;
     let importedCount = 0;
     let failedCount = 0;
     for (const item of items) {
@@ -704,10 +715,23 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       for (let i = 0; i < item.quantity; i++) {
         if (!addItemWithModifiers(item.menuItemId, [], item.note)) { ok = false; break; }
       }
-      if (ok) importedCount += item.quantity;
+      if (ok) { importedCount += item.quantity; importedLines++; }
       else failedCount += item.quantity;
     }
-    return { importedCount, failedCount };
+    let confirmed = true;
+    try {
+      // false: keep any real failure flagged/retryable via the existing
+      // draft.retryable banner instead of silently acknowledging it here.
+      await draft.flush(false);
+    } catch {
+      confirmed = false;
+    }
+    // importedLines = unique menu items (guest-facing "artikala"); importedCount
+    // = total units/quantity ("komada") — the physical QA "4 stavke / 3 stavke"
+    // confusion was partly this exact ambiguity (an order with e.g. Omlet x2 +
+    // Ordever x1 + Cola x1 is BOTH "3 artikla" and "4 komada", correctly, not a
+    // lost item) — see the wording fix in guest-scan.tsx's success message.
+    return { importedLines, importedCount, failedCount, confirmed };
   }
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa

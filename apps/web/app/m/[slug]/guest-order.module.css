@@ -12,16 +12,42 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 48px;
+  height: 46px;
   padding: 0 22px;
-  border: 0;
-  border-radius: 999px;
+  /* Was a hardcoded 999px "chat bubble" pill regardless of the restaurant's
+     own chosen shape preset (SQUARE/SOFT/ROUNDED — see --menu-radius, used
+     everywhere else: .detail, .closeDetail, .thumbnail...). That mismatch
+     is what read as a generic floating widget rather than part of the
+     menu's own design language. */
+  border: 1px solid color-mix(in srgb, var(--menu-on-primary, #fff) 22%, transparent);
+  border-radius: var(--menu-radius);
   background: var(--menu-primary);
   color: var(--menu-on-primary, #fff);
+  font-family: var(--menu-font-heading);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.01em;
-  box-shadow: 0 8px 24px -6px color-mix(in srgb, var(--menu-primary) 55%, transparent);
+  box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--menu-primary) 45%, transparent);
+}
+
+/* Quiet mode-toggle pill, stacked just above .stickySummary — outlined
+   (not filled) so it stays visually secondary to the summary bar's primary
+   "view order" action. Only rendered while a non-empty draft exists. */
+.exitLink {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 52px + 10px);
+  z-index: 30;
+  height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  background: var(--menu-background, #fff);
+  color: var(--menu-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px -6px rgba(0, 0, 0, 0.2);
 }
 
 .stickySummary {
@@ -39,12 +65,18 @@
   margin: 0 auto;
   max-width: 480px;
   border: 0;
-  border-radius: 14px;
-  background: var(--menu-text);
-  color: var(--menu-background);
+  border-radius: var(--menu-radius);
+  /* Was var(--menu-text)/var(--menu-background) — the theme's plain
+     body-text-on-page colors, not a branded/actionable treatment. On WARM
+     that's a very dark near-black bar with no visual signal that it's
+     tappable, which read as broken/inert rather than as a CTA. Matches the
+     SAME --menu-primary/--menu-on-primary pattern already used by .cta and
+     .primaryButton elsewhere on this page. */
+  background: var(--menu-primary);
+  color: var(--menu-on-primary, #fff);
   font-size: 13.5px;
   font-weight: 600;
-  box-shadow: 0 10px 28px -8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 10px 28px -8px color-mix(in srgb, var(--menu-primary) 45%, transparent);
 }
 .stickySummary span:last-child { font-size: 16px; }
 
@@ -126,15 +158,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 32px;
-  padding: 0 14px;
+  height: 30px;
+  padding: 0 13px;
   margin-top: 8px;
+  /* var(--menu-radius), not a hardcoded 999px pill — same reasoning as
+     .cta above: match the restaurant's own shape language instead of a
+     generic ecommerce "add" pill. Weight/size stay deliberately quiet
+     (outlined, not filled) — price/name/image stay the primary hierarchy,
+     this is a secondary action repeated on every row. */
   border: 1px solid var(--menu-primary);
-  border-radius: 999px;
+  border-radius: var(--menu-radius);
   background: transparent;
   color: var(--menu-primary);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11.5px;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 .detailOrdering { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--menu-border); display: flex; flex-direction: column; gap: 14px; }
