@@ -50,11 +50,18 @@ describe("public menu interactions", () => {
   });
   it("renders real descriptions/prices and a text-only unavailable row without placeholders", async () => {
     await render();
-    const rows = host.querySelectorAll("main button");
-    expect(rows[0].textContent).toContain("Opis iz baze");
-    expect(rows[0].textContent).toContain("890RSD");
-    expect(rows[1].querySelector("img")).toBeNull();
-    expect(rows[1].textContent).toBe("ĆevapiTrenutno nije dostupno650RSD");
+    // Final UX pass — a row's "open detail" button (aria-haspopup="dialog")
+    // is now a leaf-level button wrapping only name/description (never the
+    // whole row) so it can't nest the "+ Dodaj" button; the thumbnail (when
+    // present) is a SEPARATE tabIndex={-1} button, and price is a sibling
+    // of both, not inside either — see MenuRow. One "open detail" button
+    // per row remains a stable "one row = one thing" selector; the
+    // containing .row div is what carries the FULL row text (name + price).
+    const openButtons = host.querySelectorAll('main button[aria-haspopup="dialog"]');
+    expect(openButtons[0].textContent).toContain("Opis iz baze");
+    expect(openButtons[0].closest("div")!.textContent).toContain("890RSD");
+    expect(openButtons[1].closest("div")!.querySelector("img")).toBeNull();
+    expect(openButtons[1].closest("div")!.textContent).toBe("ĆevapiTrenutno nije dostupno650RSD");
     expect(host.querySelector("header img")).toBeNull();
     expect(host.querySelector("h1")!.textContent).toBe("Test restaurant");
   });
@@ -65,12 +72,12 @@ describe("public menu interactions", () => {
     const input = host.querySelector("input")!;
     expect(document.activeElement).toBe(input);
     await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "cevapi"); input.dispatchEvent(new Event("input", { bubbles: true })); });
-    expect(host.querySelectorAll("main button")).toHaveLength(1);
+    expect(host.querySelectorAll('main button[aria-haspopup="dialog"]')).toHaveLength(1);
     expect(host.querySelector('[role="status"]')!.textContent).toBe("Rezultati: 1");
     await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(host.querySelector("input")).toBeNull();
     // The browser-level QA also checks focus after the committed frame.
-    expect(host.querySelectorAll("main button")).toHaveLength(2);
+    expect(host.querySelectorAll('main button[aria-haspopup="dialog"]')).toHaveLength(2);
   });
   it("opens an accessible view-only detail, dismisses on cancel and restores the opener", async () => {
     await render();

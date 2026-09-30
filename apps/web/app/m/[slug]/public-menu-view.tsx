@@ -29,13 +29,15 @@ const DISPLAY: Record<QrTypographyPreset, string> = {
 const PRICE_FORMAT = new Intl.NumberFormat("sr-RS", { maximumFractionDigits: 2 });
 const MODES = [{ id: "KITCHEN", label: "Kuhinja", icon: "kitchen" }, { id: "BAR", label: "Šank", icon: "bar" }] as const;
 
-function Icon({ name }: { name: "search" | "close" | "kitchen" | "bar" | "arrow" }) {
+function Icon({ name }: { name: "search" | "close" | "kitchen" | "bar" | "arrow" | "plus" | "check" }) {
   return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     {name === "search" && <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4.5 4.5" /></>}
     {name === "close" && <path d="m6 6 12 12M6 18 18 6" />}
     {name === "kitchen" && <><path d="M4 3v5a3 3 0 0 0 6 0V3M7 3v18M19 21V3c-4 3-5 7-5 11h5" /></>}
     {name === "bar" && <><path d="M5 3h14l-1 6a6 6 0 0 1-12 0L5 3ZM12 15v6M8 21h8M6 7h12" /></>}
     {name === "arrow" && <path d="M5 12h14m-5-5 5 5-5 5" />}
+    {name === "plus" && <path d="M12 5v14M5 12h14" />}
+    {name === "check" && <path d="M5 12.5 9.5 17 19 7" />}
   </svg>;
 }
 
@@ -59,28 +61,50 @@ function Availability() {
 
 function MenuRow({ item, editorial, onOpen, orderingMode, onAdd }: { item: PublicMenuItem; editorial: boolean; onOpen: () => void; orderingMode: boolean; onAdd: (item: PublicMenuItem) => void }) {
   const [failed, setFailed] = useState<string | null>(null);
+  const [justAdded, setJustAdded] = useState(false);
   const featured = editorial && publicImageSource(item.imageUrl) && failed !== item.imageUrl;
-  return <button type="button" className={`${styles.row} ${featured ? styles.editorial : ""}`} data-available={item.isAvailable} onClick={onOpen} aria-haspopup="dialog">
-    <Photo key={item.imageUrl} src={item.imageUrl} className={styles.thumbnail} onError={() => setFailed(item.imageUrl)} />
+  // Final UX pass — was a role="button" span nested inside the whole row's
+  // own <button> (interactive-in-interactive: a real accessibility defect,
+  // not just a lint nit). Now two independent, leaf-level buttons: the
+  // thumbnail is tabIndex={-1}/aria-hidden (pointer-clickable but not a
+  // redundant second keyboard stop for the SAME "open detail" action the
+  // name/description button already exposes with a real accessible name),
+  // and "+ Dodaj" is its own real <button> with its own label. Grid
+  // position is unchanged — .row is the grid container either way, so
+  // swapping the OUTER element from <button> to <div> doesn't move
+  // anything; only the previously-outer click/keyboard handling moved onto
+  // the inner .dishOpen button.
+  return <div className={`${styles.row} ${featured ? styles.editorial : ""}`} data-available={item.isAvailable}>
+    {publicImageSource(item.imageUrl) && failed !== item.imageUrl && (
+      <button type="button" tabIndex={-1} aria-hidden="true" className={styles.thumbnail} onClick={onOpen}>
+        <Photo key={item.imageUrl} src={item.imageUrl} className={styles.thumbnailImg} onError={() => setFailed(item.imageUrl)} />
+      </button>
+    )}
     <span className={styles.dish}>
-      <span className={styles.dishName}>{item.name}</span>
-      {item.description && <span className={styles.description}>{item.description}</span>}
-      {!item.isAvailable && <Availability />}
-      {featured && <span className={styles.detailHint}>Detalji <Icon name="arrow" /></span>}
+      <button type="button" className={styles.dishOpen} onClick={onOpen} aria-haspopup="dialog" aria-label={`${item.name} — prikaži detalje`}>
+        <span className={styles.dishName}>{item.name}</span>
+        {item.description && <span className={styles.description}>{item.description}</span>}
+        {!item.isAvailable && <Availability />}
+        {featured && <span className={styles.detailHint}>Detalji <Icon name="arrow" /></span>}
+      </button>
       {orderingMode && item.isAvailable && (
-        <span
-          role="button"
-          tabIndex={0}
-          className={orderingStyles.addButton}
-          onClick={(e) => { e.stopPropagation(); onAdd(item); }}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onAdd(item); } }}
+        <button
+          type="button"
+          className={`${orderingStyles.addButton} ${justAdded ? orderingStyles.addButtonActive : ""}`}
+          aria-label={`Dodaj ${item.name} u porudžbinu`}
+          onClick={() => {
+            onAdd(item);
+            setJustAdded(true);
+            window.setTimeout(() => setJustAdded(false), 900);
+          }}
         >
-          + Dodaj
-        </span>
+          <Icon name={justAdded ? "check" : "plus"} />
+          {justAdded ? "Dodato" : "Dodaj"}
+        </button>
       )}
     </span>
     <Price item={item} />
-  </button>;
+  </div>;
 }
 
 function ProductDetail({ item, onClose, orderingMode, onAdd }: { item: PublicMenuItem; onClose: () => void; orderingMode: boolean; onAdd: (item: PublicMenuItem) => void }) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import QRCode from "qrcode";
 import type { GuestDraftItem } from "../../../lib/guest-order-draft";
 import styles from "./guest-order.module.css";
@@ -27,7 +27,7 @@ export interface GuestOrderingLayerProps {
   setOrderingMode: (on: boolean) => void;
   draft: {
     items: GuestDraftItem[];
-    setQuantity: (menuItemId: string, index: number, quantity: number) => void;
+    changeQuantity: (menuItemId: string, index: number, delta: number) => void;
     removeItem: (index: number) => void;
     setNote: (index: number, note: string) => void;
     clear: () => void;
@@ -63,12 +63,17 @@ async function finalize(slug: string, items: GuestDraftItem[]): Promise<Finalize
   return body as FinalizeResult;
 }
 
-function Stepper({ value, max, onChange }: { value: number; max: number; onChange: (next: number) => void }) {
+// onChange takes a DELTA (-1/+1), never an absolute target — see
+// changeQuantity in guest-order-draft.ts for why: resolving the target
+// INSIDE the functional setItems updater (against whatever is actually
+// current at apply time) is what keeps rapid repeated taps correct,
+// instead of every queued tap computing the same stale "value ± 1".
+function Stepper({ value, max, onChange }: { value: number; max: number; onChange: (delta: number) => void }) {
   return (
     <div className={styles.stepper}>
-      <button type="button" aria-label="Smanji količinu" onClick={() => onChange(value - 1)}>−</button>
+      <button type="button" aria-label="Smanji količinu" onClick={() => onChange(-1)}>−</button>
       <span aria-live="polite">{value}</span>
-      <button type="button" aria-label="Povećaj količinu" disabled={value >= max} onClick={() => onChange(value + 1)}>+</button>
+      <button type="button" aria-label="Povećaj količinu" disabled={value >= max} onClick={() => onChange(1)}>+</button>
     </div>
   );
 }
@@ -86,10 +91,21 @@ function ReviewSheet({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const headingId = useId();
 
-  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (e.key === "Escape") { e.stopPropagation(); onClose(); }
-  }
+  // Native <dialog> — same proven pattern as ProductDetail
+  // (public-menu-view.tsx): showModal gives a REAL focus trap and
+  // Escape-as-cancel for free, instead of a hand-rolled keydown handler on
+  // a styled div. onCancel intercepts Escape so we still control state
+  // (setReviewOpen) rather than letting the dialog close itself first.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const previousOverflow = document.body.style.overflow;
+    dialog?.showModal();
+    document.body.style.overflow = "hidden";
+    return () => { dialog?.close(); document.body.style.overflow = previousOverflow; };
+  }, []);
 
   async function submit() {
     setBusy(true);
@@ -105,101 +121,107 @@ function ReviewSheet({
   }
 
   return (
-    <div
-      className={styles.overlay}
-      onClick={onClose}
-      onKeyDown={onKeyDown}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="guest-review-title"
-      tabIndex={-1}
+    <dialog
+      ref={dialogRef}
+      className={styles.sheet}
+      aria-labelledby={headingId}
+      onCancel={(e) => { e.preventDefault(); onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className={styles.sheet} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.sheetHeader}>
-          <h2 id="guest-review-title">Tvoja porudžbina</h2>
-          <button type="button" aria-label="Zatvori" autoFocus onClick={onClose}>✕</button>
-        </div>
-        <div className={styles.sheetBody}>
-          {draft.items.length === 0 ? (
-            <p className={styles.empty}>Porudžbina je prazna.</p>
-          ) : (
-            <ul className={styles.reviewList}>
-              {draft.items.map((item, index) => (
-                <li key={`${item.menuItemId}-${index}`} className={styles.reviewRow}>
-                  <div className={styles.reviewRowTop}>
-                    <span className={styles.reviewName}>{item.name}</span>
-                    <span className={styles.reviewLineTotal}>{money(Number(item.price) * item.quantity)} RSD</span>
-                  </div>
-                  <div className={styles.reviewRowControls}>
-                    <Stepper value={item.quantity} max={20} onChange={(next) => draft.setQuantity(item.menuItemId, index, next)} />
-                    <button type="button" className={styles.removeLink} onClick={() => draft.removeItem(index)}>Ukloni</button>
-                  </div>
-                  <input
-                    type="text"
-                    value={item.note}
-                    onChange={(e) => draft.setNote(index, e.target.value)}
-                    placeholder="Napomena (npr. bez luka)"
-                    maxLength={draft.maxNoteLength}
-                    className={styles.noteInput}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
-          {error && <p className={styles.error}>{error}</p>}
-        </div>
-        {draft.items.length > 0 && (
-          <div className={styles.sheetFooter}>
-            <div className={styles.sheetTotal}>
-              <span>{countLabel(draft.items.length, draft.itemCount)}</span>
-              <span>{money(draft.totalPrice)} RSD</span>
-            </div>
-            <button type="button" className={styles.primaryButton} disabled={busy} onClick={submit}>
-              {busy ? "Kreiranje…" : "ZAVRŠI PORUDŽBINU"}
-            </button>
-          </div>
-        )}
+      <div className={styles.sheetHeader}>
+        <h2 id={headingId}>Tvoja porudžbina</h2>
+        <button type="button" aria-label="Zatvori" autoFocus onClick={onClose}>✕</button>
       </div>
-    </div>
+      <div className={styles.sheetBody}>
+        {draft.items.length === 0 ? (
+          <p className={styles.empty}>Porudžbina je prazna.</p>
+        ) : (
+          <ul className={styles.reviewList}>
+            {draft.items.map((item, index) => (
+              <li key={`${item.menuItemId}-${index}`} className={styles.reviewRow}>
+                <div className={styles.reviewRowTop}>
+                  <span className={styles.reviewName}>{item.name}</span>
+                  <span className={styles.reviewLineTotal}>{money(Number(item.price) * item.quantity)} RSD</span>
+                </div>
+                <div className={styles.reviewRowControls}>
+                  <Stepper value={item.quantity} max={20} onChange={(delta) => draft.changeQuantity(item.menuItemId, index, delta)} />
+                  <button type="button" className={styles.removeLink} onClick={() => draft.removeItem(index)}>Ukloni</button>
+                </div>
+                <input
+                  type="text"
+                  value={item.note}
+                  onChange={(e) => draft.setNote(index, e.target.value)}
+                  placeholder="Napomena uz stavku (npr. bez luka)"
+                  maxLength={draft.maxNoteLength}
+                  className={styles.noteInput}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        {error && <p className={styles.error}>{error}</p>}
+      </div>
+      {draft.items.length > 0 && (
+        <div className={styles.sheetFooter}>
+          <div className={styles.sheetTotal}>
+            <span>{countLabel(draft.items.length, draft.itemCount)}</span>
+            <span>{money(draft.totalPrice)} RSD</span>
+          </div>
+          <button type="button" className={styles.primaryButton} disabled={busy} onClick={submit}>
+            {busy ? "Kreiranje…" : "ZAVRŠI PORUDŽBINU"}
+          </button>
+        </div>
+      )}
+    </dialog>
   );
 }
 
 function FinalizeResultSheet({ result, restaurantName, onClose, onEdit }: { result: FinalizeResult; restaurantName: string; onClose: () => void; onEdit: () => void }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const minutesLeft = Math.max(0, Math.round((new Date(result.expiresAt).getTime() - Date.now()) / 60000));
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const headingId = useId();
 
   useEffect(() => {
     let cancelled = false;
-    QRCode.toDataURL(result.token, { width: 320, margin: 1 }).then((url) => { if (!cancelled) setDataUrl(url); });
+    QRCode.toDataURL(result.token, { width: 360, margin: 2 }).then((url) => { if (!cancelled) setDataUrl(url); });
     return () => { cancelled = true; };
   }, [result.token]);
 
-  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (e.key === "Escape") { e.stopPropagation(); onClose(); }
-  }
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const previousOverflow = document.body.style.overflow;
+    dialog?.showModal();
+    document.body.style.overflow = "hidden";
+    return () => { dialog?.close(); document.body.style.overflow = previousOverflow; };
+  }, []);
 
   return (
-    <div className={styles.overlay} role="dialog" aria-modal="true" aria-labelledby="guest-result-title" tabIndex={-1} onKeyDown={onKeyDown}>
-      <div className={styles.sheet} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.sheetHeader}>
-          <h2 id="guest-result-title">Porudžbina je spremna</h2>
-          <button type="button" aria-label="Zatvori" onClick={onClose}>✕</button>
-        </div>
-        <div className={`${styles.sheetBody} ${styles.resultBody}`}>
-          <p className={styles.resultLead}>Pokažite ovaj QR kod konobaru — {restaurantName}</p>
-          <div className={styles.qrFrame}>
-            {/* eslint-disable-next-line @next/next/no-img-element -- locally-generated data: URL, next/image doesn't apply */}
-            {dataUrl && <img src={dataUrl} alt="QR kod porudžbine" width={240} height={240} />}
-          </div>
-          <div className={styles.resultSummary}>
-            <span>{countLabel(result.items.length, result.itemCount)}</span>
-            <span>{money(result.totalPrice)} RSD</span>
-          </div>
-          <p className={styles.resultExpiry}>Važi još {minutesLeft} min.</p>
-          <button type="button" className={styles.secondaryButton} onClick={onEdit}>Izmeni porudžbinu</button>
-        </div>
+    <dialog
+      ref={dialogRef}
+      className={styles.sheet}
+      aria-labelledby={headingId}
+      onCancel={(e) => { e.preventDefault(); onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className={styles.sheetHeader}>
+        <h2 id={headingId}>Porudžbina je spremna</h2>
+        <button type="button" aria-label="Zatvori" onClick={onClose}>✕</button>
       </div>
-    </div>
+      <div className={`${styles.sheetBody} ${styles.resultBody}`}>
+        <p className={styles.resultLead}>Pokažite ovaj QR kod konobaru — {restaurantName}</p>
+        <div className={styles.qrFrame}>
+          {/* eslint-disable-next-line @next/next/no-img-element -- locally-generated data: URL, next/image doesn't apply */}
+          {dataUrl && <img src={dataUrl} alt="QR kod porudžbine" width={252} height={252} />}
+        </div>
+        <div className={styles.resultSummary}>
+          <span>{countLabel(result.items.length, result.itemCount)}</span>
+          <span>{money(result.totalPrice)} RSD</span>
+        </div>
+        <p className={styles.resultExpiry}>Važi još {minutesLeft} min.</p>
+        <button type="button" className={styles.secondaryButton} onClick={onEdit}>Izmeni porudžbinu</button>
+      </div>
+    </dialog>
   );
 }
 

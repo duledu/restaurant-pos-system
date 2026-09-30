@@ -99,10 +99,25 @@ export function useGuestOrderDraft(slug: string) {
     });
   }, []);
 
-  const setQuantity = useCallback((menuItemId: string, index: number, quantity: number) => {
+  // Final UX pass — was setQuantity(id, index, absoluteTarget), with the
+  // Stepper's +/- buttons computing that target from their OWN `value`
+  // prop (value - 1 / value + 1). Several rapid taps landing before React
+  // re-renders all read the SAME stale `value`, so they all computed the
+  // SAME target — one decrement registered no matter how many taps
+  // actually happened. A relative delta resolved INSIDE the functional
+  // setItems updater is safe under rapid taps by construction: React
+  // guarantees each queued functional update receives the previous one's
+  // OUTPUT, never a stale snapshot, so N taps always apply N decrements.
+  const changeQuantity = useCallback((menuItemId: string, index: number, delta: number) => {
     setItems((prev) => {
-      if (quantity <= 0) return prev.filter((_, i) => !(i === index && prev[i].menuItemId === menuItemId));
-      return prev.map((item, i) => (i === index && item.menuItemId === menuItemId ? { ...item, quantity: Math.min(MAX_QUANTITY, quantity) } : item));
+      const current = prev[index];
+      // Guard, not just optimization: if an earlier queued update in this
+      // same batch already removed this line, `index` may now point at a
+      // DIFFERENT item that slid into its place — never decrement that one.
+      if (current?.menuItemId !== menuItemId) return prev;
+      const next = current.quantity + delta;
+      if (next <= 0) return prev.filter((_, i) => i !== index);
+      return prev.map((item, i) => (i === index ? { ...item, quantity: Math.min(MAX_QUANTITY, next) } : item));
     });
   }, []);
 
@@ -119,5 +134,5 @@ export function useGuestOrderDraft(slug: string) {
   const itemCount = useMemo(() => items.reduce((sum, i) => sum + i.quantity, 0), [items]);
   const totalPrice = useMemo(() => items.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0), [items]);
 
-  return { items, addItem, setQuantity, removeItem, setNote, clear, itemCount, totalPrice, maxNoteLength: MAX_NOTE_LENGTH, maxQuantity: MAX_QUANTITY };
+  return { items, addItem, changeQuantity, removeItem, setNote, clear, itemCount, totalPrice, maxNoteLength: MAX_NOTE_LENGTH, maxQuantity: MAX_QUANTITY };
 }

@@ -80,22 +80,22 @@
 }
 .stickySummary span:last-child { font-size: 16px; }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  background: rgba(13, 11, 9, 0.55);
-  backdrop-filter: blur(4px);
-}
-@media (min-width: 640px) { .overlay { align-items: center; } }
-
+/* Final UX pass — .sheet is now the native <dialog> element itself
+   (showModal/close, real focus trap, native Escape-as-cancel), matching
+   the SAME proven pattern ProductDetail (public-menu.module.css .detail)
+   already uses, instead of a hand-rolled role="dialog" div. Consistency +
+   real accessibility semantics (focus trap, top-layer stacking) neither a
+   styled div nor a manual keydown handler can fully replicate. */
 .sheet {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 50;
   width: 100%;
   max-width: 480px;
   max-height: 88svh;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
   display: flex;
   flex-direction: column;
   background: var(--menu-background, #fff);
@@ -103,7 +103,10 @@
   border-radius: 18px 18px 0 0;
   overflow: hidden;
 }
-@media (min-width: 640px) { .sheet { border-radius: 16px; max-height: 80svh; } }
+.sheet::backdrop { background: rgba(13, 11, 9, 0.55); backdrop-filter: blur(4px); }
+@media (min-width: 640px) {
+  .sheet { inset: 0; margin: auto; height: fit-content; border-radius: 16px; max-height: 80svh; }
+}
 
 .sheetHeader {
   display: flex;
@@ -157,10 +160,13 @@
   flex: none;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 30px;
-  padding: 0 13px;
-  margin-top: 8px;
+  gap: 5px;
+  /* 44px tap target even though the visible pill is shorter — padding
+     carries the extra hit-area rather than inflating the pill itself, so
+     it stays visually quiet while still meeting the touch-target minimum. */
+  min-height: 44px;
+  padding: 8px 13px;
+  margin: -7px -13px 1px;
   /* var(--menu-radius), not a hardcoded 999px pill — same reasoning as
      .cta above: match the restaurant's own shape language instead of a
      generic ecommerce "add" pill. Weight/size stay deliberately quiet
@@ -174,6 +180,14 @@
   font-weight: 600;
   letter-spacing: 0.02em;
 }
+.addButton svg { width: 14px; height: 14px; }
+.addButton:active { background: color-mix(in srgb, var(--menu-primary) 10%, transparent); }
+.addButtonActive { border-color: var(--menu-primary); background: var(--menu-primary); color: var(--menu-on-primary, #fff); }
+@media (prefers-reduced-motion: no-preference) {
+  .addButton { transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease, transform 120ms ease; }
+  .addButton:active { transform: scale(0.96); }
+}
+
 .detailOrdering { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--menu-border); display: flex; flex-direction: column; gap: 14px; }
 .detailOrderingRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
