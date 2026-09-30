@@ -5,7 +5,10 @@ import { Playfair_Display, Inter, Outfit, Cormorant_Garamond, Fredoka } from "ne
 import { resolveQrMenuTheme, type QrTypographyPreset } from "@rcs/shared";
 import type { PublicMenuItem, PublicMenuPayload } from "@rcs/domain/qrmenu/qr-menu-service";
 import { editorialItemId, filterPublicMenu, publicImageSource, type MenuMode } from "../../../lib/public-menu";
+import { useGuestOrderDraft } from "../../../lib/guest-order-draft";
+import { GuestOrderingLayer } from "./guest-order";
 import styles from "./public-menu.module.css";
+import orderingStyles from "./guest-order.module.css";
 
 export type { PublicMenuPayload } from "@rcs/domain/qrmenu/qr-menu-service";
 
@@ -42,7 +45,7 @@ function Photo({ src, className, eager = false, onError }: { src: string | null;
   if (!source || failedSource === source) return null;
   // Deliberately browser-fetched. No remote Next Image optimizer / SSRF surface.
   // eslint-disable-next-line @next/next/no-img-element
-  return <img src={source} alt="" width={800} height={600} loading={eager ? "eager" : "lazy"} decoding="async" {...{ fetchpriority: eager ? "high" : "auto" }} className={className} onError={() => { setFailedSource(source); onError?.(); }} />;
+  return <img src={source} alt="" width={800} height={600} loading={eager ? "eager" : "lazy"} decoding="async" {...{ fetchPriority: eager ? "high" : "auto" }} className={className} onError={() => { setFailedSource(source); onError?.(); }} />;
 }
 
 function Price({ item }: { item: PublicMenuItem }) {
@@ -54,7 +57,7 @@ function Availability() {
   return <span className={styles.availability}>Trenutno nije dostupno</span>;
 }
 
-function MenuRow({ item, editorial, onOpen }: { item: PublicMenuItem; editorial: boolean; onOpen: () => void }) {
+function MenuRow({ item, editorial, onOpen, orderingMode, onAdd }: { item: PublicMenuItem; editorial: boolean; onOpen: () => void; orderingMode: boolean; onAdd: (item: PublicMenuItem) => void }) {
   const [failed, setFailed] = useState<string | null>(null);
   const featured = editorial && publicImageSource(item.imageUrl) && failed !== item.imageUrl;
   return <button type="button" className={`${styles.row} ${featured ? styles.editorial : ""}`} data-available={item.isAvailable} onClick={onOpen} aria-haspopup="dialog">
@@ -64,14 +67,26 @@ function MenuRow({ item, editorial, onOpen }: { item: PublicMenuItem; editorial:
       {item.description && <span className={styles.description}>{item.description}</span>}
       {!item.isAvailable && <Availability />}
       {featured && <span className={styles.detailHint}>Detalji <Icon name="arrow" /></span>}
+      {orderingMode && item.isAvailable && (
+        <span
+          role="button"
+          tabIndex={0}
+          className={orderingStyles.addButton}
+          onClick={(e) => { e.stopPropagation(); onAdd(item); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onAdd(item); } }}
+        >
+          + Dodaj
+        </span>
+      )}
     </span>
     <Price item={item} />
   </button>;
 }
 
-function ProductDetail({ item, onClose }: { item: PublicMenuItem; onClose: () => void }) {
+function ProductDetail({ item, onClose, orderingMode, onAdd }: { item: PublicMenuItem; onClose: () => void; orderingMode: boolean; onAdd: (item: PublicMenuItem) => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingId = useId();
+  const [added, setAdded] = useState(false);
   useEffect(() => {
     const dialog = dialogRef.current;
     const opener = document.activeElement as HTMLElement | null;
@@ -90,12 +105,23 @@ function ProductDetail({ item, onClose }: { item: PublicMenuItem; onClose: () =>
         {item.description && <p className={styles.detailDescription}>{item.description}</p>}
         {!item.isAvailable && <Availability />}
         <Price item={item} />
+        {orderingMode && item.isAvailable && (
+          <div className={orderingStyles.detailOrdering}>
+            <button
+              type="button"
+              className={orderingStyles.primaryButton}
+              onClick={() => { onAdd(item); setAdded(true); }}
+            >
+              {added ? "Dodato ✓" : "+ Dodaj u porudžbinu"}
+            </button>
+          </div>
+        )}
       </div>
     </article>
   </dialog>;
 }
 
-export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
+export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: string }) {
   const { restaurant, theme, table, categories } = menu;
   const instanceId = useId().replace(/:/g, "");
   const tokens = useMemo(() => resolveQrMenuTheme(theme), [theme]);
@@ -104,6 +130,16 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [openItem, setOpenItem] = useState<PublicMenuItem | null>(null);
+  // P0 GUEST QR ORDERING — normal browsing stays read-only by default
+  // (spec). `orderingMode` only ever flips to true via the "+ Kreiraj
+  // porudžbinu" CTA, or automatically if the guest already has a
+  // (localStorage-persisted) non-empty draft from before a refresh.
+  const draft = useGuestOrderDraft(slug);
+  const [orderingMode, setOrderingMode] = useState(false);
+  useEffect(() => { if (draft.items.length > 0) setOrderingMode(true); }, [draft.items.length]);
+  function addToGuestDraft(item: PublicMenuItem) {
+    draft.addItem({ id: item.id, name: item.name, price: item.price, preparationStation: item.preparationStation });
+  }
   const [failedCover, setFailedCover] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLDivElement>(null);
@@ -215,12 +251,13 @@ export function PublicMenuView({ menu }: { menu: PublicMenuPayload }) {
             <span className={styles.categoryCount}>{category.items.length} <span>u ponudi</span></span>
           </div>
           <div className={styles.dishes}>
-            {category.items.map(item => <MenuRow key={item.id} item={item} editorial={item.id === editorialId} onOpen={() => setOpenItem(item)} />)}
+            {category.items.map(item => <MenuRow key={item.id} item={item} editorial={item.id === editorialId} onOpen={() => setOpenItem(item)} orderingMode={orderingMode} onAdd={addToGuestDraft} />)}
           </div>
         </section>;
       })}
     </main>
     <footer className={styles.footer}><span className={styles.footerMark} aria-hidden="true" /><p>{restaurant.name}</p><span>Hvala što ste naši gosti.</span></footer>
-    {openItem && <ProductDetail item={openItem} onClose={() => setOpenItem(null)} />}
+    {openItem && <ProductDetail item={openItem} onClose={() => setOpenItem(null)} orderingMode={orderingMode} onAdd={addToGuestDraft} />}
+    <GuestOrderingLayer slug={slug} restaurantName={restaurant.name} orderingMode={orderingMode} setOrderingMode={setOrderingMode} draft={draft} />
   </div>;
 }

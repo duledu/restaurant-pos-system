@@ -34,5 +34,5 @@ export default async function PublicMenuPage({ params, searchParams }: PageProps
   const { t } = await searchParams;
   const menu = await loadMenu(slug, t ?? null);
   if (!menu) notFound();
-  return <PublicMenuView menu={menu} />;
+  return <PublicMenuView menu={menu} slug={slug} />;
 }

@@ -15,3 +15,4 @@ export * from "./promotion-schedule";
 export * from "./reservation-schemas";
 export * from "./qr-menu-schemas";
 export * from "./qr-menu-theme";
+export * from "./guest-order-schemas";

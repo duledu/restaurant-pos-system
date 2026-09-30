@@ -11,6 +11,7 @@ export * as promotions from "./promotions/promotion-service";
 export * as reservations from "./reservations/reservation-service";
 export * as qrMenu from "./qrmenu/qr-menu-service";
 export * as media from "./media/image-service";
+export * as guestOrdering from "./guestordering/guest-order-service";
 export * as shifts from "./shifts/shift-service";
 export * as tables from "./tables/table-service";
 export * as tableOwnership from "./tables/ownership-transfer-service";

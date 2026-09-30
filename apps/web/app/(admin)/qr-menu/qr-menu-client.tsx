@@ -337,7 +337,7 @@ export function QrMenuClient() {
       <div className="lg:sticky lg:top-4 lg:self-start">
         <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-ink/50">Mobilni pregled</h2>
         <div className="mx-auto w-full max-w-[380px] overflow-hidden rounded-[2rem] border-8 border-ink/80 bg-black shadow-elevated">
-          <div className="h-[680px] overflow-y-auto">{previewMenu && <PublicMenuView menu={previewMenu} />}</div>
+          <div className="h-[680px] overflow-y-auto">{previewMenu && <PublicMenuView menu={previewMenu} slug={settings.slug ?? "pregled"} />}</div>
         </div>
       </div>
 

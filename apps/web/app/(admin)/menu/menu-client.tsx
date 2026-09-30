@@ -20,6 +20,7 @@ interface MenuItem {
   slug: string;
   price: string;
   imageUrl: string | null;
+  description: string | null;
   quantity: string | null;
   unit: string | null;
   preparationStation: "KITCHEN" | "BAR" | "KITCHEN_AND_BAR" | "NONE";
@@ -902,6 +903,89 @@ function ItemPhotoButton({ item, onChanged }: { item: { id: string; name: string
   );
 }
 
+// ── P0 GUEST QR ORDERING — public description (item detail sheet) ───────────────
+// Reuses MenuItem.description, already selected/returned by getPublicMenu —
+// this is purely the missing Admin edit surface for a field the backend and
+// public menu already fully support end-to-end.
+
+const DESCRIPTION_MAX = 1000;
+
+function DescriptionModal({ item, onClose, onChanged }: { item: { id: string; name: string; description: string | null }; onClose: () => void; onChanged: (description: string | null) => void }) {
+  const [draft, setDraft] = useState(item.description ?? "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+  }
+
+  async function save() {
+    setSaving(true);
+    setErr("");
+    try {
+      const res = await fetch(`/api/admin/menu/items/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: draft.trim() || null }),
+      });
+      const j = await res.json();
+      if (!res.ok) { setErr(j.error ?? "Greška"); return; }
+      onChanged(draft.trim() || null);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 sm:items-center sm:p-4"
+      onClick={onClose}
+      onKeyDown={onKeyDown}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+    >
+      <div className="w-full rounded-t-lg bg-white p-5 shadow-elevated sm:max-w-md sm:rounded-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h2 className="text-lg font-bold text-ink">Opis za QR meni — {item.name}</h2>
+          <button onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center text-ink/50 hover:text-ink" aria-label="Zatvori">✕</button>
+        </div>
+        <p className="mb-3 text-xs text-ink/50">Prikazuje se gostima u digitalnom meniju.</p>
+        <textarea
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value.slice(0, DESCRIPTION_MAX))}
+          placeholder="Svinjsko meso, kajmak, prezle, jaje, brašno."
+          rows={4}
+          className="w-full resize-none rounded-md border border-line px-3 py-2 text-sm"
+        />
+        <p className="mt-1 text-right text-[11px] text-ink/40">{draft.length}/{DESCRIPTION_MAX}</p>
+        {err && <p className="mb-2 text-sm text-danger">{err}</p>}
+        <button onClick={save} disabled={saving} className="mt-2 w-full min-h-11 rounded-md bg-gold px-4 text-sm font-medium text-white transition-colors hover:bg-gold-dark disabled:opacity-40">
+          {saving ? "Čuvanje…" : "Sačuvaj"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DescriptionButton({ item, onChanged }: { item: { id: string; name: string; description: string | null }; onChanged: (description: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className={`rounded-full px-2.5 py-1 font-medium transition-colors ${item.description ? "bg-gold-soft text-gold-dark hover:bg-gold/20" : "bg-cream-200 text-ink/55 hover:bg-cream-300"}`}
+        title={item.description ? "Izmeni opis za QR meni" : "Dodaj opis za QR meni"}
+      >
+        Opis
+      </button>
+      {open && <DescriptionModal item={item} onClose={() => setOpen(false)} onChanged={onChanged} />}
+    </>
+  );
+}
+
 // ── ItemRow ───────────────────────────────────────────────────────────────────
 
 function ItemRow({
@@ -1085,6 +1169,7 @@ function ItemRow({
       <td className="px-4 py-2.5">
         <div className="flex items-center gap-2.5 text-xs">
           <ItemPhotoButton item={item} onChanged={refresh} />
+          <DescriptionButton item={item} onChanged={refresh} />
           <RecipeButton item={item} readOnly={!canManageRecipes} onChanged={refresh} emphasis={item.inventoryTrackingMethod === "RECIPE"} />
           {item.inventoryTrackingMethod === "DIRECT_STOCK" && (
             <DirectStockButton item={item} readOnly={!canManageRecipes} onChanged={refresh} />

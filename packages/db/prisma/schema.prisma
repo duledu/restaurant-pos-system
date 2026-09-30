@@ -108,6 +108,7 @@ model Restaurant {
   promotions          Promotion[]
   reservations        Reservation[]
   qrMenuSettings      QrMenuSettings?
+  guestOrderHandoffs  GuestOrderHandoff[]
 
   @@index([tenantId])
   @@index([status])
@@ -2337,4 +2338,88 @@ model InventoryCountLine {
   @@index([ingredientId])
   @@index([menuItemId])
   @@map("inventory_count_lines")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// P0 GUEST QR ORDERING — guest browses the existing public menu, builds a
+// LOCAL (client-only, never server-persisted) draft, and only on finalize
+// does the server create this snapshot: a stable, price/name-authoritative
+// copy of the items the guest wants, addressable ONLY via an opaque,
+// high-entropy token (never the row id) shown as a QR code. The guest can
+// never reach Order/KDS/printing/payment/inventory directly — a waiter
+// must scan this, review it, and explicitly import it into the EXISTING
+// Instant Local Draft (apps/web/lib/waiter-local-draft.ts), which is what
+// actually creates OrderItem rows — this table is never joined into that
+// flow, it exists only to carry a reviewable snapshot from guest to waiter.
+//
+// TOKEN: raw token has 256 bits of entropy (randomBytes(32)), lives ONLY in
+// the QR/URL — never persisted. `tokenHash` (SHA-256 hex of the raw token)
+// is the only thing stored, so a database read/leak alone can never yield
+// a usable token (mirrors the login-throttle module's hashing precedent;
+// deliberately NOT reusing RestaurantTable.publicQrToken's plaintext
+// convention — that token only ever unlocks a table LABEL for display, this
+// one unlocks a reviewable, importable order draft, a meaningfully higher
+// stake).
+//
+// CLAIM ATOMICITY: claiming is a single conditional UPDATE (status must
+// still be PENDING, or already CLAIMED by the SAME table — see
+// guest-order-service.ts claimGuestOrderHandoff) — Postgres guarantees only
+// one concurrent request can flip PENDING -> CLAIMED, no application-level
+// lock needed. SCAN reviews (readGuestOrderHandoff) never mutate status —
+// only the confirmed "DODAJ NA STO" transition claims.
+model GuestOrderHandoff {
+  id           String                  @id @default(uuid())
+  restaurantId String
+  tokenHash    String                  @unique
+  status       GuestOrderHandoffStatus @default(PENDING)
+
+  // Snapshot totals, computed server-side at finalize — never trusted from
+  // the guest's client-side draft.
+  itemCount  Int
+  totalPrice Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  claimedAt DateTime?
+
+  // Populated only once claimed. Plain ids (no @relation) — same convention
+  // as InventoryCountLine.menuItemId above: display/audit only, resolved via
+  // a batched lookup where needed, never via a Prisma include chain back
+  // from Employee/RestaurantTable/Order onto this comparatively low-stakes,
+  // short-lived row.
+  claimedByEmployeeId String?
+  claimedTableId      String?
+
+  restaurant Restaurant              @relation(fields: [restaurantId], references: [id])
+  items      GuestOrderHandoffItem[]
+
+  @@index([restaurantId])
+  @@index([status, expiresAt])
+  @@map("guest_order_handoffs")
+}
+
+enum GuestOrderHandoffStatus {
+  PENDING
+  CLAIMED
+  EXPIRED
+}
+
+model GuestOrderHandoffItem {
+  id         String @id @default(uuid())
+  handoffId  String
+  menuItemId String // plain id, see GuestOrderHandoff doc comment above
+
+  // Authoritative snapshot, re-read from MenuItem at finalize — the guest's
+  // client never supplies name/price/station, only menuItemId+quantity+note.
+  nameSnapshot       String
+  priceSnapshot      Decimal            @db.Decimal(12, 2)
+  preparationStation PreparationStation
+  quantity           Int
+  note               String?
+  sortOrder          Int                @default(0)
+
+  handoff GuestOrderHandoff @relation(fields: [handoffId], references: [id], onDelete: Cascade)
+
+  @@index([handoffId])
+  @@map("guest_order_handoff_items")
 }

@@ -37,6 +37,11 @@ const PUBLIC_API_PATHS = new Set([
   "/api/auth/staff-directory",
   "/api/device/personal-register",
   "/api/device/check",
+  // P0 GUEST QR ORDERING — the ONE public write a guest can reach; slug is
+  // in the request BODY (never the URL) so no dynamic-segment pattern is
+  // needed here, unlike /m/[slug] above. Never creates an Order/KDS/
+  // PrintJob/Payment/InventoryMovement — see guest-order-service.ts.
+  "/api/public/qr-menu/finalize",
 ]);
 
 // Faza 2A/2B — TableCore Print Agent: SVAKA /api/agent/** ruta autentifikuje

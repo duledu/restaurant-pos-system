@@ -9,6 +9,7 @@ import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
 import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "../../../../lib/waiter-performance";
 import { useWaiterShell } from "../../../../lib/waiter-shell";
+import { GuestOrderScanner, type ScannedGuestOrderItem } from "./guest-scan";
 
 import { mergeWaiterMenu, menuSectionsForItem, type MenuItem, type MenuSection, type ModifierGroup } from "../../../../lib/waiter-menu";
 import { previewEffectivePrice, usePromotionClock, type PricePreview } from "../../../../lib/promotion-preview";
@@ -682,6 +683,33 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     return true;
   }
 
+  /**
+   * P0 GUEST QR ORDERING — the ONE place a scanned guest handoff's items
+   * reach the EXISTING Instant Local Draft. Deliberately calls
+   * addItemWithModifiers per unit (never a bespoke bulk-insert path) so
+   * every existing invariant it already enforces — live availability
+   * lookup via itemById, the DRAFT merge-by-match logic, the 50-unit cap —
+   * applies identically to an imported line as to a manually tapped one.
+   * A line whose menu item is missing/unavailable by the time the waiter
+   * confirms the import (deleted/deactivated since the guest finalized, or
+   * blocked at this location) simply fails that line — never partially
+   * adds it, never throws, never touches KDS/print/inventory (those only
+   * ever happen via the existing, separate, explicit Send Order action).
+   */
+  function importScannedItems(items: ScannedGuestOrderItem[]): { importedCount: number; failedCount: number } {
+    let importedCount = 0;
+    let failedCount = 0;
+    for (const item of items) {
+      let ok = true;
+      for (let i = 0; i < item.quantity; i++) {
+        if (!addItemWithModifiers(item.menuItemId, [], item.note)) { ok = false; break; }
+      }
+      if (ok) importedCount += item.quantity;
+      else failedCount += item.quantity;
+    }
+    return { importedCount, failedCount };
+  }
+
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa
    * dodataka (specifikacija #10), inače otvara ModifierSelectionModal. */
   /** P1.7: recorded stock (any level — negative, zero, low) NEVER blocks a
@@ -1006,6 +1034,12 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             <QuickLockButton />
             <LogoutButton />
           </div>
+        </div>
+        {/* P0 GUEST QR ORDERING — the waiter has already selected THIS table
+            (order.table.label above) before scanning; the guest QR never
+            decides the table (spec). */}
+        <div className="mt-2">
+          <GuestOrderScanner tableId={tableId} onImport={importScannedItems} />
         </div>
       </div>
 
