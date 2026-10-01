@@ -202,6 +202,28 @@ function toSnapshot(handoff: { itemCount: number; totalPrice: unknown; items: Ar
   };
 }
 
+export type GuestOrderHandoffStatus = "PENDING" | "CLAIMED" | "EXPIRED";
+
+/**
+ * PUBLIC — no AuthContext, same trust level as finalizeGuestOrder. Final
+ * UX pass (new required lifecycle, physical QA) — the guest's QR-ready
+ * screen polls this while visible so it can learn the waiter actually
+ * accepted the order, instead of staying on a stale "show this to your
+ * waiter" screen forever. Deliberately minimal: status only, never table,
+ * items, or price — a guest polling this never needs or should see more
+ * than "still waiting" / "taken" / "expired". tokenHash is a unique lookup
+ * on 256 bits of entropy (randomBytes(32) at finalize) — safe to resolve
+ * with no restaurant scoping, same reasoning as the token itself.
+ */
+export async function checkGuestOrderHandoffStatus(token: string): Promise<GuestOrderHandoffStatus> {
+  const tokenHash = hashToken(token);
+  const handoff = await prisma.guestOrderHandoff.findUnique({ where: { tokenHash }, select: { status: true, expiresAt: true } });
+  if (!handoff) return "EXPIRED"; // unknown token reads identically to a consumed/expired one — no enumeration signal
+  if (handoff.status === "CLAIMED") return "CLAIMED";
+  if (handoff.status === "EXPIRED" || handoff.expiresAt.getTime() <= Date.now()) return "EXPIRED";
+  return "PENDING";
+}
+
 /**
  * WAITER, read-only — "SCAN ≠ CLAIM" (spec). Never mutates status. Safe to
  * call repeatedly (e.g. re-opening the review sheet), including by multiple

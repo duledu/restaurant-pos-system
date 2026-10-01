@@ -176,8 +176,11 @@ function ReviewSheet({
   );
 }
 
-function FinalizeResultSheet({ result, restaurantName, onClose, onEdit }: { result: FinalizeResult; restaurantName: string; onClose: () => void; onEdit: () => void }) {
+const HANDOFF_POLL_MS = 4000;
+
+function FinalizeResultSheet({ result, restaurantName, onClose, onEdit, onClaimed }: { result: FinalizeResult; restaurantName: string; onClose: (wasClaimed: boolean) => void; onEdit: () => void; onClaimed: () => void }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [claimed, setClaimed] = useState(false);
   const minutesLeft = Math.max(0, Math.round((new Date(result.expiresAt).getTime() - Date.now()) / 60000));
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingId = useId();
@@ -196,31 +199,60 @@ function FinalizeResultSheet({ result, restaurantName, onClose, onEdit }: { resu
     return () => { dialog?.close(); document.body.style.overflow = previousOverflow; };
   }, []);
 
+  // Guest claim lifecycle (final UX pass, new required behavior) — the
+  // guest must learn the waiter actually accepted the order, not just that
+  // a QR was shown. Lightweight polling while this sheet is open (sanctioned
+  // over WebSockets for one short-lived screen); stops on claim, on expiry,
+  // or on unmount — never after claimed is already true, never orphaned.
+  useEffect(() => {
+    if (claimed) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch("/api/public/qr-menu/handoff-status", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: result.token }) });
+        const body = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (body.status === "CLAIMED") { setClaimed(true); onClaimed(); }
+        else if (body.status === "EXPIRED") { clearInterval(id); }
+      } catch {
+        // Transient network hiccup — the next tick retries; never surfaces an error for a background poll.
+      }
+    }, HANDOFF_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [result.token, claimed, onClaimed]);
+
   return (
     <dialog
       ref={dialogRef}
       className={styles.sheet}
       aria-labelledby={headingId}
-      onCancel={(e) => { e.preventDefault(); onClose(); }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onCancel={(e) => { e.preventDefault(); onClose(claimed); }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(claimed); }}
     >
       <div className={styles.sheetHeader}>
-        <h2 id={headingId}>Porudžbina je spremna</h2>
-        <button type="button" aria-label="Zatvori" onClick={onClose}>✕</button>
+        <h2 id={headingId}>{claimed ? "Porudžbinu je preuzeo konobar" : "Porudžbina je spremna"}</h2>
+        <button type="button" aria-label="Zatvori" onClick={() => onClose(claimed)}>✕</button>
       </div>
-      <div className={`${styles.sheetBody} ${styles.resultBody}`}>
-        <p className={styles.resultLead}>Pokažite ovaj QR kod konobaru — {restaurantName}</p>
-        <div className={styles.qrFrame}>
-          {/* eslint-disable-next-line @next/next/no-img-element -- locally-generated data: URL, next/image doesn't apply */}
-          {dataUrl && <img src={dataUrl} alt="QR kod porudžbine" width={252} height={252} />}
+      {claimed ? (
+        <div className={`${styles.sheetBody} ${styles.resultBody}`}>
+          <p className={styles.resultLead}>Porudžbina je uspešno predata. Možete nastaviti da pregledate meni ili napraviti novu porudžbinu.</p>
+          <button type="button" className={styles.primaryButton} onClick={() => onClose(true)}>Nazad na meni</button>
         </div>
-        <div className={styles.resultSummary}>
-          <span>{countLabel(result.items.length, result.itemCount)}</span>
-          <span>{money(result.totalPrice)} RSD</span>
+      ) : (
+        <div className={`${styles.sheetBody} ${styles.resultBody}`}>
+          <p className={styles.resultLead}>Pokažite ovaj QR kod konobaru — {restaurantName}</p>
+          <div className={styles.qrFrame}>
+            {/* eslint-disable-next-line @next/next/no-img-element -- locally-generated data: URL, next/image doesn't apply */}
+            {dataUrl && <img src={dataUrl} alt="QR kod porudžbine" width={252} height={252} />}
+          </div>
+          <div className={styles.resultSummary}>
+            <span>{countLabel(result.items.length, result.itemCount)}</span>
+            <span>{money(result.totalPrice)} RSD</span>
+          </div>
+          <p className={styles.resultExpiry}>Važi još {minutesLeft} min.</p>
+          <button type="button" className={styles.secondaryButton} onClick={onEdit}>Izmeni porudžbinu</button>
         </div>
-        <p className={styles.resultExpiry}>Važi još {minutesLeft} min.</p>
-        <button type="button" className={styles.secondaryButton} onClick={onEdit}>Izmeni porudžbinu</button>
-      </div>
+      )}
     </dialog>
   );
 }
@@ -234,8 +266,13 @@ export function GuestOrderingLayer({ slug, restaurantName, orderingMode, setOrde
       <FinalizeResultSheet
         result={result}
         restaurantName={restaurantName}
-        onClose={() => setResult(null)}
+        onClose={(wasClaimed) => { setResult(null); if (wasClaimed) setOrderingMode(false); }}
         onEdit={() => { setResult(null); setReviewOpen(true); }}
+        // Replay protection (server-side claim is already atomic/one-shot —
+        // see claimGuestOrderHandoff) — this is the CLIENT half: once a
+        // waiter has accepted it, the local draft it came from is done,
+        // never resurrected by "Izmeni porudžbinu" or a later re-entry.
+        onClaimed={() => draft.clear()}
       />
     );
   }
@@ -259,13 +296,26 @@ export function GuestOrderingLayer({ slug, restaurantName, orderingMode, setOrde
               affordances (see public-menu-view.tsx); the draft/summary bar
               stays reachable either way, so the draft is never lost by
               toggling this. */}
-          <button type="button" className={styles.exitLink} onClick={() => setOrderingMode(!orderingMode)}>
-            {orderingMode ? "← Nazad na meni" : "+ Dodaj još stavki"}
-          </button>
-          <button type="button" className={styles.stickySummary} onClick={() => setReviewOpen(true)}>
-            <span>Porudžbina · {countLabel(draft.items.length, draft.itemCount)} · {money(draft.totalPrice)} RSD</span>
-            <span aria-hidden="true">→</span>
-          </button>
+          {/* ONE bottom dock, not two floating pills stacked on top of menu
+              content — physical QA explicitly rejected the prior two-pill
+              pile-up. The back/resume action and the order summary are now
+              regions of the SAME surface. */}
+          <div className={styles.dock}>
+            <button type="button" className={styles.dockBack} onClick={() => setOrderingMode(!orderingMode)}>
+              {orderingMode ? "← Nazad" : "+ Dodaj još"}
+            </button>
+            <button type="button" className={styles.dockSummary} onClick={() => setReviewOpen(true)}>
+              {/* No "Porudžbina ·" prefix, no price — the dock itself (and
+                  the sheet it opens, "Tvoja porudžbina", which shows the
+                  exact total) already establish context. At 360px, sharing
+                  this bar with the back button meant the full prefixed
+                  "...· price RSD" string truncated before the count — the
+                  one number that must never look ambiguous — was even
+                  visible. The count alone always fits. */}
+              <span className={styles.dockSummaryText}>{countLabel(draft.items.length, draft.itemCount)}</span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
         </>
       )}
       {draft.itemCount === 0 && orderingMode && (

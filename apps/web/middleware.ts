@@ -42,6 +42,10 @@ const PUBLIC_API_PATHS = new Set([
   // needed here, unlike /m/[slug] above. Never creates an Order/KDS/
   // PrintJob/Payment/InventoryMovement — see guest-order-service.ts.
   "/api/public/qr-menu/finalize",
+  // Guest claim-lifecycle polling (Phase 2) — read-only status check
+  // (PENDING/CLAIMED/EXPIRED) only, by token; never returns item/price
+  // detail. See guest-order-service.ts checkGuestOrderHandoffStatus.
+  "/api/public/qr-menu/handoff-status",
 ]);
 
 // Faza 2A/2B — TableCore Print Agent: SVAKA /api/agent/** ruta autentifikuje

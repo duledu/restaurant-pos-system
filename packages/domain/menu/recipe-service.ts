@@ -21,11 +21,28 @@
 import { prisma } from "@rcs/db";
 import { requirePermission, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
-import { convertUnitDecimal, type UnitOfMeasure } from "../inventory/unit-of-measure";
+import { convertUnitDecimal, unitDimension, type UnitOfMeasure } from "../inventory/unit-of-measure";
 
-function canonicalRecipeQuantity(quantity: number, from: UnitOfMeasure, to: UnitOfMeasure) {
+// Physical QA finding — a recipe line entered as "Jaja (kom) = 0.002" with
+// no rejection anywhere. Traced the FULL pipeline (this function, both
+// addRecipeLine/updateRecipeLine call sites below, RecipeModal.tsx's add
+// AND edit forms, convertUnitDecimal itself): no step silently divides a
+// PIECE quantity by 1000 or any other factor — PIECE is proven to pass
+// through convertUnitDecimal completely unchanged (from===to is the only
+// reachable PIECE path; mixed-unit PIECE conversion already throws). The
+// actual root cause is this function never having required a discrete
+// (COUNT-dimension) quantity to be a whole number — 0.002 was always a
+// value someone (or a fat-fingered decimal point) typed directly, which
+// the system had no reason to refuse. "2 eggs" must round-trip as exactly
+// 2, so this closes that gap at the one place both add and update already
+// funnel through, rather than duplicating the check in two API handlers.
+// Exported for direct unit testing (pure Decimal arithmetic + validation, no DB/network) — see tests/unit/recipe-quantity.test.ts.
+export function canonicalRecipeQuantity(quantity: number, from: UnitOfMeasure, to: UnitOfMeasure) {
   const canonical = convertUnitDecimal(quantity, from, to);
   if (!canonical.isPositive()) throw new Error("Količina mora biti pozitivna");
+  if (unitDimension(to) === "COUNT" && !canonical.isInteger()) {
+    throw new Error("Količina u komadima mora biti ceo broj (npr. 2, ne 0.002).");
+  }
   if (canonical.decimalPlaces() > 3 || canonical.greaterThan("999999999.999")) {
     throw new Error("Količina prelazi preciznost zalihe (najviše 3 decimale u jedinici sirovine). Za sitnije količine koristite sirovinu u g ili ml.");
   }

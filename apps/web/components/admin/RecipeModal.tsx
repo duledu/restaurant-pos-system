@@ -38,6 +38,17 @@ function previewCanonical(quantity: number, fromUnit: string, toUnit: string): n
   return inBase / (PREVIEW_FACTOR[toUnit] ?? 1);
 }
 
+// Physical QA finding — "Jaja (kom) = 0.002" turned out to be unvalidated
+// manually-entered data (server now rejects it, see recipe-service.ts
+// canonicalRecipeQuantity), but the quantity inputs below ALSO invited it:
+// step="0.001" with inputMode="decimal" on every field regardless of unit
+// nudges a decimal point into a field that should only ever hold whole
+// pieces. PIECE gets its own integer-appropriate step/inputMode; every
+// other (mass/volume) unit keeps the existing fine-grained 0.001 step.
+function quantityInputProps(unit: string | undefined) {
+  return unit === "PIECE" ? { step: "1", inputMode: "numeric" as const } : { step: "0.001", inputMode: "decimal" as const };
+}
+
 export interface IngredientOption {
   id: string;
   name: string;
@@ -226,8 +237,7 @@ export function RecipeModal({
                       <input
                         type="number"
                         aria-label={`Količina — ${line.ingredient.name}`} disabled={saving}
-                        inputMode="decimal"
-                        step="0.001"
+                        {...quantityInputProps(line.ingredient.unit)}
                         defaultValue={line.quantity}
                         onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
                         className="min-h-11 w-24 rounded-sm border border-line px-2 py-1.5 text-sm"
@@ -260,7 +270,7 @@ export function RecipeModal({
                         <input
                           type="number"
                           aria-label={`Količina — ${line.ingredient.name}`} disabled={saving}
-                          step="0.001"
+                          {...quantityInputProps(line.ingredient.unit)}
                           defaultValue={line.quantity}
                           onBlur={(e) => { if (e.target.value !== line.quantity) updateLine(line.id, e.target.value); }}
                           className="min-h-11 w-24 rounded-sm border border-line px-1.5 py-1 text-sm"
@@ -309,8 +319,7 @@ export function RecipeModal({
                 <input
                   type="number"
                   aria-label="Količina novog sastojka" disabled={saving}
-                  inputMode="decimal"
-                  step="0.001"
+                  {...quantityInputProps(entryUnit)}
                   placeholder="Količina"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}

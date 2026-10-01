@@ -13,7 +13,19 @@
 }
 .menu *, .menu *::before, .menu *::after { box-sizing: border-box; }
 .menu button, .menu a, .menu input { -webkit-tap-highlight-color: transparent; }
-.menu button { cursor: pointer; font: inherit; color: inherit; }
+.menu button { cursor: pointer; font: inherit; }
+/* :where() zeroes this selector's OWN specificity to (0,0,0) — a plain
+   single-class rule anywhere (e.g. guest-order.module.css's .cta / .dock
+   / .primaryButton, all of which set color: var(--menu-on-primary) for a
+   branded/filled button) then reliably wins regardless of CSS Module
+   import/bundling order, instead of losing to ".menu button"'s (0,1,1)
+   by specificity — which is what was silently forcing EVERY accent-filled
+   button's text back to the theme's plain dark ink color (e.g. the
+   Admin-reported "Kreiraj porudžbinu": correct gold background, but text
+   computed as #2B2118 instead of the correctly-computed --menu-on-primary
+   #FFFFFF — confirmed via getComputedStyle, not a token/contrast-formula
+   bug at all). */
+:where(.menu button) { color: inherit; }
 .menu button, .menu a { transition: background-color 160ms, color 160ms; }
 .menu :is(button, a, input):focus-visible { outline: 2px solid var(--menu-text); outline-offset: 4px; }
 .menu :is(button, a, input) { scroll-margin-block: calc(var(--menu-nav-height) + 16px) 24px; }
