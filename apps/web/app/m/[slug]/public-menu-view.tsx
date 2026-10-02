@@ -59,7 +59,15 @@ function Availability() {
   return <span className={styles.availability}>Trenutno nije dostupno</span>;
 }
 
-function MenuRow({ item, editorial, onOpen, orderingMode, onAdd }: { item: PublicMenuItem; editorial: boolean; onOpen: () => void; orderingMode: boolean; onAdd: (item: PublicMenuItem) => void }) {
+function MenuRow({ item, editorial, onOpen, orderingMode, draftQuantity, onAdd, onChangeQuantity }: {
+  item: PublicMenuItem;
+  editorial: boolean;
+  onOpen: () => void;
+  orderingMode: boolean;
+  draftQuantity: number;
+  onAdd: (item: PublicMenuItem) => void;
+  onChangeQuantity: (menuItemId: string, delta: number) => void;
+}) {
   const [failed, setFailed] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState(false);
   const featured = editorial && publicImageSource(item.imageUrl) && failed !== item.imageUrl;
@@ -69,8 +77,8 @@ function MenuRow({ item, editorial, onOpen, orderingMode, onAdd }: { item: Publi
   // thumbnail is tabIndex={-1}/aria-hidden (pointer-clickable but not a
   // redundant second keyboard stop for the SAME "open detail" action the
   // name/description button already exposes with a real accessible name),
-  // and "+ Dodaj" is its own real <button> with its own label. Grid
-  // position is unchanged — .row is the grid container either way, so
+  // and the ordering action is its own real <button> with its own label.
+  // Grid position is unchanged — .row is the grid container either way, so
   // swapping the OUTER element from <button> to <div> doesn't move
   // anything; only the previously-outer click/keyboard handling moved onto
   // the inner .dishOpen button.
@@ -88,19 +96,30 @@ function MenuRow({ item, editorial, onOpen, orderingMode, onAdd }: { item: Publi
         {featured && <span className={styles.detailHint}>Detalji <Icon name="arrow" /></span>}
       </button>
       {orderingMode && item.isAvailable && (
-        <button
-          type="button"
-          className={`${orderingStyles.addButton} ${justAdded ? orderingStyles.addButtonActive : ""}`}
-          aria-label={`Dodaj ${item.name} u porudžbinu`}
-          onClick={() => {
-            onAdd(item);
-            setJustAdded(true);
-            window.setTimeout(() => setJustAdded(false), 900);
-          }}
-        >
-          <Icon name={justAdded ? "check" : "plus"} />
-          {justAdded ? "Dodato" : "Dodaj"}
-        </button>
+        draftQuantity > 0 ? (
+          // Already in the draft — a compact − N + control replacing
+          // "+ Dodaj" (spec item 5), driven by the SAME guest draft
+          // (onChangeQuantity -> draft.changeQuantity), not a second cart.
+          <div className={orderingStyles.rowStepper}>
+            <button type="button" aria-label={`Smanji količinu — ${item.name}`} onClick={() => onChangeQuantity(item.id, -1)}>−</button>
+            <span className={orderingStyles.rowStepperValue} aria-live="polite">{draftQuantity}</span>
+            <button type="button" aria-label={`Povećaj količinu — ${item.name}`} onClick={() => onChangeQuantity(item.id, 1)}>+</button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className={`${orderingStyles.addButton} ${justAdded ? orderingStyles.addButtonActive : ""}`}
+            aria-label={`Dodaj ${item.name} u porudžbinu`}
+            onClick={() => {
+              onAdd(item);
+              setJustAdded(true);
+              window.setTimeout(() => setJustAdded(false), 900);
+            }}
+          >
+            <Icon name={justAdded ? "check" : "plus"} />
+            {justAdded ? "Dodato" : "Dodaj"}
+          </button>
+        )
       )}
     </span>
     <Price item={item} />
@@ -145,8 +164,17 @@ function ProductDetail({ item, onClose, orderingMode, onAdd }: { item: PublicMen
   </dialog>;
 }
 
-export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: string }) {
+export function PublicMenuView({ menu, slug, renderMode = "guest" }: { menu: PublicMenuPayload; slug: string; renderMode?: "guest" | "admin-preview" }) {
   const { restaurant, theme, table, categories } = menu;
+  // Explicit rendering contract (not a pathname/CSS/DOM check) for whether
+  // guest-order controls are allowed at all — Admin's "Mobilni pregled"
+  // (qr-menu-client.tsx) renders this SAME component to preview branding/
+  // layout, and previously leaked the real "+ Kreiraj porudžbinu" CTA /
+  // dock / per-row ordering affordances into that configuration screen,
+  // since nothing distinguished "guest looking at their order" from "owner
+  // looking at their menu design." guestOrderingEnabled is the one gate
+  // every ordering-related render path below goes through.
+  const guestOrderingEnabled = renderMode === "guest";
   const instanceId = useId().replace(/:/g, "");
   const tokens = useMemo(() => resolveQrMenuTheme(theme), [theme]);
   const [mode, setMode] = useState<MenuMode>(() => filterPublicMenu(categories, "KITCHEN").length ? "KITCHEN" : "BAR");
@@ -160,10 +188,33 @@ export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: 
   // (localStorage-persisted) non-empty draft from before a refresh.
   const draft = useGuestOrderDraft(slug);
   const [orderingMode, setOrderingMode] = useState(false);
-  useEffect(() => { if (draft.items.length > 0) setOrderingMode(true); }, [draft.items.length]);
+  // Admin preview must never auto-enter ordering mode — e.g. if the same
+  // browser also has a real (stale) guest draft in localStorage for this
+  // exact slug, from testing the live menu directly.
+  useEffect(() => { if (guestOrderingEnabled && draft.items.length > 0) setOrderingMode(true); }, [guestOrderingEnabled, draft.items.length]);
   function addToGuestDraft(item: PublicMenuItem) {
     draft.addItem({ id: item.id, name: item.name, price: item.price, preparationStation: item.preparationStation });
   }
+  // addItem (guest-order-draft.ts) always merges a row-level add into the
+  // single note-less line for that menuItemId (creating it if needed), so
+  // there is at most one such line per item at a time — this map is exactly
+  // "what MenuRow's own stepper should show/drive" without introducing any
+  // second cart/order model.
+  const draftQuantityByItemId = useMemo(() => {
+    const map = new Map<string, number>();
+    draft.items.forEach(line => { if (line.note === "") map.set(line.menuItemId, line.quantity); });
+    return map;
+  }, [draft.items]);
+  function changeRowQuantity(menuItemId: string, delta: number) {
+    const index = draft.items.findIndex(line => line.menuItemId === menuItemId && line.note === "");
+    if (index !== -1) draft.changeQuantity(menuItemId, index, delta);
+  }
+  // Drives both the nav-integrated "Poručivanje" strip and the bottom
+  // clearance reserved for whichever floating control is showing (the
+  // "+ Kreiraj porudžbinu" CTA, or the order dock) — see GuestOrderingLayer
+  // for the matching render logic, kept in sync by sharing this exact
+  // condition rather than duplicating it.
+  const hasDraftItems = draft.itemCount > 0;
   const [failedCover, setFailedCover] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLDivElement>(null);
@@ -224,7 +275,14 @@ export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: 
     requestAnimationFrame(() => searchButtonRef.current?.focus());
   }
 
-  return <div ref={rootRef} className={`${styles.menu} ${FONT_VARIABLES}`} data-theme={theme.themePreset} style={{ ...tokens, "--menu-font-heading": DISPLAY[theme.typographyPreset], "--menu-font-body": "var(--font-menu-body), Arial, sans-serif" } as CSSProperties}>
+  // The only state with NO floating bottom control is "ordering mode on,
+  // draft still empty" — that case is now handled entirely by the
+  // nav-integrated strip below, not a floating element (see item 2).
+  // Never true in admin-preview — guestOrderingEnabled gates it first, so a
+  // stale localStorage draft for this slug can never reserve bottom space
+  // for a floating control that (correctly) isn't rendered there.
+  const hasFloatingAction = guestOrderingEnabled && (!orderingMode || hasDraftItems);
+  return <div ref={rootRef} className={`${styles.menu} ${FONT_VARIABLES} ${hasFloatingAction ? styles.hasFloatingAction : ""}`} data-theme={theme.themePreset} style={{ ...tokens, "--menu-font-heading": DISPLAY[theme.typographyPreset], "--menu-font-body": "var(--font-menu-body), Arial, sans-serif" } as CSSProperties}>
     <a className={styles.skipLink} href={`#${instanceId}-content`}>Pređi na meni</a>
     <header className={`${styles.hero} ${cover ? styles.photographic : styles.branded}`}>
       <Photo src={restaurant.coverImageUrl} className={styles.cover} eager onError={() => setFailedCover(restaurant.coverImageUrl)} />
@@ -261,6 +319,30 @@ export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: 
           </>}
         </div>
       </div>
+      {/* Restrained ordering-mode context integrated into the sticky nav
+          (spec item 2) — replaces the old giant floating "← Nazad na meni"
+          pill that covered menu content. Shown whenever ordering is
+          relevant: actively in ordering mode (exit action + live status),
+          or stepped back to plain browsing with a draft still waiting
+          (resume action). Part of .navigation, so its height is already
+          picked up by the existing ResizeObserver on navRef — no separate
+          layout wiring needed. */}
+      {guestOrderingEnabled && (orderingMode || hasDraftItems) && (
+        <div className={styles.orderStrip}>
+          {orderingMode ? (
+            <>
+              <button type="button" className={styles.orderStripBack} onClick={() => setOrderingMode(false)}>
+                <span aria-hidden="true">←</span> Nazad na meni
+              </button>
+              <span className={styles.orderStripStatus}>Poručivanje</span>
+            </>
+          ) : (
+            <button type="button" className={styles.orderStripResume} onClick={() => setOrderingMode(true)}>
+              + Nastavi poručivanje
+            </button>
+          )}
+        </div>
+      )}
     </div>
 
     <main id={`${instanceId}-content`} className={styles.content} tabIndex={-1}>
@@ -275,13 +357,17 @@ export function PublicMenuView({ menu, slug }: { menu: PublicMenuPayload; slug: 
             <span className={styles.categoryCount}>{category.items.length} <span>u ponudi</span></span>
           </div>
           <div className={styles.dishes}>
-            {category.items.map(item => <MenuRow key={item.id} item={item} editorial={item.id === editorialId} onOpen={() => setOpenItem(item)} orderingMode={orderingMode} onAdd={addToGuestDraft} />)}
+            {category.items.map(item => <MenuRow key={item.id} item={item} editorial={item.id === editorialId} onOpen={() => setOpenItem(item)} orderingMode={guestOrderingEnabled && orderingMode} draftQuantity={draftQuantityByItemId.get(item.id) ?? 0} onAdd={addToGuestDraft} onChangeQuantity={changeRowQuantity} />)}
           </div>
         </section>;
       })}
     </main>
     <footer className={styles.footer}><span className={styles.footerMark} aria-hidden="true" /><p>{restaurant.name}</p><span>Hvala što ste naši gosti.</span></footer>
-    {openItem && <ProductDetail item={openItem} onClose={() => setOpenItem(null)} orderingMode={orderingMode} onAdd={addToGuestDraft} />}
-    <GuestOrderingLayer slug={slug} restaurantName={restaurant.name} orderingMode={orderingMode} setOrderingMode={setOrderingMode} draft={draft} />
+    {openItem && <ProductDetail item={openItem} onClose={() => setOpenItem(null)} orderingMode={guestOrderingEnabled && orderingMode} onAdd={addToGuestDraft} />}
+    {/* Admin's "Mobilni pregled" (qr-menu-client.tsx) renders THIS component
+        with renderMode="admin-preview" to check branding/layout — it must
+        never see the real guest ordering CTA/dock/strip, which is an
+        operational guest action, not an Admin configuration control. */}
+    {guestOrderingEnabled && <GuestOrderingLayer slug={slug} restaurantName={restaurant.name} orderingMode={orderingMode} setOrderingMode={setOrderingMode} draft={draft} />}
   </div>;
 }

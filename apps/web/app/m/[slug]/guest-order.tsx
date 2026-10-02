@@ -11,6 +11,18 @@ function money(value: number | string) {
   return Number.isFinite(n) ? PRICE_FORMAT.format(n) : String(value);
 }
 
+// Local, self-contained — matches the existing project convention
+// (public-menu-view.tsx also keeps its own private Icon fn rather than a
+// shared icon module) for the one icon this file actually needs.
+function BagIcon() {
+  return (
+    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 7h12l1 13.5a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 20.5L6 7Z" />
+      <path d="M9 10V6a3 3 0 0 1 6 0v4" />
+    </svg>
+  );
+}
+
 // Disambiguates unique menu lines ("artikala") from total quantity ("kom.")
 // — physical QA showed a total-quantity count ("4 stavke") next to a
 // unique-line count ("3 stavki") and it read as lost data. Only shows both
@@ -287,40 +299,25 @@ export function GuestOrderingLayer({ slug, restaurantName, orderingMode, setOrde
 
   return (
     <>
+      {/* ONE coherent premium order dock — not a split back/summary pill
+          pair (physical QA explicitly rejected that pile-up), and not a
+          second floating element fighting the nav-integrated "Poručivanje"
+          control (public-menu-view.tsx) for the "exit ordering mode" job.
+          This surface has exactly one job: show the order at a glance and
+          open the review sheet. Visible whenever there's a draft to show,
+          regardless of orderingMode, so a guest who stepped back to pure
+          browsing can still reach/finalize an existing draft. */}
       {draft.itemCount > 0 && !reviewOpen && (
-        <>
-          {/* Mode toggle — previously ordering mode had NO way back to
-              normal browsing once a draft existed (only the empty-cart case
-              below had one), and no way back INTO ordering mode afterward
-              either. orderingMode only controls the per-row "+ Dodaj"
-              affordances (see public-menu-view.tsx); the draft/summary bar
-              stays reachable either way, so the draft is never lost by
-              toggling this. */}
-          {/* ONE bottom dock, not two floating pills stacked on top of menu
-              content — physical QA explicitly rejected the prior two-pill
-              pile-up. The back/resume action and the order summary are now
-              regions of the SAME surface. */}
-          <div className={styles.dock}>
-            <button type="button" className={styles.dockBack} onClick={() => setOrderingMode(!orderingMode)}>
-              {orderingMode ? "← Nazad" : "+ Dodaj još"}
-            </button>
-            <button type="button" className={styles.dockSummary} onClick={() => setReviewOpen(true)}>
-              {/* No "Porudžbina ·" prefix, no price — the dock itself (and
-                  the sheet it opens, "Tvoja porudžbina", which shows the
-                  exact total) already establish context. At 360px, sharing
-                  this bar with the back button meant the full prefixed
-                  "...· price RSD" string truncated before the count — the
-                  one number that must never look ambiguous — was even
-                  visible. The count alone always fits. */}
-              <span className={styles.dockSummaryText}>{countLabel(draft.items.length, draft.itemCount)}</span>
-              <span aria-hidden="true">→</span>
-            </button>
-          </div>
-        </>
-      )}
-      {draft.itemCount === 0 && orderingMode && (
-        <button type="button" className={styles.cta} onClick={() => setOrderingMode(false)}>
-          ← Nazad na meni
+        <button type="button" className={styles.dock} onClick={() => setReviewOpen(true)}>
+          <span className={styles.dockIcon} aria-hidden="true"><BagIcon /></span>
+          <span className={styles.dockLabel}>
+            <span className={styles.dockTitle}>Porudžbina</span>
+            <span className={styles.dockCount}>{countLabel(draft.items.length, draft.itemCount)}</span>
+          </span>
+          <span className={styles.dockTotal}>
+            <span className={styles.dockPrice}>{money(draft.totalPrice)} RSD</span>
+            <span className={styles.dockArrow} aria-hidden="true">→</span>
+          </span>
         </button>
       )}
       {reviewOpen && (

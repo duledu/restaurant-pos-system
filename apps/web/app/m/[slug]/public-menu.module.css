@@ -50,6 +50,55 @@
 .heroFoot > span:last-child { font-size: 18px; line-height: 1; }
 .navigation { position: sticky; top: 0; z-index: 20; background: var(--menu-background); border-bottom: 1px solid var(--menu-border); }
 .navCanvas { max-width: 1072px; margin: auto; min-width: 0; }
+/* Restrained ordering-mode context, integrated into the sticky nav itself —
+   replaces the old giant floating "← Nazad na meni" pill that covered menu
+   content. Left = the one action (exit ordering mode / resume it when a
+   draft exists but the guest stepped back to plain browsing); right = a
+   quiet status indicator, not a second button. Part of .navigation (not a
+   separate fixed element) so it scrolls with, not over, the menu, and its
+   height is already picked up by the existing ResizeObserver on navRef. */
+.orderStrip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 1072px;
+  margin: auto;
+  padding: 10px 20px;
+  background: color-mix(in srgb, var(--menu-primary) 7%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--menu-primary) 16%, transparent);
+}
+.orderStripBack {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--menu-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.orderStripStatus {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--menu-primary);
+}
+.orderStripStatus::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--menu-primary); }
+.orderStripResume { border: 0; background: transparent; padding: 0 4px; min-height: 36px; color: var(--menu-primary); font-size: 12.5px; font-weight: 600; }
+/* Reserves room at the very bottom of the page for whichever floating
+   control is currently present (the "+ Kreiraj porudžbinu" CTA or the
+   order dock, see guest-order.tsx) so it never sits on top of the footer /
+   last menu row — set by PublicMenuView, which already knows which of
+   those is showing. */
+.hasFloatingAction .footer { padding-bottom: max(104px, calc(84px + env(safe-area-inset-bottom))); }
 .modes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 10px 20px 0; gap: 8px; }
 .modes button { display: flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 14px; background: transparent; border: 1px solid var(--menu-border); border-radius: 3px; text-transform: uppercase; letter-spacing: .12em; font-size: 12px; font-weight: 600; }
 .modes button[aria-pressed="true"] { background: var(--menu-text); color: var(--menu-background); border-color: var(--menu-text); }
@@ -89,7 +138,17 @@
 .thumbnail { width: 72px; height: 72px; padding: 0; border: 0; background: transparent; border-radius: min(var(--menu-radius), 10px); cursor: pointer; overflow: hidden; display: block; }
 .thumbnailImg { width: 100%; height: 100%; object-fit: cover; display: block; }
 .dishOpen { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
-.dish { display: block; min-width: 0; align-self: start; padding-top: 2px; }
+/* Real flex column with real gap — NOT a block flow with a negatively-
+   margined action tucked on top of it. Root cause of the physical-QA
+   "+ Dodaj overlaps the name/image" bug: the action used to rely on
+   negative margins to visually sit close to text it had NO reserved space
+   below, which only looked right for whatever description length it was
+   tuned against. Every child here (name/description button, then the
+   ordering action when present) is a normal flow sibling with its own
+   space — stable across image/no-image, description/no-description, short/
+   long titles, and whether the action is "+ Dodaj" or the quantity
+   stepper, see MenuRow. */
+.dish { display: flex; flex-direction: column; gap: 8px; min-width: 0; align-self: start; padding-top: 2px; }
 .dishName { display: block; font-size: 15px; font-weight: 600; line-height: 1.45; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .description { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: var(--menu-muted); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
 .price { display: block; align-self: start; padding-top: 2px; text-align: right; white-space: nowrap; font-size: 14px; line-height: 1.45; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.025em; }

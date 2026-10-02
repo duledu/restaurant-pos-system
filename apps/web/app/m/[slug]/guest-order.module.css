@@ -30,11 +30,12 @@
   box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--menu-primary) 45%, transparent);
 }
 
-/* ONE bottom dock — physical QA explicitly rejected two separate floating
-   pills (back-link + summary) stacked on top of menu content. This is a
-   single surface that OWNS the shadow/border/radius/safe-area; the two
-   buttons inside are transparent regions of it, split by a hairline, never
-   independently-elevated pieces. */
+/* ONE coherent premium order dock — a single pressable surface, not a
+   split back/summary pill pair (physical QA explicitly rejected that
+   two-region pile-up) and not generic ecommerce cart-bar chrome: icon +
+   stacked label on the left (what/how much), price + arrow on the right
+   (what it costs, that it opens something) — one hierarchy, one tap
+   target, OWNing its own shadow/radius/safe-area. */
 .dock {
   position: fixed;
   left: 16px;
@@ -42,43 +43,41 @@
   bottom: max(16px, env(safe-area-inset-bottom));
   z-index: 30;
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  gap: 12px;
   margin: 0 auto;
   max-width: 480px;
-  height: 52px;
+  width: calc(100% - 32px);
+  min-height: 64px;
+  padding: 10px 18px;
+  border: 0;
   border-radius: var(--menu-radius);
-  overflow: hidden;
-  box-shadow: 0 10px 28px -8px color-mix(in srgb, var(--menu-primary) 45%, transparent);
-}
-.dockBack {
-  flex: none;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  border: 0;
-  border-right: 1px solid color-mix(in srgb, var(--menu-on-primary, #fff) 20%, transparent);
-  background: color-mix(in srgb, var(--menu-primary) 85%, black 15%);
-  color: var(--menu-on-primary, #fff);
-  font-size: 12.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.dockSummary {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 18px;
-  border: 0;
   background: var(--menu-primary);
   color: var(--menu-on-primary, #fff);
-  font-size: 13.5px;
-  font-weight: 600;
+  text-align: left;
+  box-shadow: 0 10px 28px -8px color-mix(in srgb, var(--menu-primary) 45%, transparent);
 }
-.dockSummaryText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dockSummary span:last-child { flex: none; font-size: 16px; }
+.dockIcon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: calc(var(--menu-radius) * 0.65);
+  background: color-mix(in srgb, var(--menu-on-primary, #fff) 16%, transparent);
+}
+.dockLabel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dockTitle { font-family: var(--menu-font-heading); font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.dockCount {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--menu-on-primary, #fff) 78%, transparent);
+}
+.dockTotal { flex: none; display: flex; align-items: center; gap: 10px; }
+.dockPrice { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; white-space: nowrap; }
+.dockArrow { font-size: 17px; line-height: 1; }
 
 /* Final UX pass — .sheet is now the native <dialog> element itself
    (showModal/close, real focus trap, native Escape-as-cancel), matching
@@ -155,18 +154,23 @@
 .resultSummary span:last-child { font-variant-numeric: tabular-nums; }
 .resultExpiry { margin: 10px 0 0; font-size: 12px; color: var(--menu-muted); }
 
-/* Ordering-mode affordance inside the existing item row/detail (see public-menu-view.tsx) */
+/* Ordering-mode affordance inside the existing item row/detail (see public-menu-view.tsx).
+   Root cause of the physical-QA "+ Dodaj overlaps the dish name/image" bug:
+   this used to carry a negative margin (-7px -13px) to visually tuck itself
+   against the preceding text instead of taking its own reserved space in
+   flow — stable only by accident, for whatever description length happened
+   to exist when it was tuned. .dish (public-menu.module.css) is now a real
+   flex column with its own gap, so this sits in normal flow with genuine
+   spacing — no margin trick needed, and the real element is simply sized to
+   the touch-target minimum instead of faking a bigger invisible hit area. */
 .addButton {
   flex: none;
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  /* 44px tap target even though the visible pill is shorter — padding
-     carries the extra hit-area rather than inflating the pill itself, so
-     it stays visually quiet while still meeting the touch-target minimum. */
-  min-height: 44px;
-  padding: 8px 13px;
-  margin: -7px -13px 1px;
+  min-height: 40px;
+  padding: 0 14px;
   /* var(--menu-radius), not a hardcoded 999px pill — same reasoning as
      .cta above: match the restaurant's own shape language instead of a
      generic ecommerce "add" pill. Weight/size stay deliberately quiet
@@ -187,6 +191,42 @@
   .addButton { transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease, transform 120ms ease; }
   .addButton:active { transform: scale(0.96); }
 }
+
+/* Inline row-level quantity control — replaces "+ Dodaj" once the item is
+   already a (note-less) line in the draft (spec item 5). Reuses the
+   EXISTING draft (changeQuantity), no second cart/order model. Sized
+   smaller than .stepper (the review-sheet one, untouched/working) since
+   this sits inline in a dense row list, but still meets the 36px+ touch
+   minimum this project uses elsewhere (.iconButton etc. use 44px; this is
+   intentionally a notch more compact to match .addButton's own quiet
+   footprint, while staying well above the 24px web floor). */
+.rowStepper {
+  flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+  padding: 0 2px;
+  border: 1px solid var(--menu-primary);
+  border-radius: var(--menu-radius);
+  background: transparent;
+  color: var(--menu-primary);
+}
+.rowStepper button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: calc(var(--menu-radius) * 0.6);
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+}
+.rowStepper button:active { background: color-mix(in srgb, var(--menu-primary) 12%, transparent); }
+.rowStepperValue { min-width: 20px; text-align: center; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .detailOrdering { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--menu-border); display: flex; flex-direction: column; gap: 14px; }
 .detailOrderingRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

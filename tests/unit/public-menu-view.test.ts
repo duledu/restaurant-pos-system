@@ -108,3 +108,20 @@ describe("public menu interactions", () => {
     expect(host.querySelector("main")!.textContent).toContain("Espresso");
   });
 });
+
+// Physical QA finding: Admin's "Mobilni pregled" (qr-menu-client.tsx) renders
+// this SAME component to preview branding/layout, and was leaking the real
+// "+ Kreiraj porudžbinu" guest ordering CTA into that configuration screen —
+// an operational guest action with no place in Admin. renderMode is the
+// explicit contract fixing that, not a pathname/CSS/DOM check.
+describe("renderMode — guest ordering controls must not leak into Admin preview", () => {
+  it("guest mode (the default, used by the real public page) renders the ordering CTA", async () => {
+    await act(async () => root.render(h(PublicMenuView, { menu: fixture, slug: "test-slug" })));
+    expect(host.textContent).toContain("Kreiraj porudžbinu");
+  });
+  it("admin-preview mode renders the same menu WITHOUT the ordering CTA", async () => {
+    await act(async () => root.render(h(PublicMenuView, { menu: fixture, slug: "test-slug", renderMode: "admin-preview" })));
+    expect(host.textContent).not.toContain("Kreiraj porudžbinu");
+    expect(host.querySelector('[aria-label*="Dodaj"]')).toBeNull();
+  });
+});
