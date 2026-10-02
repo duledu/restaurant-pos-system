@@ -2390,6 +2390,16 @@ model GuestOrderHandoff {
   claimedByEmployeeId String?
   claimedTableId      String?
 
+  // Set ONLY after the waiter's actual item import+persistence (draft.flush
+  // succeeding) completes — NOT at claim time. Claim alone (status=CLAIMED)
+  // only reserves the handoff against double-claim/concurrent waiters; it
+  // says nothing about whether DODAJ NA STO's import actually persisted.
+  // The guest-facing status poll (checkGuestOrderHandoffStatus) requires
+  // THIS field, not just status=CLAIMED, before telling the guest their
+  // order was accepted — physical QA proved status=CLAIMED alone is not a
+  // safe signal (import can still fail after a successful claim).
+  importConfirmedAt DateTime?
+
   restaurant Restaurant              @relation(fields: [restaurantId], references: [id])
   items      GuestOrderHandoffItem[]
 

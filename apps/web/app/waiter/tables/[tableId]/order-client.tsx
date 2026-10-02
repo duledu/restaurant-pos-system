@@ -9,7 +9,7 @@ import { filterMenuItems } from "../../../../lib/menu-search";
 import { formatStockQty } from "../../../../lib/stock-format";
 import { waiterTiming, waiterNavigationStart, waiterNavigationVisible } from "../../../../lib/waiter-performance";
 import { useWaiterShell } from "../../../../lib/waiter-shell";
-import { GuestOrderScanner, type ScannedGuestOrderItem } from "./guest-scan";
+import { GuestOrderScanner, type ScannedGuestOrderItem, type ImportScanResult, type ImportItemDiagnostic, type ImportDiagnostics } from "./guest-scan";
 
 import { mergeWaiterMenu, menuSectionsForItem, type MenuItem, type MenuSection, type ModifierGroup } from "../../../../lib/waiter-menu";
 import { previewEffectivePrice, usePromotionClock, type PricePreview } from "../../../../lib/promotion-preview";
@@ -706,32 +706,60 @@ function TableOrderClient({ tableId }: { tableId: string }) {
    * awaits before /submit, so "confirmed" here means actually persisted,
    * not just locally attempted.
    */
-  async function importScannedItems(items: ScannedGuestOrderItem[]): Promise<{ importedLines: number; importedCount: number; failedCount: number; confirmed: boolean }> {
+  async function importScannedItems(items: ScannedGuestOrderItem[], correlationId: string): Promise<ImportScanResult> {
+    // Physical QA (DODAJ NA STO stop-ship) — per-item/per-checkpoint trace,
+    // keyed by correlationId, so a real failure produces evidence without
+    // needing the waiter to open DevTools. Never logs the QR token, PIN, or
+    // any auth material — only ids/quantities/outcomes already visible to
+    // this authenticated waiter session.
+    const itemDiagnostics: ImportItemDiagnostic[] = [];
     let importedLines = 0;
     let importedCount = 0;
     let failedCount = 0;
     for (const item of items) {
+      let addedUnits = 0;
       let ok = true;
       for (let i = 0; i < item.quantity; i++) {
         if (!addItemWithModifiers(item.menuItemId, [], item.note)) { ok = false; break; }
+        addedUnits++;
       }
+      itemDiagnostics.push({ menuItemId: item.menuItemId, requestedQuantity: item.quantity, addedUnits, ok });
       if (ok) { importedCount += item.quantity; importedLines++; }
       else failedCount += item.quantity;
     }
     let confirmed = true;
+    let flushError: string | null = null;
     try {
       // false: keep any real failure flagged/retryable via the existing
       // draft.retryable banner instead of silently acknowledging it here.
       await draft.flush(false);
-    } catch {
+    } catch (e) {
       confirmed = false;
+      flushError = e instanceof Error ? e.message : String(e);
+    }
+    const diagnostics: ImportDiagnostics = {
+      correlationId,
+      tableId,
+      orderId: order?.id ?? null,
+      handoffItemCount: items.length,
+      handoffTotalQuantity: items.reduce((sum, i) => sum + i.quantity, 0),
+      items: itemDiagnostics,
+      flushError,
+      confirmed,
+    };
+    if (!confirmed || failedCount > 0) {
+      console.error(`[guest-import:${correlationId}]`, JSON.stringify(diagnostics));
+      // Best-effort server-side echo (Vercel captures console output from
+      // this route) so the correlation ID the waiter sees actually maps to
+      // something searchable, without a new observability system.
+      void apiFetch("/api/pos/guest-handoffs/import-diagnostics", { method: "POST", body: JSON.stringify(diagnostics) }).catch(() => {});
     }
     // importedLines = unique menu items (guest-facing "artikala"); importedCount
     // = total units/quantity ("komada") — the physical QA "4 stavke / 3 stavke"
     // confusion was partly this exact ambiguity (an order with e.g. Omlet x2 +
     // Ordever x1 + Cola x1 is BOTH "3 artikla" and "4 komada", correctly, not a
     // lost item) — see the wording fix in guest-scan.tsx's success message.
-    return { importedLines, importedCount, failedCount, confirmed };
+    return { importedLines, importedCount, failedCount, confirmed, correlationId };
   }
 
   /** Tap na artikal u meniju — brz dodatak bez modala kad nema grupa

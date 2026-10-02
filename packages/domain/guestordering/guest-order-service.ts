@@ -202,7 +202,14 @@ function toSnapshot(handoff: { itemCount: number; totalPrice: unknown; items: Ar
   };
 }
 
-export type GuestOrderHandoffStatus = "PENDING" | "CLAIMED" | "EXPIRED";
+// PROCESSING — status=CLAIMED but importConfirmedAt is still null: a
+// waiter has claimed this handoff and is (or was) importing it, but
+// persistence has not yet been proven to succeed. Added after physical QA
+// proved status=CLAIMED alone is NOT a safe "the waiter received this"
+// signal — claim only reserves the handoff against double-claim; it says
+// nothing about whether DODAJ NA STO's import actually persisted. The
+// guest must never see "preuzeo konobar" for a PROCESSING handoff.
+export type GuestOrderHandoffStatus = "PENDING" | "PROCESSING" | "CLAIMED" | "EXPIRED";
 
 /**
  * PUBLIC — no AuthContext, same trust level as finalizeGuestOrder. Final
@@ -211,17 +218,38 @@ export type GuestOrderHandoffStatus = "PENDING" | "CLAIMED" | "EXPIRED";
  * accepted the order, instead of staying on a stale "show this to your
  * waiter" screen forever. Deliberately minimal: status only, never table,
  * items, or price — a guest polling this never needs or should see more
- * than "still waiting" / "taken" / "expired". tokenHash is a unique lookup
- * on 256 bits of entropy (randomBytes(32) at finalize) — safe to resolve
- * with no restaurant scoping, same reasoning as the token itself.
+ * than "still waiting" / "being processed" / "taken" / "expired".
+ * tokenHash is a unique lookup on 256 bits of entropy (randomBytes(32) at
+ * finalize) — safe to resolve with no restaurant scoping, same reasoning
+ * as the token itself.
  */
 export async function checkGuestOrderHandoffStatus(token: string): Promise<GuestOrderHandoffStatus> {
   const tokenHash = hashToken(token);
-  const handoff = await prisma.guestOrderHandoff.findUnique({ where: { tokenHash }, select: { status: true, expiresAt: true } });
+  const handoff = await prisma.guestOrderHandoff.findUnique({ where: { tokenHash }, select: { status: true, expiresAt: true, importConfirmedAt: true } });
   if (!handoff) return "EXPIRED"; // unknown token reads identically to a consumed/expired one — no enumeration signal
-  if (handoff.status === "CLAIMED") return "CLAIMED";
+  if (handoff.status === "CLAIMED") return handoff.importConfirmedAt ? "CLAIMED" : "PROCESSING";
   if (handoff.status === "EXPIRED" || handoff.expiresAt.getTime() <= Date.now()) return "EXPIRED";
   return "PENDING";
+}
+
+/**
+ * WAITER — the second half of acceptance, called ONLY after the waiter's
+ * client-side import (importScannedItems -> addItemWithModifiers ->
+ * draft.flush()) has actually confirmed persistence. Deliberately separate
+ * from claimGuestOrderHandoff (which only reserves the handoff) so a
+ * failed import never looks, from the guest's side, identical to a
+ * successful one. Idempotent (retry-safe): setting importConfirmedAt twice
+ * is harmless, and this only ever touches a handoff already CLAIMED by
+ * THIS table — never silently "confirms" a stranger's claim.
+ */
+export async function confirmGuestOrderImport(ctx: AuthContext, input: ClaimGuestOrderHandoffInput): Promise<void> {
+  requireOrderOperator(ctx);
+  const tokenHash = hashToken(input.token);
+  const result = await prisma.guestOrderHandoff.updateMany({
+    where: { tokenHash, restaurantId: ctx.restaurantId, status: "CLAIMED", claimedTableId: input.tableId },
+    data: { importConfirmedAt: new Date() },
+  });
+  if (result.count === 0) throw new Error("Porudžbina nije pronađena ili nije preuzeta za ovaj sto.");
 }
 
 /**
