@@ -14,5 +14,5 @@ export const POST = withApiAuth(async (ctx, request) => {
   const body = await request.json();
   const input = openOrderSchema.parse(body);
   const order = await orders.openOrder(ctx, input);
-  return NextResponse.json({ order }, { status: 201 });
+  return NextResponse.json({ order }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
 });

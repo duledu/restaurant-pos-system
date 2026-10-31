@@ -13,7 +13,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError } from "@rcs/auth";
 import type { AuthContext } from "@rcs/auth";
-import { orders, production, tables } from "@rcs/domain";
+import { orders, production, tables, voids } from "@rcs/domain";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -68,6 +68,75 @@ async function createFixture(): Promise<Fixture> {
 
 beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
+});
+
+describe("KDS concurrent transitions and authoritative recovery", () => {
+  it("preserves partially voided quantity and cancellation wins a race with READY", async () => {
+    const f = await createFixture();
+    const waiter = context(f, "WAITER", "waiter-1");
+    const manager = managerCtx(f);
+    const order = await orders.openOrder(waiter, { tableId: f.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: f.biftekId, quantity: 2 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await voids.voidOrderItem(manager, order.id, item.id, {
+      quantity: 1, reasonCode: "WRONG_QUANTITY", explanation: "Guest requested one portion instead of two",
+    });
+    await production.advanceItemStatus(manager, order.id, item.id, "KITCHEN", "SUBMITTED");
+    expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } })).quantity).toBe(1);
+    const [cancelled] = await Promise.allSettled([
+      voids.cancelAbandonedOrder(manager, order.id, { reason: "Guest left before the meal was ready" }),
+      production.advanceItemStatus(manager, order.id, item.id, "KITCHEN", "ACCEPTED"),
+    ]);
+    expect(cancelled.status).toBe("fulfilled");
+    expect(await production.getItemStationStatus(manager, order.id, item.id, "KITCHEN")).toEqual({ status: "CANCELLED" });
+    const finalItem = await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id }, include: { stationStates: true } });
+    expect(finalItem.status).toBe("CANCELLED");
+    expect(finalItem.stationStates.every(state => state.status === "CANCELLED")).toBe(true);
+    await expect(production.advanceItemStatus(manager, order.id, item.id, "KITCHEN", "ACCEPTED")).rejects.toThrow();
+  });
+
+  it("two terminals accepting the same item commit one transition and one event", async () => {
+    const f = await createFixture();
+    const waiter = context(f, "WAITER", "waiter-1");
+    const order = await orders.openOrder(waiter, { tableId: f.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: f.biftekId, quantity: 1 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    const results = await Promise.allSettled(["terminal-1", "terminal-2"].map(employeeId =>
+      production.advanceItemStatus(managerCtx(f, employeeId), order.id, item.id, "KITCHEN", "SUBMITTED")));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect(await prisma.orderEvent.count({ where: { orderId: order.id, type: "order_item.status_changed" } })).toBe(1);
+    expect(await production.getItemStationStatus(managerCtx(f), order.id, item.id, "KITCHEN")).toEqual({ status: "ACCEPTED" });
+  });
+
+  it("simultaneous Kitchen/Bar READY keeps the aggregate and waiter notification consistent", async () => {
+    const f = await createFixture();
+    const waiter = context(f, "WAITER", "waiter-1");
+    const manager = managerCtx(f);
+    const order = await orders.openOrder(waiter, { tableId: f.tableId });
+    const item = await orders.addItem(waiter, order.id, { menuItemId: f.comboId, quantity: 1 });
+    await orders.submitOrder(waiter, order.id, { idempotencyKey: randomUUID() });
+    await Promise.all((["KITCHEN", "BAR"] as const).map(station => production.advanceItemStatus(manager, order.id, item.id, station, "SUBMITTED")));
+    expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } })).status).toBe("ACCEPTED");
+    await Promise.all((["KITCHEN", "BAR"] as const).map(station => production.advanceItemStatus(manager, order.id, item.id, station, "ACCEPTED")));
+    expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } })).status).toBe("READY");
+    const floors = await tables.listTables(waiter, f.locationId);
+    expect(floors.flatMap(floor => floor.tables).find(table => table.id === f.tableId)?.readyItems.map(ready => ready.id)).toContain(item.id);
+    expect(await production.getItemStationStatus(manager, order.id, item.id, "KITCHEN")).toEqual({ status: "READY" });
+    expect(await production.listStationOrders(manager, f.locationId, "KITCHEN")).toHaveLength(0);
+  });
+
+  it("targeted reads enforce tenant, location, station and permission boundaries", async () => {
+    const f = await createFixture();
+    const waiter = context(f, "WAITER", "waiter-1");
+    const manager = managerCtx(f);
+    const { orderId, itemId } = await submitAndReady(f, waiter, manager, f.biftekId, "KITCHEN");
+    await expect(production.getItemStationStatus({ ...manager, restaurantId: randomUUID() }, orderId, itemId, "KITCHEN")).rejects.toThrow();
+    await expect(production.getItemStationStatus({ ...manager, locationIds: [] }, orderId, itemId, "KITCHEN")).rejects.toThrow();
+    await expect(production.getItemStationStatus({ ...manager, roles: ["BAR"] }, orderId, itemId, "KITCHEN")).rejects.toThrow();
+    await expect(production.getItemStationStatus({ ...manager, permissions: new Set() }, orderId, itemId, "KITCHEN")).rejects.toThrow();
+    await expect(production.getItemStationStatus(manager, orderId, itemId, "BAR")).rejects.toThrow();
+  });
 });
 
 async function submitAndReady(fixture: Fixture, waiter: AuthContext, manager: AuthContext, menuItemId: string, station: "KITCHEN" | "BAR", quantity = 1) {

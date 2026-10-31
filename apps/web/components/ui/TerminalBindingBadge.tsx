@@ -17,7 +17,16 @@ const ROLE_LABEL: Record<string, string> = { KITCHEN: "KUHINJA", BAR: "ŠANK", R
  * waiter-shell.tsx).
  */
 export function TerminalBindingBadge({ theme = "light" }: { theme?: "light" | "dark" }) {
-  const { status, printRole, error, bind } = useTerminalBinding();
+  const binding = useTerminalBinding();
+  return <TerminalBindingBadgeView binding={binding} theme={theme} />;
+}
+
+/** Presentational badge for a shell that already owns the binding lifecycle. */
+export function TerminalBindingBadgeView({ binding, theme = "light" }: {
+  binding: ReturnType<typeof useTerminalBinding>;
+  theme?: "light" | "dark";
+}) {
+  const { status, printRole, error, bind } = binding;
   if (status === "not-applicable" || status === "checking") return null;
 
   const textClass = theme === "dark" ? "text-cream-300/70" : "text-inkSoft";

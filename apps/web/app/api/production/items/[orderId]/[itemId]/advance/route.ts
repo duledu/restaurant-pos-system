@@ -8,6 +8,12 @@ const bodySchema = z.object({
   expectedStatus: z.enum(["SUBMITTED", "ACCEPTED", "PREPARING", "READY"]),
 });
 
+export const GET = withApiAuth<{ orderId: string; itemId: string }>(async (ctx, request, { orderId, itemId }) => {
+  const station = z.enum(["KITCHEN", "BAR"]).parse(new URL(request.url).searchParams.get("station"));
+  const item = await production.getItemStationStatus(ctx, orderId, itemId, station);
+  return NextResponse.json({ item }, { headers: { "Cache-Control": "no-store" } });
+});
+
 export const POST = withApiAuth<{ orderId: string; itemId: string }>(async (ctx, request, { orderId, itemId }) => {
   const body = await request.json();
   const { station, expectedStatus } = bodySchema.parse(body);

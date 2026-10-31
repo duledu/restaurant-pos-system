@@ -2,12 +2,12 @@
 
 import { waiterTiming } from "./waiter-performance";
 import { useRef, useState } from "react";
-import { readAvailability, type Category, type StaticMenuItem, type LiveAvailability } from "./waiter-menu";
+import { readAvailability, readMenuSnapshot, type Category, type StaticMenuItem, type LiveAvailability } from "./waiter-menu";
 import type { FloorWithTables } from "./waiter-tables";
 import type { PromotionRule } from "./promotion-preview";
 
 async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
+  const res = await fetch(url, { cache: "no-store", headers: { "Content-Type": "application/json" } });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
   return body as T;
@@ -39,10 +39,7 @@ export interface PreparationResult {
    * — P0.2b: dobijen preko dedikovanog /api/pos/menu/availability endpointa
    * (zamenjuje P0.1b-ovo privremeno ponovno korišćenje /api/admin/menu/items). */
   availabilityByItemId: Map<string, LiveAvailability>;
-  /** P0.2b — statička verzija menija (broj) ili `null` (Redis nedostupan/
-   * nepoznato) pridružena OVOM konkretnom snapshot-u — vidi
-   * menu.getWaiterMenuSnapshot. Još se ne koristi za rekonsilijaciju (to je
-   * P0.2c/P0.3), samo je preneta ovde da bude dostupna kad zatreba. */
+  /** Version belonging to this snapshot; null requires an authoritative refresh. */
   menuVersion: number | null;
   /** PROMOTIONS & PRICING ENGINE V1 — raw, unevaluated schedule rules (see
    * promotion-service.ts's listActivePromotionRulesForSnapshot). The client
@@ -115,9 +112,21 @@ export async function prepareShift(onStage: (stage: PreparationStage) => void): 
   ] as const;
   // Drain sibling requests before exposing retry, so attempts never overlap.
   await Promise.allSettled(requests);
-  const [snapshot, availability, shiftRes, tablesRes] = await Promise.all(requests);
+  const [initialSnapshot, initialAvailability, shiftRes, tablesRes] = await Promise.all(requests);
+  let snapshot = initialSnapshot;
+  let availability = initialAvailability;
   if (!me.restaurantId || snapshot.restaurantId !== me.restaurantId || snapshot.locationId !== locationId) throw new Error("Identitet nije usklađen");
-  const availabilityByItemId = readAvailability(availability, locationId, snapshot.items);
+  snapshot = { ...snapshot, ...readMenuSnapshot(snapshot, me.restaurantId, locationId) };
+  let availabilityByItemId: Map<string, LiveAvailability>;
+  try { availabilityByItemId = readAvailability(availability, locationId, snapshot.items); }
+  catch {
+    // A catalog edit can race the initial parallel reads. Retry one fresh pair;
+    // never mark preparation ready with an incomplete availability overlay.
+    snapshot = await apiFetch<typeof snapshot>(`/api/pos/menu/snapshot?locationId=${encodeURIComponent(locationId)}&fresh=1`);
+    snapshot = { ...snapshot, ...readMenuSnapshot(snapshot, me.restaurantId, locationId) };
+    availability = await apiFetch(`/api/pos/menu/availability?locationId=${encodeURIComponent(locationId)}`);
+    availabilityByItemId = readAvailability(availability, locationId, snapshot.items);
+  }
 
   finishTiming();
   return {

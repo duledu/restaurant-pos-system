@@ -10,7 +10,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@rcs/db";
 import { ForbiddenError, type AuthContext } from "@rcs/auth";
 import { reservations, tables, orders } from "@rcs/domain";
-import { createReservationSchema, updateReservationSchema } from "@rcs/shared";
+import { createReservationSchema, updateReservationSchema, zonedWallClock } from "@rcs/shared";
 import { resetPrismaTestTables } from "../setup/reset-test-db";
 
 interface Fixture {
@@ -47,6 +47,16 @@ async function makeTable(fixture: Fixture, ctx: AuthContext, label = `T-${random
 }
 
 const FUTURE_DATE = "2099-06-15"; // always in the future, avoids any "past reservation" edge case affecting unrelated assertions
+
+// The service interprets input in the restaurant's zone, not UTC. Using UTC
+// clock fields here booked these "upcoming" fixtures one/two hours in the past.
+function restaurantDateTime(at: Date) {
+  const local = zonedWallClock(at, "Europe/Belgrade");
+  return {
+    date: `${local.year}-${String(local.month).padStart(2, "0")}-${String(local.day).padStart(2, "0")}`,
+    time: `${String(Math.floor(local.minutesSinceMidnight / 60)).padStart(2, "0")}:${String(local.minutesSinceMidnight % 60).padStart(2, "0")}`,
+  };
+}
 
 beforeEach(async () => {
   await resetPrismaTestTables(prisma, "tenants, permissions, login_throttles");
@@ -419,8 +429,7 @@ describe("Regression — Reservations never touch existing Table/Order architect
     const table = await makeTable(fixture, ctx, "Sto 7");
     // Reservation 30 minutes from now — inside the "upcoming" window.
     const soon = new Date(Date.now() + 30 * 60_000);
-    const dateStr = soon.toISOString().slice(0, 10);
-    const timeStr = `${String(soon.getUTCHours()).padStart(2, "0")}:${String(soon.getUTCMinutes()).padStart(2, "0")}`;
+    const { date: dateStr, time: timeStr } = restaurantDateTime(soon);
     await reservations.createReservation(ctx, { locationId: fixture.locationId, guestName: "Upcoming Guest", phone: "060", date: dateStr, time: timeStr, partySize: 2, tableId: table.id });
 
     const order = await orders.openOrder(ctx, { tableId: table.id });
@@ -434,8 +443,7 @@ describe("Regression — Reservations never touch existing Table/Order architect
     const ctx = waiterCtx(fixture);
     const table = await makeTable(fixture, ctx, "Sto 9");
     const soon = new Date(Date.now() + 20 * 60_000);
-    const dateStr = soon.toISOString().slice(0, 10);
-    const timeStr = `${String(soon.getUTCHours()).padStart(2, "0")}:${String(soon.getUTCMinutes()).padStart(2, "0")}`;
+    const { date: dateStr, time: timeStr } = restaurantDateTime(soon);
     await reservations.createReservation(ctx, { locationId: fixture.locationId, guestName: "Card Guest", phone: "060", date: dateStr, time: timeStr, partySize: 3, tableId: table.id });
 
     const floors = await tables.listTables(ctx, fixture.locationId);

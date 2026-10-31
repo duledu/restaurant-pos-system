@@ -46,8 +46,7 @@ beforeEach(() => {
   // requestAnimationFrame's real ~16ms-per-frame timing has no place in a
   // unit test — resolving it via a microtask keeps the double-rAF paint
   // proof (see kds-perf.ts) fast and deterministic without changing what
-  // it proves (still two genuinely separate scheduler turns, just not
-  // real wall-clock frames).
+  // it proves (only DOM behavior; this does not measure browser painting).
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
     queueMicrotask(() => cb(performance.now()));
     return 0;
@@ -60,6 +59,7 @@ beforeEach(() => {
     const url = String(input);
     const result = custom(url, options);
     if (result) return result;
+    if (url.includes("/advance?")) return response({ item: baseItem });
     const path = url.split("?")[0];
     if (path === "/api/pos/me") return response({ restaurantId: "r1", employeeId: "e1", firstName: "Marko", lastName: "Petrović", roles: ["KITCHEN"], locationIds: ["l1"] });
     if (path === "/api/production/kitchen") return response({ orders: [order()] });
@@ -103,26 +103,161 @@ async function click(text: string) {
   });
 }
 
+describe("KDS independent resource loading", () => {
+  it("shows and refreshes active tickets while history and printing remain pending", async () => {
+    vi.useFakeTimers();
+    const history = deferred<Response>();
+    const printing = deferred<Response>();
+    custom = url => url.includes("/completed") ? history.promise : url.includes("/print-jobs") ? printing.promise : undefined;
+    await mount();
+    expect(host.textContent).toContain("Pljeskavica");
+    await act(async () => { await vi.advanceTimersByTimeAsync(8000); });
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/production/kitchen?locationId=l1")).toHaveLength(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes("/completed"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes("/print-jobs"))).toHaveLength(1);
+    await act(async () => { history.resolve(response({ orders: [] })); printing.resolve(response(emptyPrintJobs)); });
+  });
+
+  it("keeps history/print failures visible when active requests succeed and clears each after recovery", async () => {
+    vi.useFakeTimers();
+    custom = url => url.includes("/completed") ? response({ error: "history unavailable" }, false)
+      : url.includes("/print-jobs") ? response({ error: "printer unavailable" }, false) : undefined;
+    await mount();
+    expect(host.textContent).toContain("Pljeskavica");
+    expect(host.textContent).toContain("history unavailable");
+    expect(host.textContent).toContain("printer unavailable");
+    custom = url => url.includes("/completed") ? response({ error: "history unavailable" }, false) : undefined;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(host.textContent).toContain("history unavailable");
+    expect(host.textContent).not.toContain("printer unavailable");
+  });
+
+  it("shows active request errors without suppressing completed history", async () => {
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ error: "active unavailable" }, false)
+      : url.includes("/completed") ? response({ orders: [{ ...order([{ ...baseItem, status: "READY" }]), completedAt: baseItem.submittedAt }] }) : undefined;
+    await mount();
+    expect(host.textContent).toContain("active unavailable");
+    await click("Gotove");
+    expect(host.textContent).toContain("Pljeskavica");
+  });
+
+  it("does not queue print work from a response arriving after unmount", async () => {
+    const printing = deferred<Response>();
+    custom = url => url.includes("/print-jobs") ? printing.promise : undefined;
+    await mount();
+    await act(async () => root.render(null));
+    const count = fetchMock.mock.calls.length;
+    await act(async () => printing.resolve(response({ ...emptyPrintJobs, autoPrintEligible: true, jobs: [{ id: "job", orderId: "order-1", status: "PENDING", isAutomatic: true }] })));
+    expect(fetchMock.mock.calls).toHaveLength(count);
+  });
+});
+
 describe("KdsClient — instant optimistic Kitchen transitions", () => {
+  it.each(["ACCEPTED", "PREPARING"])("shows READY pending immediately from %s and keeps the ticket until confirmation", async status => {
+    const gate = deferred<Response>();
+    custom = url => url.endsWith("/advance") ? gate.promise : url === "/api/production/kitchen?locationId=l1"
+      ? response({ orders: [order([{ ...baseItem, status }])] }) : undefined;
+    await mount();
+    const initialRequests = fetchMock.mock.calls.length;
+    await click("Označi spremno");
+    expect(host.textContent).toContain("Spremno");
+    expect(host.textContent).toContain("Čeka potvrdu");
+    expect(host.textContent).toContain("Sto 5");
+    expect(fetchMock.mock.calls.length - initialRequests).toBe(1);
+    await act(async () => gate.resolve(response({ item: { status: "READY" } })));
+    expect(host.textContent).not.toContain("Sto 5");
+    expect(host.textContent).not.toContain("Čeka potvrdu");
+    expect(fetchMock.mock.calls.length - initialRequests).toBe(1);
+  });
+
+  it("does not wait for diagnostic animation frames before enabling the confirmed next action", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn());
+    await mount();
+    await click("Prihvati");
+    expect(findButton("Označi spremno").disabled).toBe(false);
+  });
+
+  it("rolls back failed READY even while the board poll and history are still pending", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const poll = deferred<Response>();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }])] }) : undefined;
+    await mount();
+    custom = url => url.endsWith("/advance") ? response({ error: "Nije sačuvano" }, false, 500)
+      : url.includes("/advance?") ? response({ item: { status: "ACCEPTED" } })
+      : url.includes("locationId") ? poll.promise : undefined;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    const before = fetchMock.mock.calls.length;
+    await click("Označi spremno");
+    expect(fetchMock.mock.calls.slice(before).map(([url]) => url)).toEqual([
+      "/api/production/items/order-1/item-1/advance", "/api/production/items/order-1/item-1/advance?station=KITCHEN",
+    ]);
+    expect(host.textContent).toContain("Nije sačuvano");
+    expect(host.textContent).toContain("U pripremi");
+    expect(findButton("Označi spremno").disabled).toBe(false);
+  });
+
+  it("times out a lost POST response, reconciles its committed state, and never repeats the POST", async () => {
+    vi.useFakeTimers();
+    custom = (url, options) => {
+      if (url.endsWith("/advance")) return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new DOMException("Timed out", "AbortError")));
+      });
+      if (url.includes("/advance?")) return response({ item: { status: "ACCEPTED" } });
+      return undefined;
+    };
+    await mount();
+    await click("Prihvati");
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    expect(host.textContent).toContain("U pripremi");
+    expect(host.textContent).not.toContain("Čeka potvrdu");
+    expect(findButton("Označi spremno").disabled).toBe(false);
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+  });
+
+  it("keeps an ambiguous action disabled until a later targeted read succeeds", async () => {
+    vi.useFakeTimers();
+    let available = false;
+    custom = url => url.endsWith("/advance") ? Promise.reject(new Error("Connection lost"))
+      : url.includes("/advance?") ? available ? response({ item: { status: "SUBMITTED" } }) : response({}, false, 503) : undefined;
+    await mount();
+    await click("Prihvati");
+    expect(host.textContent).toContain("Provera statusa");
+    expect(findButton("Označi spremno").disabled).toBe(true);
+    available = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(host.textContent).toContain("Novo");
+    expect(findButton("Prihvati").disabled).toBe(false);
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+  });
+
+  it("treats a malformed successful response as unconfirmed and reconciles cancellation", async () => {
+    custom = url => url.endsWith("/advance") ? response({})
+      : url.includes("/advance?") ? response({ item: { status: "CANCELLED" } }) : undefined;
+    await mount();
+    await click("Prihvati");
+    expect(host.textContent).toContain("Server nije potvrdio status");
+    expect(host.textContent).not.toContain("Sto 5");
+  });
+
   it("shows the new status immediately, before the server confirms (same tick as the click)", async () => {
     const advanceGate = deferred<Response>();
-    custom = (url) => (url.includes("/advance") ? advanceGate.promise : undefined);
+    custom = (url) => (url.endsWith("/advance") ? advanceGate.promise : undefined);
     await mount();
     expect(host.textContent).toContain("Novo");
 
     await click("Prihvati");
     // Optimistic update must be visible even though the POST is still pending.
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes("/advance"))).toHaveLength(1);
 
     advanceGate.resolve(response({ item: { ...baseItem, status: "ACCEPTED" } }));
     await flush();
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
   });
 
   it("does not double-submit the same item on a rapid double tap while the first request is still pending", async () => {
     const advanceGate = deferred<Response>();
-    custom = (url) => (url.includes("/advance") ? advanceGate.promise : undefined);
+    custom = (url) => (url.endsWith("/advance") ? advanceGate.promise : undefined);
     await mount();
 
     const button = findButton("Prihvati");
@@ -134,7 +269,7 @@ describe("KdsClient — instant optimistic Kitchen transitions", () => {
 
     advanceGate.resolve(response({ item: { ...baseItem, status: "ACCEPTED" } }));
     await flush();
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
   });
 
   it("advances two different items independently — one pending item never blocks another", async () => {
@@ -162,7 +297,7 @@ describe("KdsClient — instant optimistic Kitchen transitions", () => {
     });
     // Both items reflect the optimistic transition independently, while
     // BOTH their requests are still in flight — neither waited on the other.
-    const acceptedCount = (host.textContent?.match(/Prihvaćeno/g) ?? []).length;
+    const acceptedCount = (host.textContent?.match(/U pripremi/g) ?? []).length;
     expect(acceptedCount).toBe(2);
 
     gate1.resolve(response({ item: { ...baseItem, status: "ACCEPTED" } }));
@@ -172,6 +307,64 @@ describe("KdsClient — instant optimistic Kitchen transitions", () => {
 });
 
 describe("KdsClient — out-of-order poll responses must never regress a newer local state (root cause of the physical QA report)", () => {
+  it("removes another terminal's READY item when the remaining sibling objects are unchanged", async () => {
+    vi.useFakeTimers();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }, secondItem])] }) : undefined;
+    await mount();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ orders: [order([secondItem])] }) : undefined;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(host.textContent).not.toContain("Pljeskavica");
+    expect(host.textContent).toContain("Sarma");
+    expect(host.textContent).not.toContain("Označi spremno");
+  });
+
+  it.each([false, true])("protects a poll started DURING a mutation, resolving after confirmation=%s", async afterConfirmation => {
+    vi.useFakeTimers();
+    const mutation = deferred<Response>();
+    const poll = deferred<Response>();
+    await mount();
+    custom = url => url.endsWith("/advance") ? mutation.promise
+      : url === "/api/production/kitchen?locationId=l1" ? poll.promise : undefined;
+    await click("Prihvati");
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    if (afterConfirmation) await act(async () => mutation.resolve(response({ item: { status: "ACCEPTED" } })));
+    await act(async () => poll.resolve(response({ orders: [order()] })));
+    expect(host.textContent).toContain("U pripremi");
+    expect(host.textContent).not.toContain("Novo");
+    if (!afterConfirmation) {
+      expect(host.textContent).toContain("Čeka potvrdu");
+      await act(async () => mutation.resolve(response({ item: { status: "ACCEPTED" } })));
+    }
+  });
+
+  it("does not resurrect a confirmed READY ticket from a stale active-list response", async () => {
+    vi.useFakeTimers();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }])] }) : undefined;
+    await mount();
+    const poll = deferred<Response>();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? poll.promise
+      : url.endsWith("/advance") ? response({ item: { status: "READY" } }) : undefined;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await click("Označi spremno");
+    await act(async () => poll.resolve(response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }])] })));
+    expect(host.textContent).not.toContain("Sto 5");
+  });
+
+  it("preserves pending READY when polls omit that item, without retaining removed siblings", async () => {
+    vi.useFakeTimers();
+    custom = url => url === "/api/production/kitchen?locationId=l1" ? response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }, secondItem])] }) : undefined;
+    await mount();
+    const gate = deferred<Response>();
+    custom = url => url.endsWith("/advance") ? gate.promise
+      : url === "/api/production/kitchen?locationId=l1" ? response({ orders: [] }) : undefined;
+    await click("Označi spremno");
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(host.textContent).toContain("Spremno");
+    expect(host.textContent).toContain("Čeka potvrdu");
+    expect(host.textContent).not.toContain("Sarma");
+    await act(async () => gate.resolve(response({ item: { status: "READY" } })));
+    expect(host.textContent).not.toContain("Sto 5");
+  });
   it("a poll GET issued before a tap does not revert that item when it resolves after the tap's confirmed update", async () => {
     // Only fake the interval timer — React's own scheduling (and this
     // file's flush() helper) rely on real setTimeout/microtasks, which
@@ -201,12 +394,12 @@ describe("KdsClient — out-of-order poll responses must never regress a newer l
     // resolves fast (typical real-world ordering that produced the bug).
     custom = (url) => {
       if (url === "/api/production/kitchen?locationId=l1") return slowPoll.promise;
-      if (url.includes("/advance")) return response({ item: { ...baseItem, status: "ACCEPTED" } });
+      if (url.endsWith("/advance")) return response({ item: { ...baseItem, status: "ACCEPTED" } });
       return undefined;
     };
     await click("Prihvati");
     await flush();
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
 
     // The stale poll (issued BEFORE the tap) now finally resolves, still
     // carrying the OLD pre-tap status. It must NOT win.
@@ -214,7 +407,7 @@ describe("KdsClient — out-of-order poll responses must never regress a newer l
       slowPoll.resolve(response({ orders: [order()] }));
     });
     await flush();
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
     expect(host.textContent).not.toContain("Novo");
   });
 });
@@ -223,7 +416,8 @@ describe("KdsClient — stale-status conflicts recover automatically (no 'refres
   it("a 409 stale-status response reconciles silently to the authoritative state, with no error banner", async () => {
     await mount();
     custom = (url) => {
-      if (url.includes("/advance")) return response({ error: "Status stavke je već promenjen — osveži prikaz" }, false, 409);
+      if (url.endsWith("/advance")) return response({ error: "Status stavke je već promenjen — osveži prikaz" }, false, 409);
+      if (url.includes("/advance?")) return response({ item: { ...baseItem, status: "ACCEPTED" } });
       // Authoritative reconcile fetch: someone/something else already moved it.
       if (url === "/api/production/kitchen?locationId=l1") return response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }])] });
       return undefined;
@@ -233,13 +427,13 @@ describe("KdsClient — stale-status conflicts recover automatically (no 'refres
 
     expect(host.textContent).not.toContain("osveži prikaz");
     expect(host.textContent).not.toContain("Status stavke je već promenjen");
-    expect(host.textContent).toContain("Prihvaćeno");
+    expect(host.textContent).toContain("U pripremi");
   });
 
   it("a genuine failure (non-409) still reconciles automatically but does surface an actionable error", async () => {
     await mount();
     custom = (url) => {
-      if (url.includes("/advance")) return response({ error: "Mrežna greška" }, false, 500);
+      if (url.endsWith("/advance")) return response({ error: "Mrežna greška" }, false, 500);
       if (url === "/api/production/kitchen?locationId=l1") return response({ orders: [order()] });
       return undefined;
     };
@@ -276,7 +470,7 @@ describe("KdsClient — Aktivne/Gotove", () => {
   it("removes an order from Aktivne immediately once its last pending item reaches a terminal status, without waiting for the next poll", async () => {
     custom = (url) => {
       if (url === "/api/production/kitchen?locationId=l1") return response({ orders: [order([{ ...baseItem, status: "ACCEPTED" }])] });
-      if (url.includes("/advance")) return response({ item: { ...baseItem, status: "READY" } });
+      if (url.endsWith("/advance")) return response({ item: { ...baseItem, status: "READY" } });
       return undefined;
     };
     await mount();

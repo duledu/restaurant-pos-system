@@ -3,7 +3,7 @@ import { ADMIN_ROLES } from "@rcs/shared";
 import { AdminShell } from "../../components/admin/AdminShell";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  await requireRouteAccess(ADMIN_ROLES);
+  const ctx = await requireRouteAccess(ADMIN_ROLES);
 
-  return <AdminShell>{children}</AdminShell>;
+  return <AdminShell canViewReservations={ctx.permissions.has("reservations.view")}>{children}</AdminShell>;
 }

@@ -64,6 +64,26 @@ export interface MenuItem {
 export type StaticMenuItem = Omit<MenuItem, "stock" | "recipeAvailability" | "availability">;
 export type LiveAvailability = Pick<MenuItem, "stock" | "recipeAvailability" | "availability">;
 
+export interface WaiterMenuSnapshot {
+  restaurantId: string;
+  locationId: string;
+  categories: Category[];
+  items: StaticMenuItem[];
+  menuVersion: number | null;
+}
+
+export function readMenuSnapshot(body: unknown, restaurantId: string, locationId: string): WaiterMenuSnapshot {
+  const value = body as WaiterMenuSnapshot | null;
+  if (!value || value.restaurantId !== restaurantId || value.locationId !== locationId
+    || !Array.isArray(value.items) || !Array.isArray(value.categories)
+    || value.items.some(item => !item || typeof item.id !== "string")
+    || new Set(value.items.map(item => item.id)).size !== value.items.length
+    || value.categories.some(category => !category || typeof category.id !== "string")) {
+    throw new Error("Meni nije usklađen sa restoranom i lokacijom");
+  }
+  return { ...value, menuVersion: Number.isSafeInteger(value.menuVersion) && Number(value.menuVersion) > 0 ? value.menuVersion : null };
+}
+
 /** The endpoint is a full snapshot, never a delta. Reject incomplete responses. */
 export function readAvailability(body: unknown, locationId: string, items: readonly { id: string }[]): Map<string, LiveAvailability> {
   const response = body as { locationId?: string; items?: Array<LiveAvailability & { menuItemId: string }> } | null;
@@ -79,6 +99,7 @@ export function readAvailability(body: unknown, locationId: string, items: reado
     result.set(row.menuItemId, { stock: row.stock, recipeAvailability: row.recipeAvailability, availability: row.availability });
   }
   if (items.some(item => !result.has(item.id))) throw new Error("Dostupnost nije potpuna");
+  if (result.size !== items.length) throw new Error("Meni i dostupnost nisu iste verzije");
   return result;
 }
 

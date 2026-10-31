@@ -52,7 +52,6 @@ import { prisma, Prisma } from "@rcs/db";
 import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
-import { getActiveShift } from "../shifts/shift-service";
 import { requireOrderOperator } from "./order-access";
 import type { TransferOrderItemsInput } from "@rcs/shared";
 
@@ -127,25 +126,29 @@ export async function transferOrderItems(ctx: AuthContext, sourceOrderId: string
     }
   }
 
-  // Aktivna smena se učitava PRE transakcije (ista konvencija kao
-  // billing-service.completePayment) — koristi se SAMO ako odredišni sto
-  // nema postojeću aktivnu porudžbinu.
-  const existingDestinationOrder = await prisma.order.findFirst({
-    where: { tableId: destinationTable.id, status: { notIn: ["COMPLETED", "CANCELLED"] } },
-  });
-  if (existingDestinationOrder && existingDestinationOrder.status === "DRAFT") {
-    throw new Error("Odredišni sto ima nepočetu (nacrt) porudžbinu — prvo je pošalji ili izaberi drugi sto");
-  }
-  let destinationShiftId: string | null = null;
-  if (!existingDestinationOrder) {
-    const shift = await getActiveShift(ctx, sourceOrder.locationId);
-    if (!shift) throw new Error("Nema aktivne smene na ovoj lokaciji — transfer nije moguć");
-    destinationShiftId = shift.id;
-  }
-
+  // Discover destination order/shift only after acquiring the table lock.
   const actorRole = ctx.roles[0] ?? "UNKNOWN";
 
   const result = await prisma.$transaction(async (tx) => {
+    // Same table-row lock as openOrder. Lock both tables in a stable order:
+    // the transfer can also release its source table near commit.
+    const tableIds = [sourceOrder.tableId, destinationTable.id].sort();
+    for (const tableId of tableIds) {
+      await tx.$queryRaw`SELECT id FROM restaurant_tables WHERE id = ${tableId} FOR UPDATE`;
+    }
+    const existingDestinationOrder = await tx.order.findFirst({
+      where: { tableId: destinationTable.id, status: { notIn: ["COMPLETED", "CANCELLED"] } },
+    });
+    if (existingDestinationOrder && existingDestinationOrder.status === "DRAFT") {
+      throw new Error("Odredišni sto ima nepočetu (nacrt) porudžbinu — prvo je pošalji ili izaberi drugi sto");
+    }
+    let destinationShiftId: string | null = null;
+    if (!existingDestinationOrder) {
+      const shift = await tx.shift.findFirst({ where: { ...scopeToRestaurant(ctx), locationId: sourceOrder.locationId, status: "OPEN" } });
+      if (!shift) throw new Error("Nema aktivne smene na ovoj lokaciji — transfer nije moguć");
+      destinationShiftId = shift.id;
+    }
+
     let destinationOrderId: string;
     if (existingDestinationOrder) {
       destinationOrderId = existingDestinationOrder.id;

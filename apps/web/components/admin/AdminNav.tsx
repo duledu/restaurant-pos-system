@@ -7,6 +7,7 @@ interface NavItem {
   href: string;
   label: string;
   icon: React.ReactNode;
+  reservationAccess?: boolean;
 }
 interface NavSection {
   title: string;
@@ -62,6 +63,7 @@ const NAV_SECTIONS: NavSection[] = [
       { href: "/normativi", label: "Normativi", icon: <RecipeIcon /> },
       { href: "/inventura", label: "Inventura", icon: <CountIcon /> },
       { href: "/tables", label: "Sale i stolovi", icon: <TablesIcon /> },
+      { href: "/reservations", label: "Rezervacije", icon: <ClockIcon />, reservationAccess: true },
       { href: "/staff", label: "Osoblje", icon: <StaffIcon /> },
     ],
   },
@@ -91,7 +93,7 @@ const NAV_SECTIONS: NavSection[] = [
   },
 ];
 
-export function AdminNav() {
+export function AdminNav({ canViewReservations = false }: { canViewReservations?: boolean }) {
   const pathname = usePathname();
 
   return (
@@ -100,7 +102,7 @@ export function AdminNav() {
         <div key={section.title}>
           <p className="mb-2 px-5 text-[10px] font-bold uppercase tracking-[0.18em] text-cream-300/40">{section.title}</p>
           <ul className="space-y-1 px-3">
-            {section.items.map(({ href, label, icon: itemIcon }) => {
+            {section.items.filter(item => !item.reservationAccess || canViewReservations).map(({ href, label, icon: itemIcon }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`);
               return (
                 <li key={href}>

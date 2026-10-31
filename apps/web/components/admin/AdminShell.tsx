@@ -26,7 +26,7 @@ function CloseIcon() {
 /** Shared chrome content — identical markup rendered once for the desktop
  * fixed sidebar and once inside the mobile drawer, so the two never drift
  * (same nav items, same role-gated links, same footer actions). */
-function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onClose?: () => void }) {
+function SidebarContent({ onNavigate, onClose, canViewReservations }: { onNavigate?: () => void; onClose?: () => void; canViewReservations: boolean }) {
   return (
     <>
       <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-white/10 px-5">
@@ -46,7 +46,7 @@ function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onCl
       </div>
 
       <nav className="flex-1 overflow-y-auto py-5" onClick={onNavigate}>
-        <AdminNav />
+        <AdminNav canViewReservations={canViewReservations} />
       </nav>
 
       <div className="shrink-0 border-t border-white/10 bg-graphite-900/30 px-4 py-4">
@@ -66,7 +66,7 @@ function SidebarContent({ onNavigate, onClose }: { onNavigate?: () => void; onCl
   );
 }
 
-export function AdminShell({ children }: { children: React.ReactNode }) {
+export function AdminShell({ children, canViewReservations = false }: { children: React.ReactNode; canViewReservations?: boolean }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const pathname = usePathname();
 
@@ -80,7 +80,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen">
       {/* ── Desktop sidebar (unchanged) ─────────────────────────────────── */}
       <aside className="no-print fixed inset-y-0 left-0 z-20 hidden w-64 flex-col border-r border-white/10 bg-gradient-to-b from-graphite to-graphite-900 shadow-[4px_0_24px_rgba(6,17,30,.08)] md:flex">
-        <SidebarContent />
+        <SidebarContent canViewReservations={canViewReservations} />
       </aside>
 
       {/* ── Mobile top bar ───────────────────────────────────────────────── */}
@@ -109,7 +109,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             className="no-print fixed inset-0 z-40 bg-graphite-900/50"
           />
           <div className="no-print fixed left-0 top-0 z-50 flex h-[100dvh] w-[86vw] max-w-80 animate-slide-up flex-col bg-graphite shadow-elevated">
-            <SidebarContent onNavigate={() => setDrawerOpen(false)} onClose={() => setDrawerOpen(false)} />
+            <SidebarContent canViewReservations={canViewReservations} onNavigate={() => setDrawerOpen(false)} onClose={() => setDrawerOpen(false)} />
           </div>
         </div>
       )}

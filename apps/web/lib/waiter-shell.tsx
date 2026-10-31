@@ -3,16 +3,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppLogo } from "../components/branding/AppLogo";
 import { useShiftPreparation, type PreparationResult, type PreparationStage } from "./waiter-shift-preparation";
-import { readAvailability } from "./waiter-menu";
+import { refreshWaiterMenu } from "./waiter-menu-refresh";
 import { myReadyItemIds, hasNewReadyId } from "./ready-notifications";
 import { createWaiterLocalDraft, type WaiterLocalDraft } from "./waiter-local-draft";
 import { createWaiterFavorites } from "./waiter-table-memory";
 import { shareWaiterSnapshot } from "./waiter-snapshot";
 import { useTerminalBinding } from "./terminal-binding";
-import { TerminalBindingBadge } from "../components/ui/TerminalBindingBadge";
+import { TerminalBindingBadgeView } from "../components/ui/TerminalBindingBadge";
 
 async function apiFetch(url: string) {
-  const res = await fetch(url);
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error("Osvežavanje nije uspelo");
   return res.json();
 }
@@ -80,6 +80,8 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
   const audioRef = useRef<AudioContext | null>(null);
   const alive = useRef(true);
   const availabilityRequest = useRef<Promise<void> | null>(null);
+  const menuRef = useRef(initial);
+  const snapshotAt = useRef(Date.now());
   const knownReadyIds = useRef(myReadyItemIds(initial.floors.flatMap(f => f.tables), initial.employeeId));
   const { locationId } = initial;
 
@@ -164,8 +166,12 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
     if (availabilityRequest.current) return availabilityRequest.current;
     const request = (async () => {
       try {
-        const result = await apiFetch(`/api/pos/menu/availability?locationId=${encodeURIComponent(locationId)}`);
-        const overlay = readAvailability(result, locationId, initial.items);
+        const refreshed = await refreshWaiterMenu(menuRef.current, snapshotAt.current, apiFetch);
+        if (!alive.current) return;
+        const result = refreshed.menu;
+        const overlay = result.availabilityByItemId;
+        menuRef.current = { ...menuRef.current, ...result };
+        snapshotAt.current = refreshed.snapshotAt;
         if (alive.current) setData(previous => {
           let changed = previous.availabilityByItemId.size !== overlay.size;
           for (const [id, value] of overlay) {
@@ -175,15 +181,32 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
           }
           const promotions = Array.isArray(result.promotions) ? shareWaiterSnapshot(previous.promotions, result.promotions) : previous.promotions;
           const restaurantTimezone = result.restaurantTimezone ?? previous.restaurantTimezone;
+          const items = shareWaiterSnapshot(previous.items, result.items);
+          const categories = shareWaiterSnapshot(previous.categories, result.categories);
           return changed || promotions !== previous.promotions || restaurantTimezone !== previous.restaurantTimezone
-            ? { ...previous, availabilityByItemId: overlay, promotions, restaurantTimezone } : previous;
+            || items !== previous.items || categories !== previous.categories || result.menuVersion !== previous.menuVersion
+            ? { ...previous, items, categories, menuVersion: result.menuVersion, availabilityByItemId: overlay, promotions, restaurantTimezone } : previous;
         });
       } catch { /* Failed or incomplete snapshots must retain the last authoritative map. */ }
     })();
     availabilityRequest.current = request;
     void request.finally(() => { availabilityRequest.current = null; });
     return request;
-  }, [locationId, initial.items]);
+  }, []);
+
+  // One refresh owner for the entire prepared workspace, including the table grid.
+  // No menu/version fetch is added to table taps or category navigation.
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState !== "hidden") void refreshAvailability(); };
+    const interval = setInterval(refresh, 15000);
+    window.addEventListener("online", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("online", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [refreshAvailability]);
 
   const setFloors = useCallback((floors: PreparationResult["floors"]) => setData(previous => ({ ...previous, floors })), []);
   const setShift = useCallback((shift: PreparationResult["shift"]) => setData(previous => ({ ...previous, shift })), []);
@@ -202,11 +225,12 @@ function PreparedShell({ initial, children }: { initial: PreparationResult; chil
 }
 
 function TerminalBindingCorner() {
-  const { status } = useTerminalBinding();
+  const binding = useTerminalBinding();
+  const { status } = binding;
   if (status === "not-applicable" || status === "checking") return null;
   return (
     <div className="fixed bottom-3 left-3 z-40 rounded-md bg-white/95 px-2.5 py-1.5 shadow-card backdrop-blur">
-      <TerminalBindingBadge />
+      <TerminalBindingBadgeView binding={binding} />
     </div>
   );
 }

@@ -3,7 +3,6 @@ export { getActiveTableOrder } from "./active-table-order";
 import { requireLocationAccess, scopeToRestaurant, type AuthContext } from "@rcs/auth";
 import { recordAuditEntry } from "../audit/audit-service";
 import { ssePublisher } from "../realtime/sse-publisher";
-import { getActiveShift } from "../shifts/shift-service";
 import { getTable } from "../tables/table-service";
 import { stationsForPreparation } from "../production/station-state";
 import { dispatchStationPrintJobs } from "../printing/print-service";
@@ -45,29 +44,40 @@ const TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 };
 export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
   requireOrderOperator(ctx);
   const table = await getTable(ctx, input.tableId);
-  const shift = await getActiveShift(ctx, table.floor.locationId);
-  if (!shift) {
-    throw new Error("Nema aktivne smene na ovoj lokaciji — otvori smenu pre unosa porudžbina");
-  }
-
-  // Ne samo DRAFT — I poslata, još nenaplaćena porudžbina za ovaj sto se
-  // vraća umesto da se kreira nova. Bez ovoga bi ponovni tap na zauzet sto
-  // (dok je porudžbina već SUBMITTED/PREPARING/...) tiho otvorio DRUGU
-  // paralelnu porudžbinu na istom stolu — kritično za Fazu 2 gde račun mora
-  // nedvosmisleno odgovarati JEDNOJ porudžbini po stolu.
-  const existingActive = await prisma.order.findFirst({
-    where: { ...scopeToRestaurant(ctx), tableId: input.tableId, status: { notIn: ["COMPLETED", "CANCELLED"] } },
-  });
-  if (existingActive) {
-    if (existingActive.status === "DRAFT") requireDraftOwnership(ctx, existingActive.openedBy);
-    return existingActive;
-  }
-
   return prisma.$transaction(async (tx) => {
+    // Serialize all creators on the existing table row, across processes/devices.
+    // Discovery MUST occur after this lock, on the same transaction connection.
+    await tx.$queryRaw`SELECT id FROM restaurant_tables WHERE id = ${table.id} FOR UPDATE`;
+    const currentTable = await tx.restaurantTable.findFirst({
+      where: { id: table.id, floor: scopeToRestaurant(ctx) }, include: { floor: true },
+    });
+    if (!currentTable || !currentTable.isActive) throw new Error("Sto nije aktivan");
+    requireLocationAccess(ctx, currentTable.floor.locationId);
+    const shift = await tx.shift.findFirst({ where: { ...scopeToRestaurant(ctx), locationId: currentTable.floor.locationId, status: "OPEN" } });
+    if (!shift) {
+      throw new Error("Nema aktivne smene na ovoj lokaciji — otvori smenu pre unosa porudžbina");
+    }
+
+    // Ne samo DRAFT — I poslata, još nenaplaćena porudžbina za ovaj sto se
+    // vraća umesto da se kreira nova. Bez ovoga bi ponovni tap na zauzet sto
+    // (dok je porudžbina već SUBMITTED/PREPARING/...) tiho otvorio DRUGU
+    // paralelnu porudžbinu na istom stolu — kritično za Fazu 2 gde račun mora
+    // nedvosmisleno odgovarati JEDNOJ porudžbini po stolu.
+    const existingActive = await tx.order.findFirst({
+      where: { ...scopeToRestaurant(ctx), tableId: input.tableId, status: { notIn: ["COMPLETED", "CANCELLED"] } },
+      include: { items: { include: ORDER_ITEM_INCLUDE, orderBy: { createdAt: "asc" } }, table: true },
+    });
+    if (existingActive) {
+      requireLocationAccess(ctx, existingActive.locationId);
+      if (existingActive.locationId !== currentTable.floor.locationId) throw new Error("Porudžbina nije na lokaciji stola");
+      if (existingActive.status === "DRAFT") requireDraftOwnership(ctx, existingActive.openedBy);
+      return existingActive;
+    }
+
     const order = await tx.order.create({
       data: {
         restaurantId: ctx.restaurantId,
-        locationId: table.floor.locationId,
+        locationId: currentTable.floor.locationId,
         tableId: input.tableId,
         shiftId: shift.id,
         openedBy: ctx.employeeId,
@@ -79,8 +89,10 @@ export async function openOrder(ctx: AuthContext, input: OpenOrderInput) {
     await tx.orderEvent.create({
       data: { orderId: order.id, type: "order_opened", createdBy: ctx.employeeId },
     });
-    return order;
-  });
+    return tx.order.findUniqueOrThrow({ where: { id: order.id },
+      include: { items: { include: ORDER_ITEM_INCLUDE, orderBy: { createdAt: "asc" } }, table: true },
+    });
+  }, TX_OPTIONS);
 }
 
 /**

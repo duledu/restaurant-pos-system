@@ -198,6 +198,23 @@ const NEXT_STATUS: Record<string, string> = {
   PREPARING: "READY",
 };
 
+/** Read one authoritative station state, including items no longer in the
+ * active list. Used to resolve failed/lost mutation responses without history,
+ * printer queries, or a full board reload. */
+export async function getItemStationStatus(ctx: AuthContext, orderId: string, itemId: string, station: Station) {
+  requirePermission(ctx, PRODUCTION_VIEW);
+  assertStationAccess(ctx, station);
+  const item = await prisma.orderItem.findFirst({
+    where: { id: itemId, orderId, order: scopeToRestaurant(ctx), stationStates: { some: { station } } },
+    select: { status: true, order: { select: { locationId: true, status: true } },
+      stationStates: { where: { station }, select: { status: true } } },
+  });
+  if (!item) throw new Error("Stavka nije pronađena za ovu stanicu");
+  requireLocationAccess(ctx, item.order.locationId);
+  return { status: item.order.status === "CANCELLED" || item.status === "CANCELLED"
+    ? "CANCELLED" as const : item.stationStates[0].status };
+}
+
 export async function advanceItemStatus(
   ctx: AuthContext,
   orderId: string,
@@ -225,7 +242,7 @@ export async function advanceItemStatus(
     },
     select: {
       id: true,
-      order: { select: { locationId: true } },
+      order: { select: { locationId: true, status: true } },
       stationStates: true,
     },
   });
@@ -233,6 +250,7 @@ export async function advanceItemStatus(
   // restaurantId scoping (gore) nije dovoljan u restoranu sa više lokacija —
   // zaposleni na Lokaciji A ne sme pomerati stavke porudžbina Lokacije B.
   requireLocationAccess(ctx, item.order.locationId);
+  if (item.order.status === "CANCELLED") throw new StaleItemStatusError();
 
   const stationState = item.stationStates.find((state) => state.station === station);
   if (!stationState) throw new Error("Stavka nije pronađena za ovu stanicu");
@@ -250,6 +268,12 @@ export async function advanceItemStatus(
   const isSingleStationItem = item.stationStates.length === 1;
 
   const updated = await prisma.$transaction(async (tx) => {
+    // Lock the commercial item BEFORE its station row (the same write order
+    // used by cancellation). This serializes Kitchen/Bar aggregation and avoids
+    // two station transactions both committing an out-of-date aggregate.
+    const locked = await tx.$queryRaw<{ status: OrderItemStatus }[]>`
+      SELECT status FROM order_items WHERE id = ${itemId} FOR UPDATE`;
+    if (locked[0]?.status === "CANCELLED") throw new StaleItemStatusError();
     const advanced = await tx.orderItemStation.updateMany({
       where: { orderItemId: itemId, station, status: expectedStatus },
       data: { status: nextStatus as OrderItemStatus },

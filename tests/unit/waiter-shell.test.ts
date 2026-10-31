@@ -64,6 +64,7 @@ beforeEach(() => {
     }
     if (path === "/api/pos/me") return response({ restaurantId: "r1", employeeId: "e1", firstName: "Ana", lastName: "A", roles: ["WAITER"], locationIds: ["l1"] });
     if (path === "/api/pos/menu/snapshot") return response(menu);
+    if (path === "/api/pos/menu/version") return response({ version: 1 });
     if (path === "/api/pos/menu/availability") return response(overlay);
     if (path === "/api/pos/shift") return response({ shift: { id: "s1", status: "OPEN" } });
     if (path === "/api/pos/tables") return response({ floors });
@@ -78,6 +79,58 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("mounted persistent waiter shell", () => {
+  it("allows retry after a cached empty table inspection fails without creating an order", async () => {
+    custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ table: { id: "5", locationId: "l1" }, order: null }) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    await render(h(PosClient));
+    custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ error: "network" }, false) : undefined;
+    await render(h(OrderClient, { tableId: "5" }));
+    expect(host.querySelector("input")).not.toBeNull();
+    expect(host.textContent).toContain("network");
+    custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ table: { id: "5", locationId: "l1" }, order: null }) : undefined;
+    await click("Pokušaj ponovo");
+    expect([...host.querySelectorAll("button")].find(button => button.textContent?.includes("Započni porudžbinu"))?.disabled).toBe(false);
+    expect(calls("/api/pos/orders").filter(([, options]) => options?.method === "POST")).toHaveLength(0);
+  });
+  it("owns one terminal status request and heartbeat loop across waiter navigation", async () => {
+    custom = url => url === "/api/pos/terminal/status" ? response({ applicable: true, status: { printRole: "RECEIPT" } })
+      : url === "/api/pos/terminal/heartbeat" ? response({ ok: true }) : undefined;
+    await render(h(PosClient));
+    expect(calls("/api/pos/terminal/status")).toHaveLength(1);
+    expect(host.textContent).toContain("Radna stanica:");
+    await render(h(OrderClient, { tableId: "5" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(calls("/api/pos/terminal/status")).toHaveLength(1);
+    expect(calls("/api/pos/terminal/heartbeat")).toHaveLength(1);
+    await act(async () => root.render(null));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(calls("/api/pos/terminal/heartbeat")).toHaveLength(1);
+  });
+  it("does not heartbeat or show a terminal badge when binding is inapplicable", async () => {
+    custom = url => url === "/api/pos/terminal/status" ? response({ applicable: false }) : undefined;
+    await render(h(PosClient));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(calls("/api/pos/terminal/status")).toHaveLength(1);
+    expect(calls("/api/pos/terminal/heartbeat")).toHaveLength(0);
+    expect(host.textContent).not.toContain("Poveži ovaj računar");
+  });
+  it("refreshes changed menu data on the table grid without touching accepted order prices", async () => {
+    await render(h(OrderClient, { tableId: "5" }));
+    const accepted = shell.getDraft("5").getSnapshot();
+    await render(h(PosClient));
+    const replacement = { ...menuItem, id: "tea", name: "Tea", price: "250", modifierGroups: [] };
+    custom = url => url.includes("/version") ? response({ version: 2 })
+      : url.includes("/snapshot") ? response({ ...menu, menuVersion: 2, items: [replacement] })
+      : url.includes("/availability") ? response({ ...overlay, items: [{ ...overlay.items[0], menuItemId: "tea" }] }) : undefined;
+    await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+    expect(shell.data.items).toEqual([replacement]);
+    expect(shell.data.availabilityByItemId.has("m1")).toBe(false);
+    expect(shell.getDraft("5").getSnapshot()).toBe(accepted);
+    expect(calls("/api/pos/menu/snapshot")).toHaveLength(2);
+    await render(h(OrderClient, { tableId: "12" }));
+    expect(host.textContent).toContain("Tea");
+    expect(calls("/api/pos/menu/snapshot")).toHaveLength(2);
+  });
   it("refreshes promotion rules through the existing availability request without altering draft prices", async () => {
     await render(h(OrderClient, { tableId: '5' }));
     const before = shell.getDraft('5').getSnapshot().order;
@@ -143,10 +196,11 @@ describe("mounted persistent waiter shell", () => {
     await act(async () => { gate.resolve(); await shell.getDraft('5').flush(); });
     expect(shell.getDraft('5').getSnapshot().order!.items.filter(i => i.status === 'DRAFT').reduce((n,i) => n+i.quantity, 0)).toBe(5);
   });
-  it("cold hydration failure exposes retry without a partial menu or order creation", async () => {
+  it("cold hydration failure retains the menu and exposes retry without allowing writes", async () => {
     custom = url => url.startsWith('/api/pos/orders?') ? response({ error: 'Offline' }, false) : undefined;
     await render(h(OrderClient, { tableId: '5' }));
-    expect(host.querySelector('input')).toBeNull(); expect(host.textContent).toContain('Pokušaj ponovo');
+    expect(host.querySelector('input')).not.toBeNull(); expect(host.textContent).toContain('Pokušaj ponovo');
+    expect([...host.querySelectorAll('button')].find(b => b.textContent?.includes('Coffee'))?.disabled).toBe(true);
     custom = () => undefined; await click('Pokušaj ponovo');
     expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
     expect(fetchMock.mock.calls.some(([,options]) => options?.method === 'POST')).toBe(false);
@@ -190,6 +244,7 @@ describe("mounted persistent waiter shell", () => {
     await click("Započni porudžbinu");
     expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain("Coffee");
     expect(fetchMock.mock.calls.filter(([u, o]) => u === '/api/pos/orders' && o?.method === 'POST')).toHaveLength(1);
+    expect(calls('/api/pos/orders/o5')).toHaveLength(0);
   });
   it("cached empty inspection is local-first and creation stays queued across navigation", async () => {
     const create = deferred<Response>();
@@ -201,6 +256,10 @@ describe("mounted persistent waiter shell", () => {
       : url === '/api/pos/orders' && options?.method === 'POST' ? create.promise : undefined;
     await render(h(OrderClient, { tableId: '5' }));
     expect(host.textContent).toContain('Započni porudžbinu');
+    await click('Započni porudžbinu');
+    expect(fetchMock.mock.calls.filter(([u, o]) => u === '/api/pos/orders' && o?.method === 'POST')).toHaveLength(0);
+    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: null })));
+    custom = (url, options) => url === '/api/pos/orders' && options?.method === 'POST' ? create.promise : undefined;
     await click('Započni porudžbinu'); await render(h(PosClient)); await render(h(OrderClient, { tableId: '5' }));
     await click('Započni porudžbinu'); // The table-owned pending queue rejects a second create.
     expect(fetchMock.mock.calls.filter(([u, o]) => u === '/api/pos/orders' && o?.method === 'POST')).toHaveLength(1);
@@ -233,13 +292,16 @@ describe("mounted persistent waiter shell", () => {
     expect(host.querySelector('.fixed.bottom-0')?.textContent).toContain('Coffee');
     expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
   });
-  it("a late empty inspection cannot erase a newer pending add", async () => {
+  it("cached order edits are disabled until the new inspection confirms the order", async () => {
     await render(h(OrderClient, { tableId: "5" })); await render(h(PosClient));
     const read = deferred<Response>();
     custom = url => url.startsWith('/api/pos/orders?') ? read.promise : undefined;
     await render(h(OrderClient, { tableId: "5" }));
     await labelClick("Povećaj količinu — Coffee");
-    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: null })));
+    expect(shell.getDraft("5").getSnapshot().order?.items[0].quantity).toBe(1);
+    expect(host.querySelector('fieldset')?.disabled).toBe(true);
+    await act(async () => read.resolve(response({ table: { id: '5', locationId: 'l1' }, order: order() })));
+    await labelClick("Povećaj količinu — Coffee");
     expect(shell.getDraft("5").getSnapshot().order?.items[0].quantity).toBe(2);
   });
   it("category/search state stays coherent through cart updates", async () => {
@@ -594,13 +656,13 @@ describe("mounted persistent waiter shell", () => {
     expect(calls("/api/pos/me")).toHaveLength(1); expect(calls("/api/pos/menu/snapshot")).toHaveLength(1);
     expect(calls("/api/admin/menu/items")).toHaveLength(0); expect(calls("/api/admin/menu/categories")).toHaveLength(0);
   });
-  it("shows intentional cold hydration without partial menu or old table cart, then reveals immediately", async () => {
+  it("shows prepared menu during cold inspection without leaking the previous table cart", async () => {
     await render(h(OrderClient, { tableId: "5" }));
     const pending = deferred<Response>(); custom = url => url === "/api/pos/orders/o12" ? pending.promise : undefined;
     await render(h(OrderClient, { tableId: "12" }));
     expect(host.textContent).toContain("Table 12"); expect(host.textContent).not.toContain("Table 5");
-    expect(host.textContent).not.toContain("Coffee"); expect(host.textContent).toContain("Pripremamo sto i porudžbinu");
-    expect(host.querySelector('input')).toBeNull(); expect(host.querySelector('.fixed.bottom-0')).toBeNull();
+    expect(host.textContent).toContain("Coffee"); expect(host.textContent).toContain("Pripremamo sto i porudžbinu");
+    expect(host.querySelector('input')).not.toBeNull(); expect(host.querySelector('.fixed.bottom-0')).toBeNull();
     await act(async () => pending.resolve(response({ order: order("12") })));
     expect(host.querySelector('input')).not.toBeNull(); expect(host.querySelector('.fixed.bottom-0')).not.toBeNull();
     expect(host.textContent).not.toContain("Pripremamo sto i porudžbinu");
@@ -747,9 +809,10 @@ describe("mounted persistent waiter shell", () => {
     custom = url => url === "/api/pos/orders/o5" ? response({ order: { ...order(), items: [] } }) : undefined;
     await render(h(OrderClient, { tableId: "5" })); const pending = deferred<Response>();
     custom = url => url === "/api/pos/orders/o5/items" ? pending.promise : undefined;
-    await click("Coffee"); await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
+    await click("Coffee");
     expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).not.toBeNull();
     await labelClick("Ukloni — Coffee"); expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
+    await render(h(PosClient)); await render(h(OrderClient, { tableId: "5" }));
     await act(async () => pending.resolve(response({ item: { ...line, id: "server-new" } })));
     expect(fetchMock.mock.calls.some(([url, options]) => url === "/api/pos/orders/o5/items/server-new" && options.method === "DELETE")).toBe(true);
   });
@@ -779,7 +842,7 @@ describe("mounted persistent waiter shell", () => {
     await act(async () => pending.resolve(response({ order: { ...order(), items: [{ ...line, status: "SUBMITTED" }] } })));
     expect(host.querySelector('[aria-label="Ukloni — Coffee"]')).toBeNull();
   });
-  it("does not render the menu grid while opening a confirmed-empty table's first order", async () => {
+  it("keeps the prepared menu visible but non-transactional while creating the first order", async () => {
     custom = url => url.startsWith("/api/pos/orders?tableId=") ? response({ table: { id: "5", locationId: "l1" }, order: null }) : undefined;
     await render(h(OrderClient, { tableId: "5" }));
     expect(host.textContent).toContain("Sto je slobodno");
@@ -788,7 +851,8 @@ describe("mounted persistent waiter shell", () => {
     custom = (url, options) => url === "/api/pos/orders" && options?.method === "POST" ? opening.promise : undefined;
     await click("Započni porudžbinu");
     expect(host.textContent).toContain("Otvaramo porudžbinu");
-    expect(host.querySelector("input")).toBeNull(); // opening: menu grid hidden, not half-initialized underneath
+    expect(host.querySelector("input")).not.toBeNull();
+    expect([...host.querySelectorAll("button")].find(b => b.textContent?.includes("Coffee"))?.disabled).toBe(true);
     await act(async () => opening.resolve(response({ order: order("5") })));
     expect(host.querySelector("input")).not.toBeNull();
   });

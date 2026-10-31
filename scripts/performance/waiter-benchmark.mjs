@@ -22,8 +22,8 @@ const bundle = await build({ entryPoints: ['scripts/performance/waiter-fixture.t
     }
     return { contents, loader: path.endsWith('.tsx') ? 'tsx' : 'ts', resolveDir: resolve(a.path, '..') };
   });
-  b.onResolve({ filter: /^next\/navigation$|\/AppLogo$|\/QuickLockButton$|\/LogoutButton$/ }, a => ({ path: a.path, namespace: 'stub' }));
-  b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const useRouter=()=>({push:path=>window.bench.navigate(path)}); export const AppLogo=()=>null; export const QuickLockButton=()=>null; export const LogoutButton=()=>null;' }));
+  b.onResolve({ filter: /^next\/(navigation|link)$|\/AppLogo$|\/QuickLockButton$|\/LogoutButton$/ }, a => ({ path: a.path, namespace: 'stub' }));
+  b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const useRouter=()=>({push:path=>window.bench.navigate(path),prefetch:()=>{}}); export const AppLogo=()=>null; export const QuickLockButton=()=>null; export const LogoutButton=()=>null; export default ()=>null;' }));
   b.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: resolve('node_modules/react-dom/profiling.js') }));
 } }] });
 const cssDir = 'apps/web/.next/static/css';
@@ -65,7 +65,7 @@ try {
       const named=prefix=>[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')?.startsWith(prefix));
       const input=value=>{const el=document.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));};
       const results=[];
-      const count=()=>Number(document.querySelector('.fixed.bottom-0 > div:first-child > span')?.textContent.split(' ')[0] ?? 0);
+      const count=()=>Number([...document.querySelectorAll('.fixed.bottom-0 span')].find(el=>/^[0-9]+ stavki$/.test(el.textContent))?.textContent.split(' ')[0] ?? 0);
       async function measure(action,fn,usable=false,delta){
         const previousCounts={...globalThis.__waiterCounts};
         const beforeCount=count();
@@ -73,11 +73,11 @@ try {
         const mark=()=>{if(!marked){start=performance.now();marked=true;}};
         document.addEventListener('click',mark,true);document.addEventListener('input',mark,true);
         try{fn();}finally{document.removeEventListener('click',mark,true);document.removeEventListener('input',mark,true);}await frames();
-        if(usable)while(!document.querySelector('.fixed.bottom-0')&&!button('Započni porudžbinu')){if(performance.now()-start>10000)throw new Error('Order did not become usable');await frames();}
+        if(usable)while(usable==='kds'?!document.body.textContent.includes('Fixture soup'):!document.querySelector('.fixed.bottom-0')&&!button('Započni porudžbinu')){if(performance.now()-start>10000)throw new Error('Order did not become usable');await frames();}
         const end=performance.now(), renders=bench.renders.slice(index);
         if(delta!==undefined && count()!==beforeCount+delta)throw new Error(action+' count mismatch: '+beforeCount+' -> '+count());
-        const visibleCommit=usable?renders.find(r=>r.usableOrder||r.inspectedEmpty):renders[0];
-        results.push({action,start,componentCalls:Object.fromEntries(Object.entries(globalThis.__waiterCounts??{}).map(([key,value])=>[key,value-(previousCounts[key]??0)])),firstCommitMs:renders[0]?.commitTime-start,commitMs:visibleCommit?visibleCommit.commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>({method:r.method,url:r.url,start:r.start-start,end:r.duration?r.start+r.duration-start:null}))});
+        const visibleCommit=usable==='kds'?renders.find(r=>r.kdsVisible):usable?renders.find(r=>r.usableOrder||r.inspectedEmpty):renders[0];
+        results.push({action,start,menuVisibleMs:renders.find(r=>r.menuVisible)?.commitTime-start,componentCalls:Object.fromEntries(Object.entries(globalThis.__waiterCounts??{}).map(([key,value])=>[key,value-(previousCounts[key]??0)])),firstCommitMs:renders[0]?.commitTime-start,commitMs:visibleCommit?visibleCommit.commitTime-start:0,frameMs:end-start,reactMs:renders.reduce((s,r)=>s+r.actualDuration,0),commits:renders.length,requests:bench.requests.slice(requestIndex).map(r=>({method:r.method,url:r.url,start:r.start-start,end:r.duration?r.start+r.duration-start:null}))});
       }
       await measure('occupied cold open',()=>button('Table 1')?.click() || bench.navigate('/waiter/tables/1'),true);
       await wait(500);
@@ -86,7 +86,7 @@ try {
       for(let i=0;i<4;i++){named('Povećaj').click();await frames();}
       await measure('decrement',()=>named('Umanji').click(),false,-1);await wait(700);
       await measure('remove draft',()=>named('Ukloni').click());await wait(250);
-      await measure('category switch',()=>button('Category 1').click());
+      await measure('category switch',()=>button('Category 2').click());
       await measure('search 240 results',()=>input('Drink'));
       await measure('clear search',()=>input(''));
       button('Category 0').click();await frames();
@@ -98,6 +98,7 @@ try {
       await measure('repeat last round',()=>button('Ponovi poslednju rundu').click(),false,3);await wait(900);
       await measure('back to tables',()=>bench.navigate('/waiter/tables'));
       await measure('empty cold open',()=>bench.navigate('/waiter/tables/24'),true);await wait(500);
+      await measure('create order confirmation',()=>button('Započni porudžbinu').click(),true);await wait(500);
       await measure('back from empty',()=>bench.navigate('/waiter/tables'));
       await measure('cached reopen A',()=>bench.navigate('/waiter/tables/1'),true);await wait(500);
       await measure('switch A to B',()=>bench.navigate('/waiter/tables/24'),true);await wait(500);
@@ -116,10 +117,12 @@ try {
       while(!bench.requests.find(r=>r.url.endsWith('/submit')&&r.start>=submitStart&&r.duration)){if(performance.now()-submitStart>10000)throw new Error('Submit response missing');await frames();}
       await frames();
       const submitRequest=bench.requests.find(r=>r.url.endsWith('/submit')&&r.start>=submitStart);
-      return {results,submit:{queueAndRequestStartMs:submitRequest.start-submitStart,httpMs:submitRequest.duration,waiterVisibleMs:performance.now()-submitStart},idle:{commits:idle.length,reactMs:idle.reduce((s,r)=>s+r.actualDuration,0)},readyDetectionMs,readyReactMs:readyRenders.reduce((s,r)=>s+r.actualDuration,0),navigationTrace:bench.requests.slice(traceIndex),requests:bench.requests,renders:bench.renders};
+      const submit={queueAndRequestStartMs:submitRequest.start-submitStart,httpMs:submitRequest.duration,waiterVisibleMs:performance.now()-submitStart};
+      await measure('KDS active order display',()=>bench.navigate('/kds'),'kds');
+      return {results,submit,idle:{commits:idle.length,reactMs:idle.reduce((s,r)=>s+r.actualDuration,0)},readyDetectionMs,readyReactMs:readyRenders.reduce((s,r)=>s+r.actualDuration,0),navigationTrace:bench.requests.slice(traceIndex),requests:bench.requests,renders:bench.renders};
     })()`);
     runs.push(result); console.log(`${label} run ${run + 1} complete`);
   }
-  await writeFile(`${out}/${label}.json`, JSON.stringify({ baselineRef, source: label === 'baseline' ? baselineRef : 'worktree', bundleSha256: createHash('sha256').update(bundle.outputFiles[0].text).digest('hex'), cssSha256: createHash('sha256').update(css).digest('hex'), environment: 'Chrome headless, production React profiling build, 4x CPU throttle, 412x915, 240 menu items/12 categories, 24 tables/80 submitted rows, synthetic 200ms API, external fonts disabled; not Android', runs }, null, 2));
+  await writeFile(`${out}/${label}.json`, JSON.stringify({ baselineRef, source: label === 'baseline' ? baselineRef : 'worktree', bundleSha256: createHash('sha256').update(bundle.outputFiles[0].text).digest('hex'), cssSha256: createHash('sha256').update(css).digest('hex'), environment: 'Chrome headless, production React profiling build, 4x CPU throttle, 412x915, 240 menu items/12 categories, 24 tables/80 submitted rows, synthetic 200ms APIs (KDS history/printing: 1200ms), external fonts disabled; not Android', runs }, null, 2));
   console.log(`Results: ${out}/${label}.json`);
 } finally { ws?.close(); browser.kill(); server.close(); }

@@ -373,7 +373,7 @@ type MenuItemWithPromo = MenuItem & { promo: PricePreview };
 function TableOrderClient({ tableId }: { tableId: string }) {
   const router = useRouter();
   useEffect(() => { waiterNavigationVisible("menu"); }, []);
-  const { data: shell, refreshAvailability, getDraft, favorites } = useWaiterShell();
+  const { data: shell, getDraft, favorites } = useWaiterShell();
   const draft = getDraft(tableId);
   const { order, inspected, error, submitting } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
   const { setOrder, setError, mutations, submittingRef, submitRevision, idempotencyKeyRef, setSubmitting } = draft;
@@ -501,6 +501,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   }, [hasOrder, draftExpanded]);
 
   const [loading, setLoading] = useState(() => !draft.getSnapshot().inspected);
+  const [inspectionConfirmed, setInspectionConfirmed] = useState(false);
   const [inspectionAttempt, setInspectionAttempt] = useState(0);
   const [voidingItem, setVoidingItem] = useState<OrderItem | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
@@ -541,7 +542,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
         // Queue the loading flag before the external-store notification so
         // the first usable order does not need a second completion render.
         setLoading(false);
-        draft.acceptRead(value, read);
+        setInspectionConfirmed(draft.acceptRead(value, read));
       }
     })
       .catch(e => { if (active) { setLoading(false); setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); } });
@@ -550,7 +551,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
 
   const openingOrder = useRef(false);
   async function startOrder() {
-    if (openingOrder.current || loading || draft.pending || draft.getSnapshot().order) return;
+    if (!inspectionConfirmed || openingOrder.current || loading || draft.pending || draft.getSnapshot().order) return;
     openingOrder.current = true;
     setLoading(true); setError(null);
     const release = draft.holdReads();
@@ -559,11 +560,10 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       // open/shift/audit transaction and its complete detail authorization.
       await mutations.enqueue(async () => {
         const opened = await apiFetch("/api/pos/orders", { method: "POST", body: JSON.stringify({ tableId }) });
-        if (opened.order.locationId !== shell.locationId) throw new Error("Sto nije na pripremljenoj lokaciji");
-        const detail = await apiFetch(`/api/pos/orders/${opened.order.id}`);
-        if (detail.order?.id !== opened.order.id || detail.order?.tableId !== tableId
-          || detail.order?.locationId !== shell.locationId || !Array.isArray(detail.order?.items)) throw new Error("Porudžbina nije potpuna");
-        setOrder(detail.order);
+        if (typeof opened.order?.id !== "string" || opened.order?.tableId !== tableId
+          || opened.order?.locationId !== shell.locationId || !Array.isArray(opened.order?.items)
+          || !opened.order?.table) throw new Error("Porudžbina nije potpuna");
+        setOrder(opened.order);
       });
     } catch (e) { setError(e instanceof Error ? e.message : "Porudžbina nije dostupna"); }
     finally { release(); openingOrder.current = false; setLoading(false); }
@@ -582,7 +582,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
       const read = draft.beginRead();
       try {
         const refreshed = order ? (await apiFetch(`/api/pos/orders/${order.id}`)).order : await inspectTable(tableId, shell.locationId);
-        if (active) draft.acceptRead(refreshed, read);
+        if (active && draft.acceptRead(refreshed, read)) setInspectionConfirmed(true);
       } catch {
         // Tiha greška na pozadinskom osvežavanju — ne prekidaj rad konobara.
       }
@@ -591,30 +591,6 @@ function TableOrderClient({ tableId }: { tableId: string }) {
     return () => { active = false; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.id, order?.status, inspected]);
-
-  // P3.3/P0.3: dok je porudžbina OTVORENA, status zalihe se osvežava umereno
-  // u pozadini — ne agresivno (specifikacija #17/#18: 5-15s, ne 1s). VIŠE-
-  // KRUŽNO NARUČIVANJE: NIKAD se ne gasi samo zato što je porudžbina već
-  // BAR JEDNOM poslata — konobar može dodati naredni krug u bilo kom
-  // trenutku dok je sto otvoren, pa svež meni/dostupnost i dalje mora da
-  // stiže. Gasi se SAMO kad je porudžbina zatvorena (naplaćena/otkazana).
-  // P0.3: sada zove ljusku (refreshAvailability, /api/pos/menu/availability
-  // — mali live-only odgovor) umesto sopstvenog /api/admin/menu/items poziva
-  // — isti okidač/kadenca, ali ažurira DELJENI overlay, pa sto na koji se
-  // konobar vrati posle ovoga odmah vidi već svež overlay bez čekanja.
-  useEffect(() => {
-    if (!inspected || order?.status === "COMPLETED" || order?.status === "CANCELLED") return;
-    const interval = setInterval(() => {
-      refreshAvailability().catch(() => {
-        // Tiha greška — vidi napomenu u waiter-shell.tsx refreshAvailability:
-        // zadržava poslednje poznato autoritativno stanje, server ionako
-        // presuđuje pri dodavanju.
-      });
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [order?.status, inspected, refreshAvailability]);
-
-
 
   // Sve izmene korpe (dodavanje/uklanjanje/promena količine) dele JEDNU
   // bravu — cartMutationRef je ref (sinhrono čitanje/pisanje, za razliku od
@@ -1000,7 +976,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
   if (!order && !inspected) return (
     <div className="flex min-h-screen flex-col bg-cream-200" aria-busy={loading}>
       <TableHeader eyebrow={loading ? "Priprema stola" : "Greška"} title={tableLabel} onBack={goToTables} />
-      <div className="mx-auto flex w-full max-w-5xl flex-1 items-center justify-center p-3">
+      <div className="mx-auto flex w-full max-w-5xl items-center justify-center p-3">
         <div role="status" className="w-full max-w-sm rounded-lg border border-line bg-white p-6 text-center shadow-card">
           {loading ? (
             <>
@@ -1016,17 +992,24 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           )}
         </div>
       </div>
+      <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
     </div>
   );
 
   if (!order) return (
     <div className="flex min-h-screen flex-col bg-cream-200">
-      <TableHeader eyebrow={loading ? "Provera stola" : error ? "Greška" : "Sto slobodno"} title={tableLabel} onBack={goToTables} />
+      <TableHeader eyebrow={error ? "Greška" : !inspectionConfirmed || loading ? "Provera stola" : "Sto slobodno"} title={tableLabel} onBack={goToTables} />
       <div className="mx-auto w-full max-w-5xl px-3">
         {loading ? (
           <p role="status" className="py-8 text-center text-sm text-inkSoft">Otvaramo porudžbinu…</p>
         ) : error ? (
-          <div role="status" className="my-3 rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</div>
+          <div role="status" className="my-3 rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
+            {error}
+            <button type="button" className="ml-3 min-h-11 underline" onClick={() => {
+              if (inspectionConfirmed) { void startOrder(); return; }
+              loadRequest.current = null; setError(null); setLoading(true); setInspectionAttempt(value => value + 1);
+            }}>Pokušaj ponovo</button>
+          </div>
         ) : (
           // Compact, intentional POS empty state — never a giant marketing-style
           // empty card. Communicates: table is free, no active order, waiter can
@@ -1035,31 +1018,22 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           // server flow is audited separately).
           <div role="status" className="my-3 flex flex-col items-start gap-3 rounded-lg border border-line bg-white p-4 shadow-card sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-semibold text-ink">Sto je slobodno</p>
-              <p className="mt-0.5 text-sm text-inkSoft">Nema aktivne porudžbine — počnite kad gost bude spreman.</p>
+              <p className="text-sm font-semibold text-ink">{inspectionConfirmed ? "Sto je slobodno" : "Proveravamo stanje stola…"}</p>
+              <p className="mt-0.5 text-sm text-inkSoft">{inspectionConfirmed ? "Nema aktivne porudžbine — počnite kad gost bude spreman." : "Sačekajte potvrdu servera pre otvaranja porudžbine."}</p>
             </div>
-            <button type="button" onClick={startOrder} className="min-h-12 w-full shrink-0 rounded-md bg-gold px-5 text-sm font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px sm:w-auto">
+            <button type="button" onClick={startOrder} disabled={!inspectionConfirmed} className="min-h-12 w-full shrink-0 rounded-md bg-gold px-5 text-sm font-bold text-white shadow-sm transition-all hover:bg-gold-dark active:translate-y-px sm:w-auto disabled:opacity-50">
               Započni porudžbinu
             </button>
           </div>
         )}
-        {/* Otvaranje porudžbine (loading) ne sme prikazati napola inicijalizovan
-            meni ispod statusa — isti princip kao "Pripremamo sto..." ranu grananje.
-            UI POLISH: labeled as an explicit, dimmed PREVIEW (never clickable —
-            already disabled via submitting=true below, pointer-events-none here
-            is a purely visual reinforcement of that same existing state, not a
-            new restriction) so an inactive menu reads as deliberate, not broken. */}
-        {!loading && (
-          <>
-            <div className="mb-2 mt-1 flex items-center gap-2">
-              <p className="shrink-0 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Meni</p>
-              <div className="h-px flex-1 bg-line" aria-hidden="true" />
-            </div>
-            <div className="pointer-events-none -mx-3 opacity-50">
-              <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
-            </div>
-          </>
-        )}
+        {/* Prepared menu remains browsable while transactional actions wait. */}
+        <div className="mb-2 mt-1 flex items-center gap-2">
+          <p className="shrink-0 text-[10px] font-bold uppercase tracking-[.16em] text-inkSoft">Meni</p>
+          <div className="h-px flex-1 bg-line" aria-hidden="true" />
+        </div>
+        <div className="-mx-3 opacity-50">
+          <MenuBrowser key="menu" items={items} categories={categories} submitting={true} tapMenu={tapMenu} searchInputRef={searchInputRef} />
+        </div>
       </div>
     </div>
   );
@@ -1091,10 +1065,17 @@ function TableOrderClient({ tableId }: { tableId: string }) {
             (order.table.label above) before scanning; the guest QR never
             decides the table (spec). */}
         <div className="mt-2">
-          <GuestOrderScanner tableId={tableId} onImport={importScannedItems} />
+          {inspectionConfirmed && <GuestOrderScanner tableId={tableId} onImport={importScannedItems} />}
         </div>
       </div>
 
+      {!inspectionConfirmed && <div role="status" className="px-3 py-2 text-sm text-inkSoft">
+        {error ?? "Proveravamo stanje porudžbine…"}
+        {error && <button type="button" className="ml-3 min-h-11 underline" onClick={() => {
+          loadRequest.current = null; setError(null); setLoading(true); setInspectionAttempt(value => value + 1);
+        }}>Pokušaj ponovo</button>}
+      </div>}
+      <fieldset disabled={!inspectionConfirmed} className="contents" aria-busy={!inspectionConfirmed}>
       {/* DESKTOP SPLIT-VIEW (>=1280px/xl:) — menu (left, ~68%) and the
           current-order panel (right, ~32%) become flex siblings in one row
           instead of the panel overlaying the bottom of the page.
@@ -1412,6 +1393,7 @@ function TableOrderClient({ tableId }: { tableId: string }) {
           />
         );
       })()}
+      </fieldset>
     </div>
   );
 }

@@ -23,22 +23,9 @@ import { getQzSettings } from "../../lib/qz-settings";
 import { ticketWaitBasis } from "../../lib/kds-wait-time";
 import { nextPaint, reportKdsTapTiming, type KdsTapTiming } from "../../lib/kds-perf";
 
-interface StationItemModifier {
-  id: string;
-  optionName: string;
-  priceDelta: string;
-}
-interface StationItem {
-  id: string;
-  name: string;
-  quantity: number;
-  note: string | null;
-  status: "SUBMITTED" | "ACCEPTED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
-  modifiers: StationItemModifier[];
-  // Per-round timestamp — see kds-wait-time.ts. NOT the same as the order's
-  // own submittedAt, which only reflects the table's FIRST-ever round.
-  submittedAt: string | null;
-}
+import { hasPendingWork, isStationStatus, mergeStationOrders, NEXT_STATUS_CLIENT,
+  type StationItemModifier, type StationItem, type StationOrder, type CompletedOrder, type LocalTransition,
+} from "../../lib/kds-state";
 
 /** Dodaci moraju biti odmah uočljivi na KDS-u (specifikacija #16/#52) — "+"
  * prefiks se određuje po CENI (priceDelta > 0), ne parsiranjem naziva. */
@@ -54,20 +41,9 @@ function ModifierList({ modifiers, tone }: { modifiers: StationItemModifier[]; t
     </ul>
   );
 }
-interface StationOrder {
-  orderId: string;
-  tableLabel: string;
-  waiterName: string;
-  submittedAt: string | null;
-  items: StationItem[];
-}
-interface CompletedOrder extends StationOrder {
-  completedAt: string;
-}
-
 const STATUS_LABEL: Record<string, string> = {
   SUBMITTED: "Novo",
-  ACCEPTED: "Prihvaćeno",
+  ACCEPTED: "U pripremi",
   PREPARING: "U pripremi",
   READY: "Spremno",
 };
@@ -84,24 +60,6 @@ const STATUS_ACTION_LABEL: Record<string, string> = {
   PREPARING: "Označi spremno",
 };
 
-// Hardening/performance audit — MORA se poklapati sa NEXT_STATUS u
-// production-service.ts. Namerno dupliran (mali, stabilan, 3-unosni
-// mapping) da klik na dugme može ODMAH da pomeri status lokalno, bez
-// čekanja na network round-trip — pravi server odgovor (advance rute
-// `{item}`) svejedno se koristi za konačno pomirenje ispod, pa čak i da
-// ova mapa ikad promaši, korisnik odmah posle vidi TAČNO stanje sa
-// servera, nikad trajno pogrešno.
-const NEXT_STATUS_CLIENT: Record<string, StationItem["status"]> = {
-  SUBMITTED: "ACCEPTED",
-  ACCEPTED: "READY",
-  PREPARING: "READY",
-};
-// Mora se poklapati sa PENDING_PRODUCTION_STATUSES u production-service.ts
-// — određuje kad porudžbina nestaje sa Aktivne (sve stavke ove stanice su
-// bar READY) ODMAH, bez čekanja na sledeći poll da je server-strani filter
-// istog imena povuče u Gotove.
-const PENDING_STATION_STATUSES_CLIENT = new Set(["SUBMITTED", "ACCEPTED", "PREPARING"]);
-
 const STATUS_BADGE: Record<string, string> = {
   SUBMITTED: "bg-gold-soft text-gold-dark",
   ACCEPTED: "bg-gold text-white",
@@ -109,23 +67,27 @@ const STATUS_BADGE: Record<string, string> = {
   READY: "bg-success text-white",
 };
 
+const RECONCILE_ERROR = "Status nije potvrđen. Proveravamo vezu i automatski ponavljamo proveru.";
+
 interface ApiError extends Error {
   status?: number;
 }
 
+// Aborting a POST does not prove it failed: reconcile with a separate GET.
 async function apiFetch(url: string, options?: RequestInit) {
-  const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    // Physical QA follow-up — the status code (specifically 409, see
-    // production-service.ts StaleItemStatusError) must survive past this
-    // helper so advance() below can tell "stale-status conflict, safe to
-    // auto-reconcile" apart from every other failure.
-    const error: ApiError = new Error(body.error ?? `Greška (${res.status})`);
-    error.status = res.status;
-    throw error;
-  }
-  return body;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(url, { ...options, cache: "no-store", signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...options?.headers } });
+    const body = await res.json();
+    if (!res.ok) {
+      const error: ApiError = new Error(body.error ?? `Greška (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+    return body;
+  } finally { clearTimeout(timeout); }
 }
 
 function minutesSince(iso: string | null): number {
@@ -187,7 +149,7 @@ const ItemRow = memo(function ItemRow({ item, onAdvance }: ItemRowProps) {
   async function handleClick() {
     // Sinhrona zaštita od duplog tapa PRE ijednog await-a/re-rendera —
     // isti obrazac kao ranije, sada po-stavci umesto deljen.
-    if (inFlightRef.current) return;
+    if (inFlightRef.current || item.pending) return;
     inFlightRef.current = true;
     setIsBusy(true);
     try {
@@ -199,7 +161,7 @@ const ItemRow = memo(function ItemRow({ item, onAdvance }: ItemRowProps) {
   }
 
   return (
-    <div className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
+    <div aria-busy={!!item.pending} className="rounded-md border border-white/[.06] bg-graphite-800 p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-base font-semibold leading-snug text-cream-100">
@@ -212,10 +174,13 @@ const ItemRow = memo(function ItemRow({ item, onAdvance }: ItemRowProps) {
           {STATUS_LABEL[item.status] ?? item.status}
         </span>
       </div>
+      {item.pending && <p role="status" className="mt-2 text-xs font-semibold text-cream-300/80">
+        {item.pending === "saving" ? "Čeka potvrdu…" : "Provera statusa…"}
+      </p>}
       {STATUS_ACTION_LABEL[item.status] && (
         <button
           onClick={handleClick}
-          disabled={isBusy}
+          disabled={isBusy || !!item.pending}
           className="mt-3 min-h-11 w-full rounded-md bg-gold py-2 text-sm font-bold text-white transition-colors hover:bg-gold-dark active:translate-y-px disabled:opacity-40"
         >
           {STATUS_ACTION_LABEL[item.status]}
@@ -298,6 +263,7 @@ const OrderCard = memo(function OrderCard({ order, waitMin, isLate, failedJob, p
 
 export function KdsClient({ station, title, environmentLabel }: { station: "KITCHEN" | "BAR"; title: string; environmentLabel: string }) {
   const [locationId, setLocationId] = useState<string | null>(null);
+  const locationRef = useRef<string | null>(null);
   const [tab, setTab] = useState<"active" | "completed">("active");
   const [orders, setOrders] = useState<StationOrder[]>([]);
   const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>([]);
@@ -306,13 +272,6 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
   const knownOrderIds = useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [printBusyId, setPrintBusyId] = useState<string | null>(null);
-  // PREPROD physical QA follow-up (Part D) — "zauzeto dok se čeka odgovor"
-  // je SADA lokalno stanje unutar ItemRow (vidi definiciju iznad), ne
-  // deljen Set ovde — deljen Set je značio da SVAKI tap ponovo renderuje
-  // SVAKU stavku na ekranu (React.memo ispod ne bi mogao da to spreči jer
-  // bi Set-ova referenca menjala IDENTITET tog prop-a za svaku karticu).
-  // Duplog-tapa zaštita je istim razlogom sada po-stavci (ItemRow-ov
-  // sopstveni ref), ne ovde.
   // PREPROD physical QA follow-up (Part I) — poznat identitet ulogovanog
   // zaposlenog, popunjen TAČNO iz istog /api/pos/me poziva koji load()
   // već radi za locationId (nikad drugi/dupliran izvor, nikad dodatan
@@ -410,117 +369,38 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
   // ako je poll već u toku, sledeći (interval ili eksplicitan) poziv se
   // tiho preskače umesto da se gomila — sledeći ciklus za 4s je dovoljan.
   const loadInFlightRef = useRef(false);
+  const historyInFlightRef = useRef(false);
+  const printPollInFlightRef = useRef(false);
+  const mountedRef = useRef(false);
+  const stationRef = useRef(station);
+  stationRef.current = station;
+  const [loadErrors, setLoadErrors] = useState({ active: null as string | null, history: null as string | null, printing: null as string | null });
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
-  // PREPROD physical QA follow-up — real-device root cause trace (see
-  // advance()/applyItemStatus below for the full writeup): a poll GET can
-  // be issued BEFORE a tap and resolve AFTER that tap's optimistic+confirmed
-  // update; setOrders(freshOrders) as a blind full replace would then
-  // silently revert that item to the stale pre-tap status. That is the
-  // proven cause of the physical QA video's mixed-state/"Status stavke je
-  // već promenjen" report — NOT a backend bug, and NOT something more
-  // frequent polling or SSE would fix on their own (an SSE event can race
-  // the exact same way; see sse-publisher.ts's own note that in-memory
-  // pub/sub isn't even reliable cross-instance on Vercel, which is why KDS
-  // deliberately does not add SSE here).
-  //
-  // Fix: a monotonic counter orders every poll-start and every local
-  // (optimistic/confirmed/invalidated) item write on ONE shared timeline.
-  // `itemKnownAsOfSeq` records, per item, the seq as of which its CURRENT
-  // local status is at least as fresh as any poll that could still be in
-  // flight. A poll response only overwrites an item if the poll was
-  // ISSUED (seq captured before its await) at or after that item's last
-  // known-fresh seq — i.e., older-than-known responses can never regress
-  // a newer local write, regardless of which one's network round-trip
-  // happens to finish first.
-  const seqRef = useRef(0);
-  const itemKnownAsOfSeq = useRef<Map<string, number>>(new Map());
-
-  const load = useCallback(async () => {
-    if (loadInFlightRef.current) return;
-    loadInFlightRef.current = true;
-    const pollSeq = ++seqRef.current;
+  // Each resource has its own single-flight guard: slow history/printing
+  // cannot hold up active orders or their next polling cycle.
+  const loadHistory = useCallback(async (loc: string) => {
+    if (historyInFlightRef.current) return;
+    historyInFlightRef.current = true;
     try {
-      let loc = locationId;
-      if (!loc) {
-        const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
-        loc = me.locationIds[0];
-        setLocationId(loc);
-        // Part I — isti poziv, nijedan dodatan upit; ne prepisuje se posle
-        // (identitet se ne menja bez potpune nove prijave/novog mount-a).
-        setEmployee({ firstName: me.firstName ?? null, lastName: me.lastName ?? null, roles: me.roles ?? [] });
-      }
-      const [activeRes, completedRes, pendingPrintRes] = await Promise.all([
-        apiFetch(`${baseEndpoint}?locationId=${loc}`),
-        apiFetch(`${baseEndpoint}/completed?locationId=${loc}`),
-        fetchPendingStationPrintJobs(station, loc!),
-      ]);
-      const freshOrders: StationOrder[] = activeRes.orders;
+      const result = await apiFetch(`${baseEndpoint}/completed?locationId=${loc}`);
+      if (!mountedRef.current || stationRef.current !== station) return;
+      setCompletedOrders(result.orders);
+      setLoadErrors(previous => ({ ...previous, history: null }));
+    } catch (e) {
+      if (mountedRef.current && stationRef.current === station) setLoadErrors(previous => ({ ...previous, history: e instanceof Error ? e.message : "Greška pri učitavanju istorije" }));
+    } finally { historyInFlightRef.current = false; }
+  }, [baseEndpoint, station]);
 
-      const newIds = freshOrders.map((o) => o.orderId).filter((id) => !knownOrderIds.current.has(id));
-      if (newIds.length > 0 && knownOrderIds.current.size > 0) beep();
-      knownOrderIds.current = new Set(freshOrders.map((o) => o.orderId));
-
-      setOrders((prevOrders) => {
-        const prevItemById = new Map<string, StationItem>();
-        const prevOrderById = new Map<string, StationOrder>();
-        for (const o of prevOrders) {
-          prevOrderById.set(o.orderId, o);
-          for (const it of o.items) prevItemById.set(it.id, it);
-        }
-        return freshOrders
-          .map((o) => {
-            let itemsIdentical = true;
-            const items = o.items.map((it) => {
-              const knownAsOf = itemKnownAsOfSeq.current.get(it.id) ?? 0;
-              const prevItem = prevItemById.get(it.id);
-              const resolvedStatus =
-                knownAsOf > pollSeq && prevItem
-                  ? prevItem.status // a newer local write already exists for this item than this poll request — keep the fresher local status.
-                  : it.status;
-              if (!(knownAsOf > pollSeq)) itemKnownAsOfSeq.current.set(it.id, pollSeq);
-              // PREPROD physical QA follow-up (Part D) — reference-stability
-              // for memoized ItemRow/OrderCard: reuse the EXACT previous
-              // item object when nothing rendered actually differs, so a
-              // 4s background poll doesn't force every order card/item row
-              // to reconcile when only ONE thing on the board changed.
-              // Modifiers are set once when an item is added to an order
-              // and never mutated afterward in this domain — comparing
-              // their length is a safe, cheap proxy for "unchanged" here.
-              if (
-                prevItem &&
-                prevItem.status === resolvedStatus &&
-                prevItem.quantity === it.quantity &&
-                prevItem.name === it.name &&
-                prevItem.note === it.note &&
-                prevItem.submittedAt === it.submittedAt &&
-                prevItem.modifiers.length === it.modifiers.length
-              ) {
-                return prevItem;
-              }
-              itemsIdentical = false;
-              return resolvedStatus === it.status ? it : { ...it, status: resolvedStatus };
-            });
-            const prevOrder = prevOrderById.get(o.orderId);
-            if (
-              itemsIdentical &&
-              prevOrder &&
-              prevOrder.tableLabel === o.tableLabel &&
-              prevOrder.waiterName === o.waiterName &&
-              prevOrder.submittedAt === o.submittedAt
-            ) {
-              return prevOrder;
-            }
-            return { ...o, items };
-          })
-          // Same rule as applyItemStatus below — an item can be locally
-          // fresher (already terminal) than what this specific poll's own
-          // order-list membership assumed; re-apply the identical
-          // Aktivne-membership rule after merging so a stale poll can
-          // never "resurrect" an order already correctly moved to Gotove.
-          .filter((o) => o.items.some((it) => PENDING_STATION_STATUSES_CLIENT.has(it.status)));
-      });
-      setCompletedOrders(completedRes.orders);
-
+  const loadPrinting = useCallback(async (loc: string) => {
+    if (printPollInFlightRef.current) return;
+    printPollInFlightRef.current = true;
+    try {
+      const pendingPrintRes = await fetchPendingStationPrintJobs(station, loc);
+      if (!mountedRef.current || stationRef.current !== station) return;
       // AUTOMATSKA ŠTAMPA: svaki PENDING tiket za ovu stanicu koji još nismo
       // videli ide u red čekanja (obrađuje se serijski, jedan po jedan, da
       // se print dijalozi ne bi gomilali). `autoSeenRef` sprečava da isti
@@ -549,15 +429,92 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
         }
         processAutoQueue();
       }
-      setError(null);
+      setLoadErrors(previous => ({ ...previous, printing: null }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Greška pri učitavanju");
+      if (mountedRef.current && stationRef.current === station) setLoadErrors(previous => ({ ...previous, printing: e instanceof Error ? e.message : "Greška pri učitavanju štampe" }));
+    } finally { printPollInFlightRef.current = false; }
+  }, [station, processAutoQueue]);
+
+  const seqRef = useRef(0);
+  const localTransitions = useRef(new Map<string, LocalTransition>());
+  const reconciliationInFlight = useRef(new Set<string>());
+
+  const applyItemStatus = useCallback((orderId: string, itemId: string, status: StationItem["status"], pending?: StationItem["pending"]) => {
+    setOrders(previous => previous.map(order => order.orderId !== orderId ? order : {
+      ...order, items: order.items.map(item => item.id === itemId ? { ...item, status, pending } : item),
+    }).filter(hasPendingWork));
+  }, []);
+
+  const reconcileItem = useCallback(async (orderId: string, itemId: string) => {
+    if (reconciliationInFlight.current.has(itemId)) return;
+    reconciliationInFlight.current.add(itemId);
+    try {
+      const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance?station=${station}`);
+      if (!isStationStatus(result?.item?.status)) throw new Error("Status nije potvrđen");
+      if (!mountedRef.current || stationRef.current !== station) return;
+      const status = result.item.status;
+      localTransitions.current.set(itemId, { orderId, status, seq: ++seqRef.current });
+      applyItemStatus(orderId, itemId, status);
+      if (![...localTransitions.current.values()].some(write => write.pending === "checking")) {
+        setError(previous => previous === RECONCILE_ERROR ? null : previous);
+      }
+    } catch {
+      if (mountedRef.current && stationRef.current === station) setError(RECONCILE_ERROR);
+    } finally { reconciliationInFlight.current.delete(itemId); }
+  }, [station, applyItemStatus]);
+
+  const load = useCallback(async () => {
+    for (const [itemId, write] of localTransitions.current) {
+      if (write.pending === "checking") void reconcileItem(write.orderId, itemId);
+    }
+    // Auxiliary polling continues even if an active-order request is slow.
+    if (locationRef.current) {
+      void loadHistory(locationRef.current);
+      void loadPrinting(locationRef.current);
+    }
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
+    const pollSeq = ++seqRef.current;
+    try {
+      let loc = locationRef.current;
+      if (!loc) {
+        const me = await getOrFetch(CLIENT_CACHE_KEYS.me, CLIENT_CACHE_TTL_MS, () => apiFetch("/api/pos/me"));
+        if (!mountedRef.current || stationRef.current !== station) return;
+        loc = me.locationIds[0];
+        if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
+        locationRef.current = loc;
+        setLocationId(loc);
+        // Part I — isti poziv, nijedan dodatan upit; ne prepisuje se posle
+        // (identitet se ne menja bez potpune nove prijave/novog mount-a).
+        setEmployee({ firstName: me.firstName ?? null, lastName: me.lastName ?? null, roles: me.roles ?? [] });
+        void loadHistory(loc);
+        void loadPrinting(loc);
+      }
+      if (!loc) throw new Error("Nalog nema dodeljenu lokaciju");
+      const activeRes = await apiFetch(`${baseEndpoint}?locationId=${loc}`);
+      if (!mountedRef.current || stationRef.current !== station) return;
+      const freshOrders: StationOrder[] = activeRes.orders;
+
+      const newIds = freshOrders.map((o) => o.orderId).filter((id) => !knownOrderIds.current.has(id));
+      if (newIds.length > 0 && knownOrderIds.current.size > 0) beep();
+      knownOrderIds.current = new Set(freshOrders.map((o) => o.orderId));
+
+      // Snapshot before scheduling React work; never mutate refs inside a state updater.
+      const writes = new Map(localTransitions.current);
+      setOrders(previous => mergeStationOrders(previous, freshOrders, writes, pollSeq));
+      for (const [id, write] of writes) {
+        if (!write.pending && write.seq < pollSeq) localTransitions.current.delete(id);
+      }
+
+      setLoadErrors(previous => ({ ...previous, active: null }));
+    } catch (e) {
+      if (mountedRef.current && stationRef.current === station) setLoadErrors(previous => ({ ...previous, active: e instanceof Error ? e.message : "Greška pri učitavanju" }));
     } finally {
-      setLoading(false);
+      if (mountedRef.current && stationRef.current === station) setLoading(false);
       loadInFlightRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseEndpoint, locationId]);
+  }, [baseEndpoint, station, loadHistory, loadPrinting, reconcileItem]);
 
   useEffect(() => {
     load();
@@ -565,120 +522,49 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
     return () => clearInterval(interval);
   }, [load]);
 
-  // Performance audit — Kitchen mora da oseti klik ODMAH (cilj: vizuelna
-  // promena <100ms), ne tek posle network round-trip-a I punog reload-a
-  // triju endpoint-a (aktivne/završene/print-status). Redosled je SADA:
-  // (1) odmah pomeri lokalni prikaz (optimistic, iz poznate NEXT_STATUS_CLIENT
-  // mape), (2) pošalji zahtev u pozadini, (3) pomiri sa STVARNIM server
-  // odgovorom (nikad naslepo veruj optimističkom nagađanju), (4) NIKAD ne
-  // zovi puni load() ovde — postojeći 4s poll interval i dalje prirodno
-  // uskladi sve ostalo (nove porudžbine, listu Gotove, print status).
-  function applyItemStatus(orderId: string, itemId: string, nextStatus: StationItem["status"]) {
-    setOrders((prev) =>
-      prev
-        .map((o) => {
-          if (o.orderId !== orderId) return o;
-          const items = o.items.map((it) => (it.id === itemId ? { ...it, status: nextStatus } : it));
-          return { ...o, items };
-        })
-        // Ista pravilo kao server-strani PENDING_PRODUCTION_STATUSES filter:
-        // čim NIJEDNA stavka ove stanice više nije "u toku", porudžbina
-        // nestaje sa Aktivne ODMAH — Gotove listu popunjava sledeći poll
-        // (do 4s, ne 10s), ne blokira ovaj klik.
-        .filter((o) => o.orderId !== orderId || o.items.some((it) => PENDING_STATION_STATUSES_CLIENT.has(it.status)))
-    );
-  }
-
-  // PREPROD physical QA follow-up (Part D/G) — useCallback sa stabilnim
-  // zavisnostima (station je prop, load je sam useCallback) tako da
-  // memoizovani OrderCard/ItemRow ispod dobijaju STABILNU referencu ove
-  // funkcije preko generacija — bez ovoga bi React.memo bio beskoristan
-  // (nova zatvorena funkcija na svaki render KdsClient-a bi izgledala kao
-  // "promenjen prop" za svaku karticu). Zaštita od duplog tapa i "zauzeto"
-  // izgled dugmeta su SADA u ItemRow (ne ovde) — ova funkcija radi SAMO
-  // stvarnu tranziciju (optimistic + API + pomirenje), ne UI stanje dugmeta.
   const advanceItem = useCallback(
     async (orderId: string, itemId: string, expectedStatus: StationItem["status"]) => {
-      // Part B/C/H — PREPROD-only dijagnostika (nikad Production, nikad
-      // mrežni poziv, samo console.info): dokazuje da li optimističko
-      // stanje STVARNO biva ISCRTANO pre/nezavisno od mrežnog puta, umesto
-      // da se to samo pretpostavi. dupli requestAnimationFrame je
-      // standardna, setTimeout-slobodna tehnika — prvi rAF puca TEK PRE
-      // sledećeg iscrtavanja (dakle za frejm koji već sadrži naš commit),
-      // drugi puca u SLEDEĆEM frejmu, što je moguće SAMO ako je prvi
-      // stvarno prikazan. Ne utiče ni na šta kad je isključeno (samo ne
-      // poziva se ispod).
-      const perf = environmentLabel !== "PRODUKCIJA";
-      const t: (Partial<KdsTapTiming> & { tapAt: number }) | null = perf ? { tapAt: performance.now() } : null;
-
       const optimisticNext = NEXT_STATUS_CLIENT[expectedStatus];
-      // Svaki lokalni upis (optimistički ili potvrđen) dobija SVEŽ redni broj
-      // na ISTOJ vremenskoj liniji kao load()'s pollSeq iznad — ovo je ono
-      // što sprečava da bilo koji poll GET koji je već bio "u letu" PRE ovog
-      // tapa ikad prepiše rezultat ovog tapa, bez obzira kad se taj GET
-      // stvarno vrati (dokazan uzrok fizičkog QA "Status stavke je već
-      // promenjen" izveštaja — vidi napomenu na load() iznad).
-      if (optimisticNext) {
-        itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
-        applyItemStatus(orderId, itemId, optimisticNext);
-      }
+      if (!optimisticNext || localTransitions.current.get(itemId)?.pending) return;
+      const t: (Partial<KdsTapTiming> & { tapAt: number }) | null = environmentLabel !== "PRODUKCIJA" ? { tapAt: performance.now() } : null;
+      localTransitions.current.set(itemId, { orderId, status: optimisticNext, pending: "saving", seq: ++seqRef.current });
+      applyItemStatus(orderId, itemId, optimisticNext, "saving");
       if (t) t.optimisticStateAt = performance.now();
       setError(null);
-      // PREPROD physical QA follow-up — the paint-proof measurement below
-      // must NEVER gate the actual request: awaiting nextPaint() here
-      // before calling apiFetch would literally delay the real network
-      // call by two animation frames whenever diagnostics are on, which is
-      // exactly the "network work must happen after visual confirmation,
-      // never block it" rule turned backwards. Kick it off but don't await
-      // it yet — fetch starts immediately, in parallel.
-      const paintProof = t ? nextPaint().then((ts) => { t.optimisticPaintAt = ts; }) : null;
+      const paintProof = t ? nextPaint().then(ts => { t.optimisticPaintAt = ts; }) : null;
       if (t) t.apiStartAt = performance.now();
       try {
         const result = await apiFetch(`/api/production/items/${orderId}/${itemId}/advance`, {
-          method: "POST",
-          body: JSON.stringify({ station, expectedStatus }),
+          method: "POST", body: JSON.stringify({ station, expectedStatus }),
         });
         if (t) t.apiEndAt = performance.now();
-        // Pomiri sa STVARNIM stanjem sa servera (nikad samo veruj nagađanju
-        // iznad) — bez punog reload-a, samo ova jedna stavka.
-        const confirmedStatus = result?.item?.status as StationItem["status"] | undefined;
-        if (confirmedStatus && confirmedStatus !== optimisticNext) {
-          itemKnownAsOfSeq.current.set(itemId, ++seqRef.current);
-          applyItemStatus(orderId, itemId, confirmedStatus);
-        }
+        if (!isStationStatus(result?.item?.status)) throw new Error("Server nije potvrdio status");
+        if (!mountedRef.current || stationRef.current !== station) return;
+        // Fence every confirmation, even when the optimistic status matched.
+        const status = result.item.status;
+        localTransitions.current.set(itemId, { orderId, status, seq: ++seqRef.current });
+        applyItemStatus(orderId, itemId, status);
         if (t) {
-          await paintProof; // near-instant in practice — the API round-trip above almost always outlasts two animation frames.
           t.reconcileStateAt = performance.now();
-          t.reconcilePaintAt = await nextPaint();
-          reportKdsTapTiming(`${station}/${itemId.slice(0, 8)}`, t as KdsTapTiming);
+          // Diagnostic frames must not keep the action disabled in hidden/slow tabs.
+          void Promise.all([paintProof, nextPaint()]).then(([, painted]) => {
+            t.reconcilePaintAt = painted;
+            reportKdsTapTiming(`${station}/${itemId.slice(0, 8)}`, t as KdsTapTiming);
+          });
         }
       } catch (e) {
-        const apiError = e instanceof Error ? (e as ApiError) : undefined;
-        // Naše optimističko nagađanje je SADA dokazano pogrešno u oba
-        // slučaja ispod — nikad ga više ne tretiraj kao poznato-svež (sledeći
-        // load() sme slobodno da ga prepiše autoritativnim stanjem).
-        itemKnownAsOfSeq.current.delete(itemId);
-        if (apiError?.status === 409) {
-          // Zahtev #6 (fizički QA nalaz) — "Status stavke je već promenjen"
-          // je OČEKIVANA, bezopasna trka (drugi tap/uređaj/poll je već
-          // pomerio TAČNO ovu stavku), NIKAD razlog da se osoblju kaže da
-          // ručno osveži ekran. Tiho zatraži svež, autoritativan prikaz —
-          // koji god je stvarni pobednik trke, ekran ga odmah preuzima.
-          load();
-        } else {
-          // Stvaran neuspeh (mreža/dozvole/itd.) — ISTO zatraži svež prikaz
-          // (nikad vrati ceo `orders` snapshot iz trenutka klika, što bi
-          // moglo da regresira i DRUGE stavke promenjene u međuvremenu), ali
-          // ovde JOŠ UVEK prijavi grešku — ovo zahteva ljudsku pažnju.
-          // NAMERNO await-ovano (za razliku od 409 grane iznad): load()'s
-          // sopstveni uspešan put zove setError(null) na kraju — poziv bez
-          // čekanja bi tu poruku obrisao pre nego što je iko vidi.
-          await load();
-          setError(apiError?.message ?? "Greška");
-        }
+        if (!mountedRef.current || stationRef.current !== station) return;
+        localTransitions.current.set(itemId, { orderId, status: optimisticNext, pending: "checking", seq: ++seqRef.current });
+        applyItemStatus(orderId, itemId, optimisticNext, "checking");
+        const apiError = e instanceof Error ? e as ApiError : undefined;
+        if (apiError?.status !== 409) setError(apiError?.name === "AbortError"
+          ? "Potvrda kasni. Proveravamo status — nemojte ponavljati radnju."
+          : apiError?.message ?? "Promena nije potvrđena. Proveravamo status.");
+        // Targeted read includes terminal/cancelled items and cannot be skipped by
+        // the active-list single-flight guard. Never automatically retry a mutation.
+        await reconcileItem(orderId, itemId);
       }
-    },
-    [station, load, environmentLabel]
+    }, [station, environmentLabel, applyItemStatus, reconcileItem]
   );
 
   // PREPROD physical QA follow-up (Part D) — useCallback da OrderCard-ovi
@@ -900,6 +786,7 @@ export function KdsClient({ station, title, environmentLabel }: { station: "KITC
         })()}
       </div>
 
+      {[loadErrors.active, loadErrors.history, loadErrors.printing].filter(Boolean).map((message, index) => <div key={index} role="alert" className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{message}</div>)}
       {error && <div className="mb-3 rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</div>}
 
       {loading ? (
