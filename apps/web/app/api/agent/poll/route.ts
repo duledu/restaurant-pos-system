@@ -16,7 +16,7 @@ import { withWorkstationAuth } from "../../../../lib/api-helpers";
  * signal (workstations.recordHeartbeat) — namerno neizmenjeno, ovo je
  * dodatan, brži put do ISTOG servera-strane stanja, ne zamena.
  */
-export const POST = withWorkstationAuth(async (wsCtx) => {
+export const POST = withWorkstationAuth(async (wsCtx, request) => {
   const [job, testPrint, routes] = await Promise.all([
     agentPrinting.pollAndClaim(wsCtx),
     workstations.isTestPrintPending(wsCtx),
@@ -29,5 +29,8 @@ export const POST = withWorkstationAuth(async (wsCtx) => {
   // printing (the existing WindowsPrinter.Print guard already throws on
   // a missing printer); it is purely for diagnostic visibility into the
   // Admin UI surfaces that consume the same readiness state.
-  return NextResponse.json({ job, testPrintRequested: testPrint.pending, testPrintRoute: testPrint.route, routes });
+  const safeTests = request.headers.get("X-TableCore-Test-Protocol") === "2";
+  return NextResponse.json({ job, testPrintProtocol: 2, workstationId: wsCtx.workstationId,
+    testPrintRequested: safeTests && testPrint.pending,
+    testPrintRequestId: safeTests ? testPrint.requestId : null, testPrintRoute: testPrint.route, routes });
 });

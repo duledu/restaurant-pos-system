@@ -2,16 +2,15 @@ import { NextResponse } from "next/server";
 import { workstations } from "@rcs/domain";
 import { agentTestPrintResultSchema } from "@rcs/shared";
 import { withWorkstationAuth } from "../../../../../lib/api-helpers";
+import { traceTestDelivery } from "../../../../../lib/print-delivery-trace";
 
-/**
- * Faza 2C — agent prijavljuje ishod SVOJE lokalno izvedene testne štampe
- * (pokrenute preko heartbeatTestPrintRequested zastavice). Namerno bez
- * jobId/attemptId — test štampa nikad nije PrintJob red (vidi
- * workstation-service.ts requestTestPrint napomenu).
- */
+// Authenticated, request-scoped acknowledgment. Replays are harmless; only
+// the currently claimed test can change state. No synthetic restaurant order.
 export const POST = withWorkstationAuth(async (wsCtx, request) => {
+  const startedAt = performance.now();
   const body = await request.json().catch(() => ({}));
   const input = agentTestPrintResultSchema.parse(body);
   await workstations.recordTestPrintResult(wsCtx, input);
+  traceTestDelivery("test_ack", wsCtx.workstationId, input.requestId, "RECEIVED_IDEMPOTENT", startedAt);
   return NextResponse.json({ ok: true });
 });

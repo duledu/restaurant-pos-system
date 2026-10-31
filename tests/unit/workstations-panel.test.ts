@@ -31,6 +31,8 @@ function route(type: "KITCHEN" | "BAR" | "RECEIPT", overrides: Record<string, un
     printerAvailable: null,
     isEnabled: true,
     isPrimary: false,
+    physicalTestConfirmed: true,
+    visibleToService: true,
     updatedAt: "2026-09-15T09:00:00Z",
     ...overrides,
   };
@@ -101,11 +103,115 @@ async function mount() {
   });
 }
 
+describe("Admin test-print delivery", () => {
+  function prepare() {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    workstationsResponse = [workstation({
+      lastSeenAt: new Date().toISOString(), agentVersion: "1.0.0-rc.3",
+      printRoutes: [route("KITCHEN", { printerName: "POS-58", paperWidthMm: 58, printerAvailable: true })],
+    })];
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: string, options?: RequestInit) => {
+      if (input.endsWith("/test-print")) {
+        const ws = workstationsResponse[0] as ReturnType<typeof workstation>;
+        Object.assign(ws, { testPrintRequestedAt: new Date().toISOString(), testPrintRouteType: "KITCHEN", testPrintStatus: "PENDING" });
+        return response({ workstation: { ...ws } });
+      }
+      return original(input, options);
+    });
+  }
+  function button() { return [...host.querySelectorAll("button")].find(b => b.textContent === "Testiraj kuhinja")!; }
+  function setResult(values: Record<string, unknown>) { Object.assign(workstationsResponse[0] as object, values); }
+
+  it("deduplicates rapid clicks, shows claim progress, and asks for paper confirmation only after matching success", async () => {
+    prepare(); await mount();
+    await act(async () => { button().click(); button().click(); });
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/test-print"))).toHaveLength(1);
+    setResult({ testPrintStatus: "PRINTING" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(host.textContent).toContain("Agent je preuzeo test");
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    setResult({ testPrintStatus: "SUCCEEDED" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(host.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(host.textContent).toContain("Predato Windows štampi");
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("shows printer failure, releases the button, and never confirms the route", async () => {
+    prepare(); await mount();
+    await act(async () => { button().click(); });
+    setResult({ testPrintStatus: "FAILED", testPrintError: "POS-58 nije dostupan servisu" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(host.textContent).toContain("POS-58 nije dostupan servisu");
+    expect(button().disabled).toBe(false);
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("bounds a lost POST response and allows recovery without automatically repeating it", async () => {
+    prepare();
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => url.endsWith("/test-print")
+      ? new Promise((_, reject) => options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))))
+      : original(url, options));
+    await mount();
+    await act(async () => { button().click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
+    expect(host.textContent).toContain("Ishod zahteva nije poznat");
+    expect(button().disabled).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/test-print"))).toHaveLength(1);
+  });
+
+  it("bounds a stalled result fetch and recovers its periodic refresh", async () => {
+    prepare(); await mount();
+    await act(async () => { button().click(); });
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => url === "/api/admin/workstations"
+      ? new Promise((_, reject) => options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))))
+      : original(url, options));
+    await act(async () => { await vi.advanceTimersByTimeAsync(11_501); });
+    expect(host.textContent).toContain("Ishod zahteva nije poznat");
+    expect(host.textContent).not.toContain("Testiranje…");
+    fetchMock.mockImplementation(original);
+    setResult({ testPrintStatus: "FAILED", testPrintError: "Agent nije odgovorio" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(button().disabled).toBe(false);
+  });
+
+  it("stops waiting after 90 seconds without inventing success or sending another print", async () => {
+    prepare(); await mount();
+    await act(async () => { button().click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_001); });
+    expect(host.textContent).toContain("Agent nije potvrdio ishod");
+    expect(host.textContent).not.toContain("Testiranje…");
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/test-print"))).toHaveLength(1);
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("does not accept another terminal's newer test result", async () => {
+    prepare(); await mount();
+    await act(async () => { button().click(); });
+    setResult({ testPrintStatus: "SUCCEEDED", testPrintRequestedAt: new Date(Date.now() + 1).toISOString() });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(host.textContent).toContain("promenjen na drugom uređaju");
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("connected status alone does not mark an unconfirmed printer ready", async () => {
+    prepare();
+    setResult({ printRoutes: [route("KITCHEN", { printerName: "POS-58", printerAvailable: true, physicalTestConfirmed: false })] });
+    await mount();
+    expect(host.textContent).toContain("Računar povezan");
+    expect(host.querySelector('[data-testid="route-status-KITCHEN"]')?.textContent).toBe("Čeka test štampe");
+  });
+});
+
 describe("WorkstationsPanel — Admin converges automatically, without a manual page reload", () => {
   it("picks up a workstation coming online (heartbeat) on the next background poll, with no user action", async () => {
     await mount();
-    expect(host.textContent).toContain("Van mreže");
-    expect(host.textContent).not.toContain("Povezana");
+    expect(host.textContent).toContain("Računar nije povezan");
+    expect(host.textContent).not.toContain("Računar povezan");
 
     // Server-side state changes (agent heartbeat) — nothing in the DOM
     // triggers this; it's purely the passage of time / background poll.
@@ -117,8 +223,8 @@ describe("WorkstationsPanel — Admin converges automatically, without a manual 
       await vi.advanceTimersByTimeAsync(5000);
     });
 
-    expect(host.textContent).toContain("Povezana");
-    expect(host.textContent).not.toContain("Van mreže");
+    expect(host.textContent).toContain("Računar povezan");
+    expect(host.textContent).not.toContain("Računar nije povezan");
   });
 
   it("does not overlap polls — a slow in-flight request is not duplicated by the next tick", async () => {
@@ -167,7 +273,7 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     expect(host.textContent).toContain("Šank");
     expect(host.textContent).toContain("Račun");
     // Spremna appears at least once (KITCHEN) but not for all three routes.
-    const readyBadges = [...host.querySelectorAll("span")].filter((el) => el.textContent?.trim() === "Spremna");
+    const readyBadges = [...host.querySelectorAll('[data-testid^="route-status-"]')].filter((el) => el.textContent?.trim() === "Spremno");
     expect(readyBadges).toHaveLength(1);
     expect(host.textContent).toContain("Nije podešeno"); // BAR — no route row at all
     expect(host.textContent).toContain("Štampač nedostupan"); // RECEIPT — configured but agent reports it missing
@@ -192,7 +298,7 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
     ];
     await mount();
     expect(host.textContent).not.toContain("Štampač nedostupan");
-    const readyBadges = [...host.querySelectorAll("span")].filter((el) => el.textContent?.trim() === "Spremna");
+    const readyBadges = [...host.querySelectorAll('[data-testid^="route-status-"]')].filter((el) => el.textContent?.trim() === "Spremno");
     expect(readyBadges).toHaveLength(3);
   });
 
@@ -221,7 +327,7 @@ describe("WorkstationsPanel — Printing V2 multi-route model", () => {
       }),
     ];
     await mount();
-    const readyBadges = [...host.querySelectorAll("span")].filter((el) => el.textContent?.trim() === "Spremna");
+    const readyBadges = [...host.querySelectorAll('[data-testid^="route-status-"]')].filter((el) => el.textContent?.trim() === "Spremno");
     expect(readyBadges).toHaveLength(3);
     // Every route's printer <select> should have POS-58 selected.
     const printerSelects = [...host.querySelectorAll("select")].filter((s) => [...s.options].some((o) => o.value === "POS-58"));
@@ -487,7 +593,7 @@ describe("WorkstationsPanel — Printing V2 Final (printing modes + deterministi
       }),
     ];
     await mount();
-    expect(host.textContent).toContain("Trenutna operativna uloga:");
+    expect(host.textContent).toContain("Operativna uloga");
     expect(host.textContent).toContain("Kuhinja");
   });
 

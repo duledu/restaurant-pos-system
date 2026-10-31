@@ -146,12 +146,11 @@ export const agentPrintResultSchema = z.object({
 });
 export type AgentPrintResultInput = z.infer<typeof agentPrintResultSchema>;
 
-// Faza 2C — Admin "Test Print" dugme. Namerno BEZ jobId/attemptId (test
-// štampa nikad ne postaje PrintJob red — vidi schema.prisma Workstation
-// testPrintStatus napomenu). Agent prijavljuje ishod SVOJE lokalno
-// izvedene testne štampe (WindowsPrinter.Print preko Ticket.TestPrint),
-// server samo ažurira prikazan status, ne autoritativan izvor ishoda.
+// Test prints do not create orders/PrintJob rows. requestId is the existing
+// workstation.testPrintRequestedAt timestamp, returned by heartbeat/poll.
+// Results must match the one-time claim; a late ACK cannot complete a new test.
 export const agentTestPrintResultSchema = z.object({
+  requestId: z.string().datetime(),
   status: z.enum(["SUCCEEDED", "FAILED"]),
   errorMessage: z.string().trim().max(500).optional(),
 });

@@ -26,7 +26,10 @@ export const POST = withWorkstationAuth(async (wsCtx, request) => {
   ]);
   return NextResponse.json({
     ok: true,
-    testPrintRequested: result.testPrintRequested,
+    testPrintProtocol: 2,
+    workstationId: wsCtx.workstationId,
+    testPrintRequested: request.headers.get("X-TableCore-Test-Protocol") === "2" && result.testPrintRequested,
+    testPrintRequestId: result.testPrintRequestId,
     testPrintRoute: result.testPrintRoute,
     routes,
     routeReadiness,

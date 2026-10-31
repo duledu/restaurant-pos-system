@@ -59,7 +59,7 @@ interface Workstation {
   lastPrintAt: string | null;
   testPrintRequestedAt: string | null;
   testPrintRouteType: RouteType | null;
-  testPrintStatus: "PENDING" | "SUCCEEDED" | "FAILED" | null;
+  testPrintStatus: "PENDING" | "PRINTING" | "SUCCEEDED" | "FAILED" | null;
   testPrintCompletedAt: string | null;
   testPrintError: string | null;
   revokedAt: string | null;
@@ -97,10 +97,18 @@ const ROUTE_LABEL: Record<RouteType, string> = { KITCHEN: "Kuhinja", BAR: "Šank
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 
 async function apiFetch(url: string, options?: RequestInit) {
-  const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
-  return body;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(url, { ...options, cache: "no-store", signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...options?.headers } });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error ?? `Greška (${res.status})`);
+    return body;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("Server nije odgovorio u roku od 10 sekundi. Ishod zahteva nije poznat; proverite status i papir pre ponovnog testa.");
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
 function formatDateTime(iso: string | null): string {
@@ -241,6 +249,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const [pendingPairings, setPendingPairings] = useState<PendingPairing[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -306,7 +315,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   const load = useCallback(async () => {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
-    setError(null);
+    setRefreshError(null);
     try {
       const res = await apiFetch("/api/admin/workstations");
       setWorkstationList(res.workstations ?? []);
@@ -328,7 +337,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         .then((r) => setAmbiguityJobs(r.jobs ?? []))
         .catch(() => {/* noop; banner quietly hides until next successful poll */});
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Greška pri učitavanju radnih stanica");
+      setRefreshError(e instanceof Error ? e.message : "Greška pri učitavanju radnih stanica");
     } finally {
       setLoading(false);
       loadInFlightRef.current = false;
@@ -363,6 +372,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   // state) so the resolver stays stable across React renders and
   // doesn't re-trigger the Promise.
   const testConfirmResolveRef = useRef<((v: boolean) => void) | null>(null);
+  const testInFlightRef = useRef(false);
   const testConfirmCtxRef = useRef<{ routeLabel: string; printerName: string; paperWidthMm: number } | null>(null);
   async function acknowledgeAmbiguity(jobId: string, decision: "PRINTED" | "REPRINT", idempotencyKey: string) {
     if (inFlightAmbiguityRef.current.has(jobId)) return;
@@ -420,27 +430,35 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
   //     (runs the test remotely via the Agent, requires the operator to
   //     walk to the printer to verify the physical output).
   async function testPrint(workstationId: string, type: RouteType) {
+    if (testInFlightRef.current) return;
+    testInFlightRef.current = true;
     const key = `${workstationId}:${type}`;
     setTestingRoute(key);
     setError(null);
     try {
       // Step 1: queue the technical test.
-      await apiFetch(`/api/admin/workstations/${workstationId}/test-print`, { method: "POST", body: JSON.stringify({ type }) });
-      // Step 2: poll up to ~12s for the Agent to report the result.
-      const deadline = Date.now() + 12000;
-      let status: "PENDING" | "SUCCEEDED" | "FAILED" | null = "PENDING";
+      const queued = (await apiFetch(`/api/admin/workstations/${workstationId}/test-print`, { method: "POST", body: JSON.stringify({ type }) })).workstation as Workstation;
+      const requestId = queued.testPrintRequestedAt;
+      if (!requestId) throw new Error("Server nije vratio identitet test štampe.");
+      setWorkstationList((list) => list.map((w) => w.id === workstationId ? { ...w, ...queued } : w));
+      // Each fetch is bounded too; elapsed time alone cannot bound a hung fetch.
+      const deadline = Date.now() + 90_000;
+      let status: Workstation["testPrintStatus"] = "PENDING";
       let errorMsg: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         const ws = (await apiFetch("/api/admin/workstations")).workstations?.find((w: Workstation) => w.id === workstationId);
+        if (!ws || ws.testPrintRequestedAt !== requestId || ws.testPrintRouteType !== type) {
+          throw new Error("Test štampe je promenjen na drugom uređaju. Proverite poslednji rezultat.");
+        }
+        setWorkstationList((list) => list.map((w) => w.id === workstationId ? ws : w));
         status = ws?.testPrintStatus ?? null;
         errorMsg = ws?.testPrintError ?? null;
         if (status === "SUCCEEDED" || status === "FAILED") break;
       }
       // Step 3 + 4: branch on the result.
       if (status !== "SUCCEEDED") {
-        setError(errorMsg ? `Test štampa nije uspela: ${errorMsg}` : "Test štampa još uvek traje — proverite štampač i pokušajte ponovo.");
-        await load();
+        setError(errorMsg ? `Test štampa nije potvrđena: ${errorMsg}` : "Agent nije potvrdio ishod. Proverite Windows servis, vezu i papir pre novog testa. Štampa neće biti automatski ponovljena.");
         return;
       }
       // PRINTING P0 — TableCore-branded modal replaces raw window.confirm
@@ -475,6 +493,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
       setError(e instanceof Error ? e.message : "Greška pri zahtevu za test štampu");
     } finally {
       setTestingRoute(null);
+      testInFlightRef.current = false;
     }
   }
 
@@ -938,7 +957,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
           <button
             type="button"
             onClick={() => testPrint(w.id, type)}
-            disabled={revoked || !route?.printerName || isTesting}
+            disabled={revoked || !route?.printerName || !!testingRoute || w.testPrintStatus === "PENDING" || w.testPrintStatus === "PRINTING"}
             className="inline-flex h-9 shrink-0 items-center justify-center rounded-md border border-ink/15 bg-white px-3.5 text-xs font-semibold text-ink shadow-sm transition-colors hover:border-gold hover:bg-gold hover:text-white focus:outline-none focus:ring-2 focus:ring-gold/40 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {isTesting ? "Testiranje…" : `Testiraj ${ROUTE_LABEL[type].toLowerCase()}`}
@@ -992,6 +1011,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
               {w.location.name}
               {w.agentVersion ? <> · Agent v{w.agentVersion}</> : null}
             </p>
+            <p className="mt-1 text-xs text-inkSoft">Status veze potvrđuje kontakt agenta. Rad štampača proverite test štampom i fizičkim papirom.</p>
           </div>
           <span
             data-testid={`ws-status-${w.id}`}
@@ -1037,17 +1057,18 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
                       : "text-ink/80"
                 }
               >
-                {w.testPrintStatus === "PENDING" && "Čeka se sledeći kontakt agenta…"}
+                {w.testPrintStatus === "PENDING" && "Čeka se da servis preuzme test (najviše 90 sekundi)… Ako nema napretka, proverite da Admin i servis koriste isti server i verziju API-ja."}
+                {w.testPrintStatus === "PRINTING" && "Agent je preuzeo test; čeka se ishod štampe…"}
                 {w.testPrintStatus === "SUCCEEDED" && (
                   <>
-                    Uspela{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
+                    Predato Windows štampi — proverite papir{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
                     {" · "}
                     {formatDateTime(w.testPrintCompletedAt)}
                   </>
                 )}
                 {w.testPrintStatus === "FAILED" && (
                   <>
-                    Nije uspela{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
+                    Nije potvrđena{w.testPrintRouteType ? ` · ${ROUTE_LABEL[w.testPrintRouteType]}` : ""}
                     {w.testPrintError ? ` · ${w.testPrintError}` : ""}
                   </>
                 )}
@@ -1263,7 +1284,7 @@ export function WorkstationsPanel({ locationId }: { locationId: string | null })
         )}
       </div>
 
-      {error && <div className="mb-3 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</div>}
+      {(error || refreshError) && <div role="alert" className="mb-3 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error || refreshError}</div>}
 
       {/* PRINTING P0 — operator reconciliation surface. Plain-language
           phrasing: "Nije moguće potvrditi da li je tiket odštampan" —

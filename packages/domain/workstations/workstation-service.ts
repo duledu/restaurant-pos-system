@@ -41,7 +41,7 @@ import {
   type SetPrintingModeInput,
 } from "@rcs/shared";
 import { recordAuditEntry } from "../audit/audit-service";
-import { lockPrintLocation } from "../printing/print-policy";
+import { AGENT_ACTIVE_WINDOW_MS, lockPrintLocation } from "../printing/print-policy";
 
 const WORKSTATIONS_MANAGE = "workstations.manage";
 
@@ -242,6 +242,7 @@ export async function listPendingPairings(ctx: AuthContext) {
 
 export async function listWorkstations(ctx: AuthContext) {
   requirePermission(ctx, WORKSTATIONS_MANAGE);
+  await expireTestPrints(scopeToRestaurant(ctx));
   return prisma.workstation.findMany({
     where: scopeToRestaurant(ctx),
     select: WORKSTATION_PUBLIC_SELECT,
@@ -531,85 +532,100 @@ export async function getPrintingMode(ctx: AuthContext) {
   return restaurant?.printingMode ?? "CENTRAL_ROUTING";
 }
 
-/**
- * Faza 2C — Admin "Test Print" dugme. Namerno NE kreira PrintJob/Order
- * (test štampa ne sme dotaći accounting/izveštaje) — samo postavlja
- * zastavicu na Workstation red koju agent vidi kroz SLEDEĆI heartbeat/poll
- * (recordHeartbeat/isTestPrintPending ispod vraćaju testPrintRequested +
- * testPrintRoute) i lokalno štampa preko WindowsPrinter.Print, van
- * AgentRunner/AgentDatabase puta za prave tikete. Idempotentno na uzastopne
- * klikove dok je prethodni zahtev još PENDING — jednostavno ponovo
- * postavlja isto stanje (agent štampa najviše jednom po heartbeat/poll
- * ciklusu u kom primeti zastavicu, ne akumulira duple zahteve).
- *
- * Printing V2 — mora se navesti KOJU rutu (KITCHEN/BAR/RECEIPT) testirati,
- * jer jedan agent sad može imati više različitih štampača; agent lokalno
- * bira odgovarajući štampač/širinu iz SVOJE Routes liste po ovom tipu
- * (server ovde ne šalje printerName — samo tip, isti princip kao pravi
- * poslovi: agent je jedini koji sme fizički da bira štampač). Ruta mora već
- * biti podešena (imati printerName) — testiranje neupisane rute nema šta
- * da testira.
- */
+// Test requests use the existing workstation fields, never a synthetic order.
+// The timestamp is a request identity; an atomic claim permits ONE submission.
+const TEST_PRINT_TIMEOUT_MS = 90_000;
+const TEST_PRINT_TIMEOUT = "Agent nije potvrdio test u roku od 90 sekundi. Ishod nije poznat; proverite servis, vezu i papir pre novog testa.";
+
+async function expireTestPrints(where: Prisma.WorkstationWhereInput) {
+  // Legacy/incomplete rows must never produce a true signal without an ID/route.
+  // Surface a terminal, actionable failure instead of making the agent wait.
+  await prisma.workstation.updateMany({
+    where: { ...where, testPrintStatus: "PENDING",
+      OR: [{ testPrintRequestedAt: null }, { testPrintRouteType: null }] },
+    data: { testPrintStatus: "FAILED", testPrintCompletedAt: new Date(),
+      testPrintError: "Test nema validan identitet ili rutu. Proverite verziju backend-a, pa pokrenite novi test." },
+  });
+  await prisma.workstation.updateMany({
+    where: { ...where, testPrintStatus: { in: ["PENDING", "PRINTING"] }, testPrintRequestedAt: { lt: new Date(Date.now() - TEST_PRINT_TIMEOUT_MS) } },
+    data: { testPrintStatus: "FAILED", testPrintCompletedAt: new Date(), testPrintError: TEST_PRINT_TIMEOUT },
+  });
+}
+
+function supportsSafeTestPrint(version: string | null) {
+  const match = version?.match(/^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?(?:\+[\w.-]+)?$/);
+  return !!match && (Number(match[1]) > 1 || (Number(match[1]) === 1 &&
+    (Number(match[2]) > 0 || Number(match[3]) > 0 || !match[4] || Number(match[4]) >= 3)));
+}
+
 export async function requestTestPrint(ctx: AuthContext, workstationId: string, routeType: PrintRouteType) {
   requirePermission(ctx, WORKSTATIONS_MANAGE);
   const type = printRouteTypeSchema.parse(routeType);
-
-  const workstation = await prisma.workstation.findFirst({
-    where: { id: workstationId, ...scopeToRestaurant(ctx) },
-    select: { id: true, locationId: true, revokedAt: true, isEnabled: true },
+  return prisma.$transaction(async (tx) => {
+    const workstation = await tx.workstation.findFirst({ where: { id: workstationId, ...scopeToRestaurant(ctx) } });
+    if (!workstation) throw new Error("Radna stanica nije pronađena");
+    requireLocationAccess(ctx, workstation.locationId);
+    await lockPrintLocation(tx, ctx.restaurantId, workstation.locationId);
+    const current = await tx.workstation.findUniqueOrThrow({ where: { id: workstationId } });
+    if (current.revokedAt || !current.isEnabled) throw new Error("Radna stanica je opozvana ili onemogućena");
+    if (!supportsSafeTestPrint(current.agentVersion)) {
+      throw new Error("Za bezbednu test štampu instalirajte Print Agent v1.0.0-rc.3 ili noviji i pokrenite Windows servis.");
+    }
+    if ((current.testPrintStatus === "PENDING" || current.testPrintStatus === "PRINTING") &&
+        current.testPrintRequestedAt && Date.now() - current.testPrintRequestedAt.getTime() < TEST_PRINT_TIMEOUT_MS) {
+      if (current.testPrintRouteType !== type) throw new Error("Test druge rute je u toku. Sačekajte njegov ishod.");
+      return tx.workstation.findUniqueOrThrow({ where: { id: workstationId }, select: WORKSTATION_PUBLIC_SELECT });
+    }
+    if (!current.lastSeenAt || Date.now() - current.lastSeenAt.getTime() >= AGENT_ACTIVE_WINDOW_MS) {
+      throw new Error("Agent nema svež kontakt sa ovim backend-om. Proverite Windows servis i adresu servera pre testa.");
+    }
+    const route = await tx.workstationPrintRoute.findUnique({ where: { workstationId_type: { workstationId, type } } });
+    if (!route?.printerName || !route.isEnabled) throw new Error("Ova ruta nema omogućen štampač — podesi štampač pre testa");
+    if (route.visibleToService === false && route.visibleToServiceAt &&
+        Date.now() - route.visibleToServiceAt.getTime() < AGENT_ACTIVE_WINDOW_MS) {
+      throw new Error("Windows servis je prijavio da ne vidi štampač ove rute. Proverite pristup štampaču pre testa.");
+    }
+    // Monotonic identity even for two requests within the same millisecond.
+    const now = new Date(Math.max(Date.now(), (current.testPrintRequestedAt?.getTime() ?? 0) + 1));
+    const updated = await tx.workstation.update({
+      where: { id: workstationId },
+      data: { testPrintRequestedAt: now, testPrintRequestedBy: ctx.employeeId, testPrintRouteType: type,
+        testPrintStatus: "PENDING", testPrintCompletedAt: null, testPrintError: null },
+      select: WORKSTATION_PUBLIC_SELECT,
+    });
+    await recordAuditEntry(ctx, { entityType: "Workstation", entityId: workstationId,
+      action: "workstation.test_print_requested", newValue: { requestedAt: now, type }, locationId: workstation.locationId }, tx);
+    return updated;
   });
-  if (!workstation) throw new Error("Radna stanica nije pronađena");
-  if (workstation.revokedAt || !workstation.isEnabled) {
-    throw new Error("Radna stanica je opozvana ili onemogućena — test štampa nije moguća");
-  }
-  const route = await prisma.workstationPrintRoute.findUnique({
-    where: { workstationId_type: { workstationId, type } },
-    select: { printerName: true },
-  });
-  if (!route?.printerName) {
-    throw new Error("Ova ruta nema izabran štampač — podesi štampač pre testa");
-  }
-
-  const now = new Date();
-  const updated = await prisma.workstation.update({
-    where: { id: workstationId },
-    data: {
-      testPrintRequestedAt: now,
-      testPrintRequestedBy: ctx.employeeId,
-      testPrintRouteType: type,
-      testPrintStatus: "PENDING",
-      testPrintCompletedAt: null,
-      testPrintError: null,
-    },
-    select: WORKSTATION_PUBLIC_SELECT,
-  });
-
-  await recordAuditEntry(ctx, {
-    entityType: "Workstation",
-    entityId: workstationId,
-    action: "workstation.test_print_requested",
-    newValue: { requestedAt: now },
-    locationId: workstation.locationId,
-  });
-
-  return updated;
 }
 
-/**
- * Agent-strana — prijavljuje ishod SVOJE lokalno izvedene testne štampe.
- * Server ovde NE presuđuje da li je štampa stvarno uspela (isto pravilo
- * kao SUBMITTED_TO_SPOOLER za prave tikete — "predato spuleru" nije
- * "papir izašao"), samo pamti šta je agent prijavio radi Admin prikaza.
- */
+export async function getAgentDiagnostics(ctx: WorkstationAuthContext) {
+  return prisma.workstation.findFirstOrThrow({
+    where: { id: ctx.workstationId, restaurantId: ctx.restaurantId, locationId: ctx.locationId,
+      isEnabled: true, revokedAt: null },
+    select: WORKSTATION_PUBLIC_SELECT,
+  });
+}
+
+export async function claimTestPrint(wsCtx: WorkstationAuthContext, requestId: string): Promise<boolean> {
+  const claimed = await prisma.workstation.updateMany({
+    where: { id: wsCtx.workstationId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId,
+      isEnabled: true, revokedAt: null, testPrintStatus: "PENDING",
+      testPrintRequestedAt: { equals: new Date(requestId), gte: new Date(Date.now() - TEST_PRINT_TIMEOUT_MS) } },
+    data: { testPrintStatus: "PRINTING" },
+  });
+  // Never replay a claim grant, even after a lost response. Ambiguity is safe.
+  return claimed.count === 1;
+}
+
 export async function recordTestPrintResult(wsCtx: WorkstationAuthContext, input: AgentTestPrintResultInput): Promise<void> {
   const parsed = agentTestPrintResultSchema.parse(input);
   await prisma.workstation.updateMany({
-    where: { id: wsCtx.workstationId },
-    data: {
-      testPrintStatus: parsed.status,
-      testPrintCompletedAt: new Date(),
-      testPrintError: parsed.status === "FAILED" ? (parsed.errorMessage ?? "Nepoznata greška") : null,
-    },
+    where: { id: wsCtx.workstationId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId,
+      testPrintRequestedAt: new Date(parsed.requestId),
+      OR: [{ testPrintStatus: "PRINTING" }, { testPrintStatus: "FAILED", testPrintError: TEST_PRINT_TIMEOUT }] },
+    data: { testPrintStatus: parsed.status, testPrintCompletedAt: new Date(),
+      testPrintError: parsed.status === "FAILED" ? (parsed.errorMessage ?? "Nepoznata greška") : null },
   });
 }
 
@@ -763,6 +779,7 @@ export interface HeartbeatResult {
   // postojeći poll, bez novog endpoint-a) i, ako je true, lokalno štampa
   // testni tiket pa prijavljuje ishod preko recordTestPrintResult iznad.
   testPrintRequested: boolean;
+  testPrintRequestId: string | null;
   // Printing V2 — koju rutu da agent testira (bira odgovarajući štampač iz
   // SVOJE lokalne Routes liste po ovom tipu); null kad testPrintRequested
   // je false, ili (odbrambeno) ako je testPrintStatus PENDING bez ikad
@@ -841,12 +858,8 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
     }
   }
 
-  const current = await prisma.workstation.findUnique({
-    where: { id: wsCtx.workstationId },
-    select: { testPrintStatus: true, testPrintRouteType: true },
-  });
-  const pending = current?.testPrintStatus === "PENDING";
-  return { testPrintRequested: pending, testPrintRoute: pending ? (current?.testPrintRouteType ?? null) : null };
+  const test = await isTestPrintPending(wsCtx);
+  return { testPrintRequested: test.pending, testPrintRoute: test.route, testPrintRequestId: test.requestId };
 }
 
 /**
@@ -860,13 +873,14 @@ export async function recordHeartbeat(wsCtx: WorkstationAuthContext, input: Work
  * pretpostavljaju nepromenjenim. Pozivalac (poll rute) kombinuje oba
  * rezultata u jedan JSON odgovor.
  */
-export async function isTestPrintPending(wsCtx: WorkstationAuthContext): Promise<{ pending: boolean; route: PrintRouteType | null }> {
-  const current = await prisma.workstation.findUnique({
-    where: { id: wsCtx.workstationId },
-    select: { testPrintStatus: true, testPrintRouteType: true },
-  });
-  const pending = current?.testPrintStatus === "PENDING";
-  return { pending, route: pending ? (current?.testPrintRouteType ?? null) : null };
+export async function isTestPrintPending(wsCtx: WorkstationAuthContext): Promise<{ pending: boolean; route: PrintRouteType | null; requestId: string | null }> {
+  const where = { id: wsCtx.workstationId, restaurantId: wsCtx.restaurantId, locationId: wsCtx.locationId };
+  await expireTestPrints(where);
+  const current = await prisma.workstation.findFirst({ where,
+    select: { testPrintStatus: true, testPrintRouteType: true, testPrintRequestedAt: true } });
+  const pending = current?.testPrintStatus === "PENDING" && !!current.testPrintRequestedAt && !!current.testPrintRouteType;
+  return { pending, route: pending ? current.testPrintRouteType : null,
+    requestId: pending ? (current.testPrintRequestedAt?.toISOString() ?? null) : null };
 }
 
 export interface AgentRoute {
